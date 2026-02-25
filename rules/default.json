@@ -1,0 +1,84 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "description": "YOLT default safety rules"
+  },
+  "_safe_imports": [
+    "json", "csv", "re", "datetime", "collections", "math",
+    "itertools", "functools", "operator", "string", "textwrap",
+    "pathlib", "typing", "dataclasses", "enum", "abc",
+    "copy", "pprint", "io", "sys", "os.path",
+    "hashlib", "hmac", "base64", "binascii",
+    "statistics", "decimal", "fractions",
+    "argparse", "configparser",
+    "logging", "warnings",
+    "time", "calendar",
+    "struct", "array",
+    "uuid", "secrets",
+    "difflib", "unittest.mock",
+    "contextlib", "traceback",
+    "dis", "ast", "inspect",
+    "pdb", "profile", "cProfile",
+    "gzip", "bz2", "lzma", "zipfile", "tarfile"
+  ],
+  "aws_boto3": {
+    "description": "AWS SDK (boto3/botocore) patterns",
+    "trigger_imports": ["boto3", "botocore"],
+    "safe_methods": [
+      "describe_*", "list_*", "get_*", "head_*",
+      "lookup_*", "search_*", "filter_*",
+      "batch_get_*", "can_paginate",
+      "generate_presigned_url",
+      "get_paginator", "get_waiter"
+    ],
+    "destructive_methods": [
+      "delete_*", "remove_*",
+      "put_*", "create_*", "update_*", "modify_*",
+      "terminate_*", "stop_*", "start_*",
+      "run_*", "execute_*", "invoke_*",
+      "deregister_*", "detach_*", "attach_*",
+      "reboot_*", "release_*",
+      "revoke_*", "disable_*", "enable_*",
+      "tag_*", "untag_*",
+      "send_*", "publish_*"
+    ]
+  },
+  "file_io": {
+    "description": "File system operations",
+    "destructive_calls": [
+      "os.remove", "os.unlink", "os.rmdir", "os.removedirs",
+      "os.rename", "os.renames", "os.replace",
+      "os.makedirs", "os.mkdir",
+      "shutil.rmtree", "shutil.move", "shutil.copy", "shutil.copy2",
+      "shutil.copytree"
+    ],
+    "check_open_mode": true,
+    "destructive_open_modes": ["w", "wb", "a", "ab", "w+", "wb+", "r+", "rb+", "x", "xb"]
+  },
+  "subprocess": {
+    "description": "Subprocess/shell execution",
+    "destructive_calls": [
+      "subprocess.run", "subprocess.call", "subprocess.check_call",
+      "subprocess.check_output", "subprocess.Popen",
+      "os.system", "os.popen", "os.exec*", "os.spawn*"
+    ]
+  },
+  "network": {
+    "description": "Network operations",
+    "safe_calls": ["requests.get", "httpx.get"],
+    "destructive_calls": [
+      "requests.post", "requests.put", "requests.delete", "requests.patch",
+      "httpx.post", "httpx.put", "httpx.delete", "httpx.patch",
+      "smtplib.SMTP", "smtplib.SMTP_SSL",
+      "urllib.request.urlopen"
+    ]
+  },
+  "database": {
+    "description": "Database operations",
+    "destructive_calls": [
+      "sqlite3.connect",
+      "pymongo.MongoClient",
+      "redis.Redis", "redis.StrictRedis"
+    ]
+  }
+}

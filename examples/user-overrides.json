@@ -1,0 +1,18 @@
+{
+  "_comment": "Place this file at ~/.claude/yolt/rules.json to override defaults",
+  "_safe_imports": [
+    "pandas", "numpy", "matplotlib"
+  ],
+  "aws_boto3": {
+    "safe_methods": [
+      "describe_*", "list_*", "get_*", "head_*",
+      "start_query_execution"
+    ]
+  },
+  "custom_internal": {
+    "description": "Example: your internal SDK patterns",
+    "trigger_imports": ["mycompany_sdk"],
+    "safe_methods": ["fetch_*", "query_*"],
+    "destructive_methods": ["delete_*", "drop_*"]
+  }
+}
