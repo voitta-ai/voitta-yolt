@@ -126,12 +126,16 @@ class SafetyAnalyzer(ast.NodeVisitor):
             )
             for pattern in destructive_patterns:
                 if self._matches_pattern(call_name, pattern):
+                    source_line = ""
+                    if hasattr(self, "source_lines") and 0 < node.lineno <= len(self.source_lines):
+                        source_line = self.source_lines[node.lineno - 1].strip()
                     self.findings.append({
                         "type": "destructive",
                         "call": call_name,
                         "pattern": pattern,
                         "category": category,
                         "line": node.lineno,
+                        "source_line": source_line,
                     })
                     return
 
@@ -155,12 +159,16 @@ class SafetyAnalyzer(ast.NodeVisitor):
             return
 
         if mode in destructive_modes:
+            source_line = ""
+            if hasattr(self, "source_lines") and 0 < node.lineno <= len(self.source_lines):
+                source_line = self.source_lines[node.lineno - 1].strip()
             self.findings.append({
                 "type": "destructive",
                 "call": "open(mode='{}')".format(mode),
                 "pattern": "open with mode '{}'".format(mode),
                 "category": "file_io",
                 "line": node.lineno,
+                "source_line": source_line,
             })
 
     def analyze(self, source):
@@ -175,6 +183,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
             }
             return retval
 
+        self.source_lines = source.splitlines()
         self.visit(tree)
 
         is_safe = len(self.findings) == 0
@@ -287,11 +296,13 @@ def run_hook():
     else:
         lines = ["YOLT: Destructive operations detected:"]
         for finding in result["findings"]:
-            lines.append(
-                "  Line {}: {} ({})".format(
-                    finding["line"], finding["call"], finding["category"]
-                )
+            line_info = "  Line {}: {} ({})".format(
+                finding["line"], finding["call"], finding["category"]
             )
+            source_line = finding.get("source_line", "")
+            if source_line:
+                line_info += "\n    > {}".format(source_line)
+            lines.append(line_info)
         reason = "\n".join(lines)
         response = make_hook_response("ask", reason)
         print(json.dumps(response))
