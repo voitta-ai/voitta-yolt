@@ -36,6 +36,13 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
+> **Important:** You must **not** have `Bash(python3:*)` in your
+> `settings.local.json` allow list. Static allow rules take precedence over
+> PreToolUse hooks — if `python3` is pre-allowed, YOLT's hook never fires
+> and all scripts (including destructive ones) run without analysis.
+> YOLT replaces the need for that allow rule: safe scripts are auto-approved
+> by the hook's `permissionDecision: "allow"` response.
+
 ## Rules
 
 Default rules cover:
