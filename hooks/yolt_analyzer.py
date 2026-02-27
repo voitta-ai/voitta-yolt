@@ -208,8 +208,33 @@ class SafetyAnalyzer(ast.NodeVisitor):
         return retval
 
 
+def extract_heredoc_script(command):
+    """Extract Python source from a heredoc command like: python3 << 'EOF'\n...\nEOF"""
+    import re
+    # Match heredoc operator with optional quoting of delimiter
+    # Supports: << EOF, << 'EOF', << "EOF", <<-EOF, <<-'EOF', <<-"EOF"
+    match = re.match(r"python3\s+<<-?\s*['\"]?(\w+)['\"]?\s*\n", command)
+    if not match:
+        return None
+    delimiter = match.group(1)
+    # Find the closing delimiter on its own line
+    body_start = match.end()
+    closing_pattern = re.compile(r"^\s*" + re.escape(delimiter) + r"\s*$", re.MULTILINE)
+    closing_match = closing_pattern.search(command, body_start)
+    if not closing_match:
+        return None
+    retval = command[body_start:closing_match.start()]
+    return retval
+
+
 def extract_script_from_command(command):
     """Extract the Python script path or inline code from a command string."""
+    # Check for heredoc before shlex.split (which doesn't understand heredocs)
+    if "<<" in command:
+        heredoc_source = extract_heredoc_script(command)
+        if heredoc_source is not None:
+            return "inline", heredoc_source
+
     try:
         parts = shlex.split(command)
     except ValueError:
