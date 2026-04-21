@@ -182,6 +182,25 @@ python3 hooks/shell_classifier.py 'for svc in $(aws ecs list-services --cluster 
 Both return JSON. The shell classifier's output shape is
 `{"decision": "safe|unsafe|unknown", "reason": "..."}`.
 
+## Tests and demo
+
+Unit tests cover the decomposition helpers, the classifier, and the hook
+entry point. They use stdlib `unittest` only:
+
+```bash
+python3 -m unittest discover -v tests
+```
+
+For a visual check across a broad range of representative commands (not
+asserted, just printed), run:
+
+```bash
+./examples/demo.sh
+```
+
+This prints the decision (`safe` / `unsafe` / `unknown`) for each
+command, colorized when the terminal supports it.
+
 ## Design principles
 
 - **Zero dependencies** - stdlib only (`ast`, `json`, `fnmatch`, `shlex`, `re`)
