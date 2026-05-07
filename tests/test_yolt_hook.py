@@ -237,5 +237,50 @@ class TestHookEndToEnd(unittest.TestCase):
         self.assertIn("os.system", reason)
 
 
+class TestHookAllowlistDiscovery(unittest.TestCase):
+    """The hook reads the user's settings.json `permissions.allow` Bash()
+    entries and uses them as a secondary upgrade pass for unknown atoms.
+    Tests scope the lookup via the `cwd` field in the hook payload so
+    they don't depend on the real test runner's home directory."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="yolt-hook-cwd-")
+        self.cwd = Path(self._tmp)
+        (self.cwd / ".claude").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_settings(self, allow):
+        path = self.cwd / ".claude" / "settings.json"
+        path.write_text(json.dumps({"permissions": {"allow": allow}}))
+
+    def _decision(self, command):
+        result = HookSubprocess.run({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(self.cwd),
+        })
+        resp = HookSubprocess.response_of(result)
+        if resp is None:
+            retval = None
+            return retval
+        retval = resp["hookSpecificOutput"]["permissionDecision"]
+        return retval
+
+    def test_unknown_atom_upgraded_via_cwd_settings(self):
+        self._write_settings(["Bash(yolt_test_mycli *)"])
+        self.assertEqual(self._decision("yolt_test_mycli foo bar"), "allow")
+
+    def test_unknown_atom_without_match_stays_silent(self):
+        self._write_settings(["Bash(yolt_test_othertool *)"])
+        self.assertIsNone(self._decision("yolt_test_mycli foo bar"))
+
+    def test_allowlist_does_not_override_unsafe(self):
+        self._write_settings(["Bash(rm *)"])
+        self.assertEqual(self._decision("rm -rf /tmp/foo"), "ask")
+
+
 if __name__ == "__main__":
     unittest.main()

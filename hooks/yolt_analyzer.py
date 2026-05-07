@@ -370,7 +370,7 @@ def run_hook():
         if str(hooks_dir) not in sys.path:
             sys.path.insert(0, str(hooks_dir))
         from shell_classifier import (
-            ShellClassifier, load_shell_rules,
+            ShellClassifier, load_shell_rules, load_allow_patterns,
             DECISION_SAFE, DECISION_UNSAFE,
         )
     except ImportError:
@@ -385,11 +385,27 @@ def run_hook():
         user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
     )
 
+    # The user's settings.json `permissions.allow` Bash() entries become a
+    # secondary upgrade pass: any decomposed atom that the rule classifier
+    # would call `unknown` is upgraded to `safe` if its segment matches one
+    # of the user's allow patterns. Unsafe is never weakened.
+    cwd_str = hook_input.get("cwd") or os.getcwd()
+    cwd = Path(cwd_str)
+    allow_patterns = load_allow_patterns([
+        Path.home() / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.local.json",
+    ])
+
     def _python_factory():
         retval = SafetyAnalyzer(py_rules)
         return retval
 
-    classifier = ShellClassifier(shell_rules, python_analyzer_factory=_python_factory)
+    classifier = ShellClassifier(
+        shell_rules,
+        python_analyzer_factory=_python_factory,
+        allow_patterns=allow_patterns,
+    )
     decision, reason = classifier.classify(command)
 
     if decision == DECISION_SAFE:

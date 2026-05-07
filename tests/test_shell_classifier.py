@@ -25,7 +25,9 @@ from shell_classifier import (  # noqa: E402
     aggregate_decisions,
     check_unsafe_flags,
     extract_substitutions,
+    load_allow_patterns,
     load_shell_rules,
+    match_allow_patterns,
     parse_aws_positionals,
     split_top_level,
     strip_leading_keywords_and_assignments,
@@ -498,6 +500,181 @@ class TestClassifyScenarios(unittest.TestCase):
         # `echo` alone is safe, but the classifier must not allow
         # `echo x > /etc/profile` to ride on that classification.
         self.assertDecision("echo x > /etc/profile", DECISION_UNKNOWN)
+
+
+class TestLoadAllowPatterns(unittest.TestCase):
+    """`load_allow_patterns` reads Claude Code settings.json files and
+    returns the unwrapped Bash() inner patterns from `permissions.allow`."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="yolt-allow-")
+        self.tmp = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, name, data):
+        path = self.tmp / name
+        path.write_text(json.dumps(data))
+        retval = path
+        return retval
+
+    def test_extracts_bash_inner_patterns(self):
+        path = self._write("settings.json", {
+            "permissions": {
+                "allow": [
+                    "Bash(aws s3 ls*)",
+                    "Bash(env)",
+                    "Read",
+                    "mcp__github__get_file_contents",
+                ]
+            }
+        })
+        patterns = load_allow_patterns([path])
+        self.assertEqual(patterns, ["aws s3 ls*", "env"])
+
+    def test_missing_file_skipped(self):
+        patterns = load_allow_patterns([self.tmp / "does-not-exist.json"])
+        self.assertEqual(patterns, [])
+
+    def test_malformed_json_skipped(self):
+        path = self.tmp / "broken.json"
+        path.write_text("{not json")
+        patterns = load_allow_patterns([path])
+        self.assertEqual(patterns, [])
+
+    def test_dedupes_across_files(self):
+        a = self._write("a.json", {
+            "permissions": {"allow": ["Bash(env)", "Bash(ls*)"]}
+        })
+        b = self._write("b.json", {
+            "permissions": {"allow": ["Bash(ls*)", "Bash(cat*)"]}
+        })
+        patterns = load_allow_patterns([a, b])
+        self.assertEqual(patterns, ["env", "ls*", "cat*"])
+
+    def test_no_permissions_key(self):
+        path = self._write("nop.json", {"env": {"FOO": "bar"}})
+        patterns = load_allow_patterns([path])
+        self.assertEqual(patterns, [])
+
+    def test_empty_inner_pattern_skipped(self):
+        path = self._write("empty.json", {
+            "permissions": {"allow": ["Bash()", "Bash(  )", "Bash(env)"]}
+        })
+        patterns = load_allow_patterns([path])
+        self.assertEqual(patterns, ["env"])
+
+    def test_non_string_entries_skipped(self):
+        path = self._write("mixed.json", {
+            "permissions": {"allow": ["Bash(env)", 42, None, ["Bash(x)"]]}
+        })
+        patterns = load_allow_patterns([path])
+        self.assertEqual(patterns, ["env"])
+
+
+class TestMatchAllowPatterns(unittest.TestCase):
+    def test_no_patterns_returns_none(self):
+        self.assertIsNone(match_allow_patterns("aws s3 ls", []))
+
+    def test_exact_match(self):
+        self.assertEqual(match_allow_patterns("env", ["env"]), "env")
+
+    def test_glob_prefix_match(self):
+        self.assertEqual(
+            match_allow_patterns("aws s3 ls --recursive s3://b/", ["aws s3 ls*"]),
+            "aws s3 ls*",
+        )
+
+    def test_glob_with_internal_wildcard(self):
+        self.assertEqual(
+            match_allow_patterns("aws iam list-roles", ["aws * list*"]),
+            "aws * list*",
+        )
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(
+            match_allow_patterns("rm -rf /", ["aws *", "ls*"]),
+        )
+
+    def test_strips_whitespace(self):
+        self.assertEqual(
+            match_allow_patterns("  env  ", ["env"]),
+            "env",
+        )
+
+
+class TestClassifierAllowPatterns(unittest.TestCase):
+    """The classifier upgrades `unknown` segments to `safe` when they match
+    a user allow pattern, but never weakens `unsafe`."""
+
+    def _make(self, allow_patterns):
+        shell_rules = load_shell_rules(REPO_ROOT / "rules")
+        py_rules = load_py_rules(REPO_ROOT / "rules")
+
+        def _factory():
+            retval = SafetyAnalyzer(py_rules)
+            return retval
+
+        retval = ShellClassifier(
+            shell_rules,
+            python_analyzer_factory=_factory,
+            allow_patterns=allow_patterns,
+        )
+        return retval
+
+    def test_unknown_command_upgraded_to_safe(self):
+        classifier = self._make(["mycli *"])
+        decision, reason = classifier.classify("mycli foo --bar")
+        self.assertEqual(decision, DECISION_SAFE)
+        self.assertIn("mycli *", reason)
+
+    def test_unknown_aws_op_upgraded(self):
+        # An aws operation the rules don't know about, but the user trusts.
+        classifier = self._make(["aws * weird-op*"])
+        decision, _ = classifier.classify("aws ec2 weird-op --flag")
+        self.assertEqual(decision, DECISION_SAFE)
+
+    def test_unsafe_not_weakened_by_allowlist(self):
+        # Even a permissive `Bash(aws *)` does not turn `aws iam delete-user`
+        # into safe - YOLT keeps flagging mutating calls.
+        classifier = self._make(["aws *"])
+        decision, _ = classifier.classify("aws iam delete-user --user-name foo")
+        self.assertEqual(decision, DECISION_UNSAFE)
+
+    def test_unsafe_in_compound_not_weakened(self):
+        classifier = self._make(["aws *", "rm *"])
+        decision, _ = classifier.classify("aws s3 ls && rm -rf /etc")
+        self.assertEqual(decision, DECISION_UNSAFE)
+
+    def test_no_allowlist_match_stays_unknown(self):
+        classifier = self._make(["aws *"])
+        decision, _ = classifier.classify("somecommand_unknown")
+        self.assertEqual(decision, DECISION_UNKNOWN)
+
+    def test_decomposed_atoms_match_allowlist(self):
+        # Outer command would not match `Bash(aws s3 ls*)` because of the
+        # `for` wrapper - this is the case where YOLT's decomposition
+        # plus allowlist upgrade earns its keep.
+        classifier = self._make(["aws s3 ls*"])
+        decision, _ = classifier.classify(
+            "for b in foo bar; do aws s3 ls s3://$b/; done"
+        )
+        self.assertEqual(decision, DECISION_SAFE)
+
+    def test_writes_to_file_upgraded_when_allowlisted(self):
+        # `echo x > /etc/profile` is unknown by default (writes_to_file).
+        # If user has Bash(echo *), allowlist upgrades to safe.
+        classifier = self._make(["echo *"])
+        decision, _ = classifier.classify("echo x > /etc/profile")
+        self.assertEqual(decision, DECISION_SAFE)
+
+    def test_empty_allow_patterns_unchanged_behavior(self):
+        classifier = self._make([])
+        decision, _ = classifier.classify("somecommand_unknown")
+        self.assertEqual(decision, DECISION_UNKNOWN)
 
 
 class TestClassifierCLI(unittest.TestCase):

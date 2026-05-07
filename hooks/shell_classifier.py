@@ -68,6 +68,74 @@ def load_shell_rules(rules_dir, user_overrides_path=None):
     return rules
 
 
+BASH_PATTERN_RE = re.compile(r"^Bash\((.*)\)$")
+
+
+def load_allow_patterns(settings_paths):
+    """Read Claude Code settings.json files and return the list of inner
+    Bash() allow patterns (the part between the parentheses).
+
+    Accepts an iterable of file paths in precedence order; later paths add
+    more patterns but never remove ones earlier paths granted. Missing
+    files and malformed JSON are silently skipped - YOLT must not break a
+    user's session by failing to parse their settings.
+
+    Each entry in `permissions.allow` is a string of the form
+    `Bash(<pattern>)`. The inner pattern uses shell glob semantics
+    (matched with fnmatch). Non-Bash entries (e.g. `Read`, `Glob`,
+    `mcp__github__get_file_contents`) are filtered out. Duplicate
+    inner patterns are deduplicated, preserving first-seen order."""
+    patterns = []
+    seen = set()
+    for path in settings_paths:
+        if not path:
+            continue
+        p = Path(path)
+        if not p.exists():
+            continue
+        try:
+            with open(p, "r") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        permissions = data.get("permissions") or {}
+        allow = permissions.get("allow") or []
+        if not isinstance(allow, list):
+            continue
+        for entry in allow:
+            if not isinstance(entry, str):
+                continue
+            m = BASH_PATTERN_RE.match(entry.strip())
+            if not m:
+                continue
+            inner = m.group(1).strip()
+            if not inner:
+                continue
+            if inner in seen:
+                continue
+            seen.add(inner)
+            patterns.append(inner)
+    retval = patterns
+    return retval
+
+
+def match_allow_patterns(command, patterns):
+    """Return the matching pattern if `command` matches any allow pattern,
+    else None. Matching is fnmatch on the whole command string against the
+    unwrapped inner pattern - the same semantics as Claude Code's built-in
+    Bash matcher applies to the outer command token."""
+    if not patterns:
+        retval = None
+        return retval
+    cmd = command.strip()
+    for pat in patterns:
+        if fnmatch(cmd, pat):
+            retval = pat
+            return retval
+    retval = None
+    return retval
+
+
 def extract_substitutions(command):
     """Extract $(...) and `...` command substitutions, replacing each with a
     placeholder and returning the inner command strings in order.
@@ -479,13 +547,14 @@ def parse_aws_positionals(cmd_args):
 class ShellClassifier:
     MAX_RECURSION_DEPTH = 8
 
-    def __init__(self, rules, python_analyzer_factory=None):
+    def __init__(self, rules, python_analyzer_factory=None, allow_patterns=None):
         self.rules = rules
         self.commands = rules.get("commands", {})
         self.shell_builtins_safe = set(rules.get("shell_builtins_safe", []))
         self.shell_keywords = set(rules.get("shell_keywords", []))
         self.interpreters = rules.get("interpreters", {})
         self.python_analyzer_factory = python_analyzer_factory
+        self.allow_patterns = list(allow_patterns) if allow_patterns else []
 
     def classify(self, command, _depth=0):
         """Classify a shell command string. Returns (decision, reason).
@@ -514,7 +583,20 @@ class ShellClassifier:
         return retval
 
     def classify_segment(self, segment, _depth=0):
-        """Classify one segment (no ;, &&, ||, |, & at its top level)."""
+        """Classify one segment (no ;, &&, ||, |, & at its top level).
+
+        After the rule-based classifier runs, an `unknown` outcome is
+        upgraded to `safe` if the segment matches a user allow pattern
+        from settings.json (`permissions.allow` Bash entries). `unsafe`
+        is never weakened - YOLT keeps flagging mutating calls even when
+        the user's allowlist would otherwise permit them.
+
+        The allowlist match runs against the segment after leading shell
+        keywords (`do`, `then`, `else`, ...) have been stripped, so that
+        `for x in $(...); do mycli list "$x"; done` matches a user
+        pattern of `Bash(mycli list*)`. Redirection tokens are kept in
+        the match string so `Bash(echo *)` covers `echo x > /tmp/file`.
+        """
         if _depth > self.MAX_RECURSION_DEPTH:
             retval = (DECISION_UNKNOWN, "max recursion depth")
             return retval
@@ -522,16 +604,23 @@ class ShellClassifier:
         try:
             tokens = shlex.split(segment, posix=True)
         except ValueError as e:
-            retval = (DECISION_UNKNOWN, "shlex: {}".format(e))
+            retval = self._maybe_allow(segment, (DECISION_UNKNOWN, "shlex: {}".format(e)))
             return retval
 
         tokens, is_word_list = strip_leading_keywords_and_assignments(
             tokens, self.shell_keywords
         )
+        # Snapshot the post-keyword tokens for allowlist matching - it
+        # still contains redirection ops so e.g. `Bash(echo *)` matches
+        # `echo x > /tmp/file` the way Claude Code's outer matcher would.
+        match_string = " ".join(tokens) if tokens else segment
+
         tokens, writes_to_file = strip_redirections(tokens)
 
         if writes_to_file:
-            retval = (DECISION_UNKNOWN, "writes to a file via redirection")
+            retval = self._maybe_allow(
+                match_string, (DECISION_UNKNOWN, "writes to a file via redirection")
+            )
             return retval
 
         if not tokens:
@@ -547,7 +636,23 @@ class ShellClassifier:
             retval = (DECISION_SAFE, "bare substitution result")
             return retval
 
-        retval = self.classify_tokens(tokens, _depth=_depth)
+        result = self.classify_tokens(tokens, _depth=_depth)
+        retval = self._maybe_allow(match_string, result)
+        return retval
+
+    def _maybe_allow(self, match_string, result):
+        """If `result` is unknown and `match_string` matches a user allow
+        pattern, upgrade to safe with an explanatory reason. Otherwise
+        return `result` unchanged."""
+        decision, reason = result
+        if decision != DECISION_UNKNOWN:
+            retval = result
+            return retval
+        match = match_allow_patterns(match_string, self.allow_patterns)
+        if match is None:
+            retval = result
+            return retval
+        retval = (DECISION_SAFE, "matches user allow pattern '{}'".format(match))
         return retval
 
     def classify_tokens(self, tokens, _depth=0):
@@ -894,9 +999,13 @@ class ShellClassifier:
         return retval
 
 
-def classify_command(command, rules, python_analyzer_factory=None):
+def classify_command(command, rules, python_analyzer_factory=None, allow_patterns=None):
     """Module-level convenience wrapper."""
-    classifier = ShellClassifier(rules, python_analyzer_factory=python_analyzer_factory)
+    classifier = ShellClassifier(
+        rules,
+        python_analyzer_factory=python_analyzer_factory,
+        allow_patterns=allow_patterns,
+    )
     retval = classifier.classify(command)
     return retval
 
@@ -916,6 +1025,13 @@ def run_cli():
         user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
     )
 
+    cwd = Path.cwd()
+    allow_patterns = load_allow_patterns([
+        Path.home() / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.local.json",
+    ])
+
     # Lazy-import the python analyzer for --c / script delegation
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -932,7 +1048,11 @@ def run_cli():
     except ImportError:
         factory = None
 
-    decision, reason = classify_command(command, rules, python_analyzer_factory=factory)
+    decision, reason = classify_command(
+        command, rules,
+        python_analyzer_factory=factory,
+        allow_patterns=allow_patterns,
+    )
     output = {"decision": decision, "reason": reason}
     print(json.dumps(output, indent=2))
     sys.exit(0 if decision == DECISION_SAFE else 1)

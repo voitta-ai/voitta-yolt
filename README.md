@@ -83,6 +83,30 @@ Add to `~/.claude/settings.json`:
 > `Bash(aws ecs list-services*)`) are fine; they just short-circuit YOLT
 > for the matching subset.
 
+## User allowlist as a secondary upgrade pass
+
+YOLT reads your `permissions.allow` Bash() entries from
+`~/.claude/settings.json`, the project's `.claude/settings.json`, and
+`.claude/settings.local.json`. After the rule classifier runs, any
+*decomposed segment* that would otherwise be `unknown` is upgraded to
+`safe` if it matches one of those patterns.
+
+This earns its keep on compound forms. The built-in matcher only sees
+the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
+already allowlisted (`Bash(mycli list*)`) still prompts. YOLT splits the
+loop into atomic segments, each of which gets the allowlist match.
+
+Two rules apply:
+
+- The match works on the segment string after substitution extraction
+  and top-level splitting, using `fnmatch` glob semantics - the same
+  semantics Claude Code's outer matcher uses. `Bash(env)` matches
+  `env` exactly; `Bash(aws s3 ls*)` matches anything that starts with
+  `aws s3 ls`.
+- A match **never weakens an `unsafe` decision**. If your rules say
+  `aws iam delete-user` is mutating, a permissive `Bash(aws *)` does
+  not turn it into safe - YOLT keeps flagging mutating calls.
+
 ## What the shell classifier handles
 
 Example decisions (see `rules/shell.json` for the full rule set):
