@@ -11,8 +11,10 @@
     "type", "command", "hash",
     "alias", "unalias",
     "history", "fc",
-    "jobs", "wait",
-    "let", "read"
+    "jobs", "wait", "sleep",
+    "let", "read",
+    "unset", "set",
+    ":"
   ],
 
   "shell_keywords": [
@@ -174,6 +176,10 @@
 
     "gh": {
       "default": "subcommand",
+      "valueless_flags": [
+        "--no-pager", "--paginate",
+        "--version", "--help"
+      ],
       "safe_subcommands": [
         "auth", "browse", "help",
         "search", "status", "version"
@@ -230,6 +236,13 @@
 
     "git": {
       "default": "subcommand",
+      "valueless_flags": [
+        "--no-pager", "--paginate", "--no-replace-objects",
+        "--bare", "--no-optional-locks",
+        "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+        "--icase-pathspecs", "--no-advice",
+        "--version", "--help"
+      ],
       "safe_subcommands": [
         "log", "status", "diff", "show", "blame",
         "branch", "tag",

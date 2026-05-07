@@ -136,6 +136,110 @@ def match_allow_patterns(command, patterns):
     return retval
 
 
+_PYTHON_HEREDOC_RE = re.compile(
+    r"^\s*python3?\s+(?:-\s+)?<<-?\s*['\"]?(\w+)['\"]?\s*\n",
+    re.MULTILINE,
+)
+
+
+def _extract_python_heredoc(command):
+    """If `command` begins with a `python3 <<EOF ... EOF` (or
+    `python3 - <<'EOF'` ...) heredoc, return the script body. Otherwise
+    return None.
+
+    Mirrors yolt_analyzer.extract_heredoc_script but accepts the `-`
+    stdin form and is hosted in shell_classifier so the classifier can
+    handle the case standalone too (the hook entry point delegates to
+    the python analyzer directly, but the CLI scan path doesn't)."""
+    m = _PYTHON_HEREDOC_RE.match(command)
+    if not m:
+        retval = None
+        return retval
+    delimiter = m.group(1)
+    body_start = m.end()
+    closing_pattern = re.compile(
+        r"^\s*" + re.escape(delimiter) + r"\s*$", re.MULTILINE
+    )
+    closing = closing_pattern.search(command, body_start)
+    if not closing:
+        retval = None
+        return retval
+    retval = command[body_start:closing.start()]
+    return retval
+
+
+def preprocess_shell_source(command):
+    """Strip shell line-continuations (`\\` immediately before a newline)
+    and `#` line comments outside of quotes. This brings multi-line
+    `aws ... \\\\\n  --foo \\\\\n  --bar` invocations and trailing
+    `# explanatory comment` notes into the same shape as the single-line
+    forms the rest of the classifier already handles.
+
+    Quoting rules:
+      - Inside single quotes, nothing is interpreted - the chars pass
+        through unchanged.
+      - Inside double quotes, `\\<LF>` is still consumed (POSIX) but
+        `#` is literal. Only continuations are stripped there.
+      - Outside quotes, both transformations apply.
+    """
+    chars = []
+    i = 0
+    in_single = False
+    in_double = False
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if in_single:
+            chars.append(c)
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if c == "\\" and i + 1 < n and command[i + 1] == "\n":
+                # Line continuation inside double quotes - drop both chars.
+                i += 2
+                continue
+            chars.append(c)
+            if c == '"' and (i == 0 or command[i - 1] != "\\"):
+                in_double = False
+            i += 1
+            continue
+        if c == "'":
+            in_single = True
+            chars.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_double = True
+            chars.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n and command[i + 1] == "\n":
+            # POSIX line continuation: `\<LF>` is removed entirely. The
+            # preceding character (usually a space) is what separates
+            # tokens; if there isn't one, the writer intended fusion.
+            i += 2
+            continue
+        if c == "#":
+            # `#` only starts a comment at the start of a word (BOL or
+            # preceded by whitespace). `echo a#b` is a literal `a#b`.
+            at_word_start = (
+                len(chars) == 0 or chars[-1] in (" ", "\t", "\n", ";", "&", "|")
+            )
+            if at_word_start:
+                # Skip until next newline (or end of input).
+                j = command.find("\n", i)
+                if j < 0:
+                    break
+                i = j  # leave the newline; outer loop appends it
+                continue
+        chars.append(c)
+        i += 1
+    retval = "".join(chars)
+    return retval
+
+
 def extract_substitutions(command):
     """Extract $(...) and `...` command substitutions, replacing each with a
     placeholder and returning the inner command strings in order.
@@ -325,6 +429,14 @@ def split_top_level(command):
             i += 1
             continue
         if c == "&":
+            # Skip FD-duplication forms like `2>&1`, `>&2`, `<&3`, where
+            # the `&` is glued to a preceding `>` or `<`. Treating those
+            # as a background-job separator would split mid-redirection.
+            buf = "".join(current)
+            if buf and buf[-1] in (">", "<"):
+                current.append(c)
+                i += 1
+                continue
             flush()
             i += 1
             continue
@@ -567,6 +679,17 @@ class ShellClassifier:
             retval = (DECISION_SAFE, "empty")
             return retval
 
+        # python3 heredocs (`python3 <<EOF ... EOF`, `python3 - <<'EOF'`)
+        # have to be intercepted before any shell decomposition - the body
+        # contains arbitrary code with newlines that the segment splitter
+        # would shred into nonsense.
+        heredoc = _extract_python_heredoc(command)
+        if heredoc is not None:
+            retval = self.classify_python_source(heredoc, "python3 <<heredoc")
+            return retval
+
+        command = preprocess_shell_source(command)
+
         stripped, subs = extract_substitutions(command)
 
         decisions = []
@@ -783,7 +906,8 @@ class ShellClassifier:
         return retval
 
     def classify_subcommand(self, cmd_name, cmd_args, spec, _depth):
-        positional = self._skip_flags(cmd_args)
+        valueless = set(spec.get("valueless_flags", []))
+        positional = self._skip_flags(cmd_args, valueless_flags=valueless)
         if not positional:
             retval = (DECISION_UNKNOWN, "{}: no subcommand".format(cmd_name))
             return retval
@@ -968,9 +1092,16 @@ class ShellClassifier:
         return retval
 
     @staticmethod
-    def _skip_flags(cmd_args):
+    def _skip_flags(cmd_args, valueless_flags=None):
         """Return only positional (non-flag) tokens from cmd_args, skipping
-        flag-values heuristically."""
+        flag-values heuristically.
+
+        `valueless_flags` is an optional set of long flags known not to
+        consume a value. Without this hint the walker assumes any
+        long-flag whose successor doesn't start with `-` is a flag/value
+        pair, which gets `git --no-pager log` wrong (`log` isn't the
+        value of `--no-pager`)."""
+        valueless_flags = valueless_flags or set()
         positional = []
         i = 0
         while i < len(cmd_args):
@@ -979,12 +1110,18 @@ class ShellClassifier:
                 if "=" in tok:
                     i += 1
                     continue
+                if tok in valueless_flags:
+                    i += 1
+                    continue
                 if i + 1 < len(cmd_args) and not cmd_args[i + 1].startswith("-"):
                     i += 2
                     continue
                 i += 1
                 continue
             if tok.startswith("-") and len(tok) > 1:
+                if tok in valueless_flags:
+                    i += 1
+                    continue
                 if len(tok) > 2 and not tok[2].isalpha():
                     i += 1
                     continue

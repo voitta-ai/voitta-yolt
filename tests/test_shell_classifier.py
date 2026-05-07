@@ -29,6 +29,7 @@ from shell_classifier import (  # noqa: E402
     load_shell_rules,
     match_allow_patterns,
     parse_aws_positionals,
+    preprocess_shell_source,
     split_top_level,
     strip_leading_keywords_and_assignments,
     strip_redirections,
@@ -56,6 +57,180 @@ KEYWORDS = {
     "function", "time", "coproc",
     "!", "{", "}", "(", ")",
 }
+
+
+class TestPreprocessShellSource(unittest.TestCase):
+    def test_no_continuation_no_change(self):
+        self.assertEqual(
+            preprocess_shell_source("ls /tmp"),
+            "ls /tmp",
+        )
+
+    def test_backslash_newline_removed(self):
+        # POSIX: `\<LF>` is removed entirely. The space before `\` stays,
+        # so this collapses to one space + the next line's two leading
+        # spaces, totalling three.
+        self.assertEqual(
+            preprocess_shell_source("aws ec2 describe-instances \\\n  --foo"),
+            "aws ec2 describe-instances   --foo",
+        )
+
+    def test_continuation_inside_double_quotes(self):
+        # Inside double quotes the `\<LF>` is also removed; the space
+        # before the backslash stays.
+        out = preprocess_shell_source('echo "abc \\\ndef"')
+        self.assertEqual(out, 'echo "abc def"')
+
+    def test_continuation_inside_single_quotes_literal(self):
+        # Inside single quotes nothing is interpreted.
+        src = "echo 'abc \\\ndef'"
+        self.assertEqual(preprocess_shell_source(src), src)
+
+    def test_standalone_comment_dropped(self):
+        self.assertEqual(
+            preprocess_shell_source("# this is a comment\nls"),
+            "\nls",
+        )
+
+    def test_tail_comment_dropped(self):
+        self.assertEqual(
+            preprocess_shell_source("ls /tmp # explain"),
+            "ls /tmp ",
+        )
+
+    def test_hash_inside_double_quotes_literal(self):
+        self.assertEqual(
+            preprocess_shell_source('echo "#hashtag"'),
+            'echo "#hashtag"',
+        )
+
+    def test_hash_inside_single_quotes_literal(self):
+        self.assertEqual(
+            preprocess_shell_source("echo '#hashtag'"),
+            "echo '#hashtag'",
+        )
+
+    def test_hash_glued_to_word_not_comment(self):
+        # `a#b` is one token, not `a` + comment.
+        self.assertEqual(
+            preprocess_shell_source("echo a#b"),
+            "echo a#b",
+        )
+
+    def test_multiple_continuations(self):
+        cmd = "aws ec2 describe-instances \\\n  --foo bar \\\n  --baz"
+        # Same accounting as the single-continuation case for each
+        # `\<LF>` removed: trailing space + two leading spaces = three.
+        self.assertEqual(
+            preprocess_shell_source(cmd),
+            "aws ec2 describe-instances   --foo bar   --baz",
+        )
+
+
+class TestClassifierMultilineHandling(unittest.TestCase):
+    """Real-world transcript shapes: multi-line scripts with backslash
+    continuations and inline comments that the classifier has to bring
+    back into one logical command before splitting on top-level
+    operators."""
+
+    def setUp(self):
+        self.classifier = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, _ = self.classifier.classify(cmd)
+        self.assertEqual(d, expected, msg="cmd={!r}".format(cmd))
+
+    def test_multi_line_aws_describe(self):
+        cmd = (
+            "aws cloudwatch get-metric-statistics \\\n"
+            "  --no-cli-pager \\\n"
+            '  --namespace "bidder/prod" \\\n'
+            '  --metric-name "app.render_b" \\\n'
+            "  --start-time 2026-05-01T00:00:00Z"
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_echo_header_then_aws_describe(self):
+        cmd = (
+            'echo "=== ECR images ==="\n'
+            "aws ec2 describe-instances --no-cli-pager"
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_inline_comment_dropped(self):
+        self.assertDecision("ls /tmp # show contents", DECISION_SAFE)
+
+    def test_standalone_comment_safe(self):
+        self.assertDecision("# nothing to do", DECISION_SAFE)
+
+
+class TestValuelessGlobalFlags(unittest.TestCase):
+    """Top-level CLI flags that don't take a value (`git --no-pager`,
+    ...) used to consume the subcommand as their value, hiding `log` /
+    `status` from the subcommand classifier."""
+
+    def setUp(self):
+        self.classifier = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, _ = self.classifier.classify(cmd)
+        self.assertEqual(d, expected, msg="cmd={!r}".format(cmd))
+
+    def test_git_no_pager_log(self):
+        self.assertDecision("git --no-pager log --oneline", DECISION_SAFE)
+
+    def test_git_no_pager_status(self):
+        self.assertDecision("git --no-pager status", DECISION_SAFE)
+
+    def test_git_no_pager_diff(self):
+        self.assertDecision("git --no-pager diff main", DECISION_SAFE)
+
+    def test_git_no_pager_push_unsafe(self):
+        self.assertDecision("git --no-pager push origin main", DECISION_UNSAFE)
+
+    def test_git_dash_C_with_value(self):
+        # -C does take a value (working directory), so the heuristic
+        # should still consume it correctly.
+        self.assertDecision("git -C /tmp/repo log --oneline", DECISION_SAFE)
+
+    def test_gh_no_pager_run_list(self):
+        self.assertDecision("gh --no-pager run list --repo foo", DECISION_SAFE)
+
+    def test_gh_no_pager_pr_list(self):
+        self.assertDecision("gh --no-pager pr list", DECISION_SAFE)
+
+
+class TestPythonHeredocViaClassifier(unittest.TestCase):
+    """The classifier handles `python3 <<EOF ... EOF` heredocs by
+    delegating the body to the Python analyzer factory. In hook flow
+    yolt_analyzer.run_hook already routes heredocs early; this is the
+    standalone-classifier path used by the CLI scan."""
+
+    def setUp(self):
+        self.classifier = _make_classifier()
+
+    def test_safe_heredoc(self):
+        cmd = "python3 << 'EOF'\nimport json\nprint(json.dumps({'ok': True}))\nEOF"
+        d, r = self.classifier.classify(cmd)
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_destructive_heredoc(self):
+        cmd = "python3 << EOF\nimport os\nos.system('rm -rf /tmp/x')\nEOF"
+        d, r = self.classifier.classify(cmd)
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_python3_dash_stdin_form(self):
+        # `python3 - <<'EOF'` reads from stdin; same heredoc rules apply.
+        cmd = "python3 - <<'EOF'\nprint(1)\nEOF"
+        d, r = self.classifier.classify(cmd)
+        self.assertEqual(d, DECISION_SAFE)
+
+
+class TestUnsetBuiltin(unittest.TestCase):
+    def test_unset_is_safe(self):
+        c = _make_classifier()
+        d, _ = c.classify("unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY")
+        self.assertEqual(d, DECISION_SAFE)
 
 
 class TestExtractSubstitutions(unittest.TestCase):
@@ -129,6 +304,33 @@ class TestSplitTopLevel(unittest.TestCase):
     def test_double_semicolon_collapses(self):
         # Case-arm ;; produces an empty segment which is filtered out.
         self.assertEqual(split_top_level("ls ;; pwd"), ["ls", "pwd"])
+
+    def test_fd_dup_2_to_1_not_split(self):
+        # `2>&1` is a file-descriptor duplication, not a `2>` followed by
+        # the `&` background operator and a `1` segment.
+        self.assertEqual(
+            split_top_level("gh pr list 2>&1"),
+            ["gh pr list 2>&1"],
+        )
+
+    def test_fd_dup_followed_by_pipe_still_splits(self):
+        self.assertEqual(
+            split_top_level("aws ec2 describe-instances 2>&1 | head"),
+            ["aws ec2 describe-instances 2>&1", "head"],
+        )
+
+    def test_redirect_to_stderr_not_split(self):
+        # `>&2` is also FD duplication.
+        self.assertEqual(
+            split_top_level("echo hi >&2"),
+            ["echo hi >&2"],
+        )
+
+    def test_trailing_background_ampersand_still_splits(self):
+        self.assertEqual(
+            split_top_level("sleep 5 & pwd"),
+            ["sleep 5", "pwd"],
+        )
 
 
 class TestStripRedirections(unittest.TestCase):
