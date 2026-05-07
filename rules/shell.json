@@ -1,0 +1,420 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "description": "YOLT shell command classification rules. Used to decide whether the *full* invocation of a Bash command is read-only (auto-allow) or mutating (ask)."
+  },
+
+  "shell_builtins_safe": [
+    "echo", "printf", "pwd", "true", "false",
+    "test", "[", "[[",
+    "cd", "pushd", "popd", "dirs",
+    "type", "command", "hash",
+    "alias", "unalias",
+    "history", "fc",
+    "jobs", "wait",
+    "let", "read"
+  ],
+
+  "shell_keywords": [
+    "if", "then", "else", "elif", "fi",
+    "for", "while", "until", "do", "done",
+    "case", "esac", "in", "select",
+    "function", "time", "coproc",
+    "!", "{", "}", "(", ")"
+  ],
+
+  "interpreters": {
+    "python3": {"inline_flag": "-c", "delegate": "python", "read_script_file": true},
+    "python":  {"inline_flag": "-c", "delegate": "python", "read_script_file": true},
+    "bash":    {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
+    "sh":      {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
+    "zsh":     {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
+    "node":    {"inline_flag": "-e", "delegate": "unknown","read_script_file": false},
+    "bun":     {"inline_flag": "-e", "delegate": "unknown","read_script_file": false},
+    "ruby":    {"inline_flag": "-e", "delegate": "unknown","read_script_file": false},
+    "perl":    {"inline_flag": "-e", "delegate": "unknown","read_script_file": false}
+  },
+
+  "commands": {
+    "ls":       {"default": "safe"},
+    "cat":      {"default": "safe"},
+    "head":     {"default": "safe"},
+    "tail":     {"default": "safe"},
+    "less":     {"default": "safe"},
+    "more":     {"default": "safe"},
+    "wc":       {"default": "safe"},
+    "file":     {"default": "safe"},
+    "stat":     {"default": "safe"},
+    "basename": {"default": "safe"},
+    "dirname":  {"default": "safe"},
+    "realpath": {"default": "safe"},
+    "readlink": {"default": "safe"},
+    "which":    {"default": "safe"},
+    "whereis":  {"default": "safe"},
+    "env":      {"default": "safe"},
+    "printenv": {"default": "safe"},
+    "date":     {"default": "safe"},
+    "cal":      {"default": "safe"},
+    "uname":    {"default": "safe"},
+    "hostname": {"default": "safe"},
+    "id":       {"default": "safe"},
+    "whoami":   {"default": "safe"},
+    "who":      {"default": "safe"},
+    "uptime":   {"default": "safe"},
+    "tty":      {"default": "safe"},
+    "locale":   {"default": "safe"},
+    "groups":   {"default": "safe"},
+    "ps":       {"default": "safe"},
+    "top":      {"default": "safe"},
+    "htop":     {"default": "safe"},
+    "df":       {"default": "safe"},
+    "du":       {"default": "safe"},
+    "free":     {"default": "safe"},
+    "lsof":     {"default": "safe"},
+    "netstat":  {"default": "safe"},
+    "ss":       {"default": "safe"},
+    "dig":      {"default": "safe"},
+    "nslookup": {"default": "safe"},
+    "host":     {"default": "safe"},
+    "ping":     {"default": "safe"},
+
+    "grep":     {"default": "safe"},
+    "rg":       {"default": "safe"},
+    "ag":       {"default": "safe"},
+    "ack":      {"default": "safe"},
+    "sort":     {"default": "safe"},
+    "uniq":     {"default": "safe"},
+    "cut":      {"default": "safe"},
+    "tr":       {"default": "safe"},
+    "paste":    {"default": "safe"},
+    "join":     {"default": "safe"},
+    "comm":     {"default": "safe"},
+    "column":   {"default": "safe"},
+    "expand":   {"default": "safe"},
+    "unexpand": {"default": "safe"},
+    "fold":     {"default": "safe"},
+    "fmt":      {"default": "safe"},
+    "nl":       {"default": "safe"},
+    "od":       {"default": "safe"},
+    "hexdump":  {"default": "safe"},
+    "xxd":      {"default": "safe"},
+    "diff":     {"default": "safe"},
+    "cmp":      {"default": "safe"},
+    "jq":       {"default": "safe"},
+    "yq":       {"default": "safe"},
+    "awk":      {
+      "default": "safe",
+      "_note": "awk is safe unless given `-i inplace` (GNU) or the program calls system()/print > file. Pure text filtering is safe."
+    },
+    "sed": {
+      "default": "safe",
+      "unsafe_flag_any_value": ["-i", "--in-place"],
+      "_note": "sed without -i just outputs to stdout. -i rewrites files in place."
+    },
+
+    "md5":      {"default": "safe"},
+    "md5sum":   {"default": "safe"},
+    "shasum":   {"default": "safe"},
+    "sha1sum":  {"default": "safe"},
+    "sha256sum":{"default": "safe"},
+    "sha512sum":{"default": "safe"},
+    "openssl":  {"default": "ask", "_note": "openssl can generate keys and sign things. Too many subcommands to enumerate safely; punt to prompt."},
+
+    "tee": {
+      "default": "unsafe",
+      "_note": "tee writes to one or more files. Always mutating."
+    },
+    "rm":     {"default": "unsafe"},
+    "rmdir":  {"default": "unsafe"},
+    "mv":     {"default": "unsafe"},
+    "cp":     {"default": "unsafe"},
+    "ln":     {"default": "unsafe"},
+    "touch":  {"default": "unsafe"},
+    "mkdir":  {"default": "unsafe"},
+    "chmod":  {"default": "unsafe"},
+    "chown":  {"default": "unsafe"},
+    "chgrp":  {"default": "unsafe"},
+    "install":{"default": "unsafe"},
+    "dd":     {"default": "unsafe"},
+    "shred":  {"default": "unsafe"},
+    "sudo":   {"default": "unsafe"},
+    "su":     {"default": "unsafe"},
+    "doas":   {"default": "unsafe"},
+    "eval":   {"default": "unsafe"},
+    "source": {"default": "unsafe"},
+    ".":      {"default": "unsafe"},
+    "exec":   {"default": "unsafe"},
+    "trap":   {"default": "unsafe"},
+    "kill":   {"default": "unsafe"},
+    "killall":{"default": "unsafe"},
+    "pkill":  {"default": "unsafe"},
+
+    "find": {
+      "default": "safe",
+      "unsafe_flag_any_value": ["-delete"],
+      "unsafe_flags_without_value": ["-delete"],
+      "unsafe_flag_value_prefix": {"-exec": "*", "-execdir": "*", "-ok": "*", "-okdir": "*"},
+      "_note": "find is read-only until you add -delete, -exec, -execdir, -ok, or -okdir."
+    },
+    "xargs": {
+      "default": "delegate_to_argument",
+      "_note": "xargs runs a command. The command after its flags is the real work; classify that."
+    },
+    "parallel": {
+      "default": "delegate_to_argument",
+      "_note": "GNU parallel runs its argument command."
+    },
+    "time":    {"default": "delegate_to_argument"},
+    "nohup":   {"default": "delegate_to_argument"},
+    "nice":    {"default": "delegate_to_argument"},
+    "ionice":  {"default": "delegate_to_argument"},
+    "timeout": {"default": "delegate_to_argument", "_skip_first_positional": true},
+    "env":     {"default": "delegate_to_argument", "_note": "'env FOO=bar cmd args' runs cmd. Skip VAR=val tokens until we reach the actual command."},
+    "watch":   {"default": "delegate_to_argument"},
+
+    "gh": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "auth", "browse", "help",
+        "search", "status", "version"
+      ],
+      "nested_subcommand": {
+        "api": {
+          "default": "safe",
+          "unsafe_flag_values": {
+            "-X": ["POST", "PUT", "PATCH", "DELETE"],
+            "--method": ["POST", "PUT", "PATCH", "DELETE"]
+          },
+          "unsafe_flag_any_value": ["-F", "--field", "-f", "--raw-field"],
+          "unsafe_flag_value_prefix": {"--input": "*"},
+          "_note": "gh api defaults to GET. Body-carrying methods and --field/-F/-f imply POST."
+        },
+        "issue":       {"safe_subcommands": ["view", "list", "status"], "unsafe_subcommands": ["create", "close", "reopen", "comment", "edit", "delete", "transfer", "pin", "unpin", "lock", "unlock", "develop"]},
+        "pr":          {"safe_subcommands": ["view", "list", "status", "diff", "checks", "checkout"], "unsafe_subcommands": ["create", "close", "reopen", "comment", "edit", "merge", "ready", "review", "update-branch"]},
+        "release":     {"safe_subcommands": ["view", "list", "download"], "unsafe_subcommands": ["create", "delete", "edit", "upload"]},
+        "repo":        {"safe_subcommands": ["view", "list", "clone"], "unsafe_subcommands": ["create", "delete", "fork", "archive", "rename", "edit", "deploy-key", "sync"]},
+        "run":         {"safe_subcommands": ["list", "view", "watch"], "unsafe_subcommands": ["cancel", "delete", "rerun"]},
+        "workflow":    {"safe_subcommands": ["list", "view"], "unsafe_subcommands": ["disable", "enable", "run"]},
+        "gist":        {"safe_subcommands": ["view", "list"], "unsafe_subcommands": ["create", "delete", "edit", "clone"]},
+        "label":       {"safe_subcommands": ["list"], "unsafe_subcommands": ["create", "delete", "edit", "clone"]},
+        "cache":       {"safe_subcommands": ["list"], "unsafe_subcommands": ["delete"]},
+        "secret":      {"safe_subcommands": ["list"], "unsafe_subcommands": ["set", "delete"]},
+        "variable":    {"safe_subcommands": ["list"], "unsafe_subcommands": ["set", "delete"]},
+        "ssh-key":     {"safe_subcommands": ["list"], "unsafe_subcommands": ["add", "delete"]},
+        "gpg-key":     {"safe_subcommands": ["list"], "unsafe_subcommands": ["add", "delete"]},
+        "codespace":   {"safe_subcommands": ["list", "view", "logs", "ports"], "unsafe_subcommands": ["create", "delete", "edit", "stop", "rebuild", "ssh"]},
+        "config":      {"safe_subcommands": ["get", "list"], "unsafe_subcommands": ["set", "clear-cache"]}
+      }
+    },
+
+    "curl": {
+      "default": "safe",
+      "unsafe_flag_values": {
+        "-X": ["POST", "PUT", "PATCH", "DELETE"],
+        "--request": ["POST", "PUT", "PATCH", "DELETE"]
+      },
+      "unsafe_flag_any_value": [
+        "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+        "-F", "--form", "--form-string",
+        "-T", "--upload-file"
+      ],
+      "_note": "curl defaults to GET. Presence of body flags (-d, --data, -F, -T) or -X with a body method implies mutation."
+    },
+    "wget": {
+      "default": "safe",
+      "unsafe_flag_any_value": ["--post-data", "--post-file", "--method"],
+      "_note": "wget defaults to GET. --post-data / --post-file imply POST."
+    },
+    "http":  {"default": "ask", "_note": "httpie CLI: full classification is non-trivial. Punt."},
+    "https": {"default": "ask"},
+
+    "git": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "log", "status", "diff", "show", "blame",
+        "branch", "tag",
+        "rev-parse", "rev-list", "describe", "name-rev",
+        "reflog",
+        "ls-files", "ls-tree", "ls-remote",
+        "cat-file", "show-ref", "show-branch",
+        "grep", "shortlog",
+        "bisect",
+        "worktree",
+        "config",
+        "remote", "fetch",
+        "stash",
+        "help", "version"
+      ],
+      "unsafe_subcommands": [
+        "add", "rm", "mv",
+        "commit", "commit-tree",
+        "push", "pull",
+        "merge", "rebase", "cherry-pick", "revert", "am",
+        "reset", "restore", "checkout", "switch",
+        "clean",
+        "tag",
+        "apply", "format-patch",
+        "clone",
+        "init",
+        "gc", "prune", "repack",
+        "update-ref", "update-index",
+        "notes", "filter-branch", "filter-repo",
+        "submodule"
+      ],
+      "_note": "Some subcommands overlap (tag both lists). Safe list is checked first, so 'git tag' is safe (listing); 'git tag v1' still passes safe, which is slightly permissive. Acceptable trade-off."
+    },
+
+    "docker": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "ps", "images", "image", "container",
+        "inspect", "logs", "stats", "top", "port",
+        "diff", "history", "info", "version", "events",
+        "system", "volume", "network", "context", "search"
+      ],
+      "unsafe_subcommands": [
+        "run", "exec", "kill", "stop", "start", "restart",
+        "rm", "rmi", "prune",
+        "build", "buildx", "push", "pull", "load", "save",
+        "create", "commit", "cp", "tag", "update",
+        "pause", "unpause",
+        "login", "logout",
+        "compose", "swarm", "service", "stack"
+      ],
+      "_note": "Some top-level names (image, container, volume, network, system) have destructive sub-subcommands (prune, rm). We list them as safe because their default 'ls'/'inspect' verbs dominate usage; we'd need nested-subcommand rules for full fidelity."
+    },
+
+    "kubectl": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "get", "describe", "logs", "explain",
+        "top", "cluster-info", "version",
+        "api-resources", "api-versions",
+        "config",
+        "auth",
+        "diff",
+        "events",
+        "wait"
+      ],
+      "unsafe_subcommands": [
+        "apply", "create", "replace", "patch", "edit",
+        "delete",
+        "exec", "attach", "port-forward", "proxy", "run",
+        "rollout", "scale", "autoscale",
+        "label", "annotate",
+        "cordon", "uncordon", "drain", "taint",
+        "cp"
+      ]
+    },
+
+    "helm": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "get", "list", "ls", "status", "history",
+        "show", "search", "inspect", "lint", "template",
+        "env", "version", "repo"
+      ],
+      "unsafe_subcommands": [
+        "install", "upgrade", "uninstall", "delete",
+        "rollback", "test", "push", "pull", "package",
+        "dependency", "plugin", "registry", "create"
+      ]
+    },
+
+    "aws": {
+      "default": "aws_cli",
+      "_note": "Special-cased. AWS CLI operations are uniformly verb-prefixed: describe-*/list-*/get-*/head-* are read-only; create-*/delete-*/update-*/put-*/terminate-*/start-*/stop-*/run-* are mutating.",
+      "safe_operation_patterns": [
+        "describe-*", "list-*", "get-*", "head-*",
+        "lookup-*", "search-*", "batch-get-*",
+        "preview-*", "check-*", "test-*", "select-*",
+        "can-paginate", "wait", "help",
+        "ls", "cp_DISABLED"
+      ],
+      "unsafe_operation_patterns": [
+        "create-*", "delete-*", "put-*", "update-*", "modify-*",
+        "terminate-*", "stop-*", "start-*", "restart-*", "reboot-*",
+        "run-*", "execute-*", "invoke-*",
+        "attach-*", "detach-*",
+        "deregister-*", "register-*",
+        "disable-*", "enable-*",
+        "revoke-*", "grant-*", "authorize-*",
+        "tag-*", "untag-*",
+        "publish-*", "send-*",
+        "upload-*", "download-*",
+        "copy-*", "move-*", "restore-*",
+        "reset-*", "rollback-*", "cancel-*",
+        "accept-*", "reject-*", "decline-*",
+        "associate-*", "disassociate-*",
+        "add-*", "remove-*",
+        "set-*"
+      ],
+      "service_overrides": {
+        "s3": {
+          "safe_subcommands": ["ls"],
+          "unsafe_subcommands": ["cp", "mv", "rm", "sync", "mb", "rb", "presign", "website"]
+        },
+        "s3api": {
+          "safe_operation_patterns": ["head-*", "list-*", "get-*"],
+          "unsafe_operation_patterns": ["put-*", "delete-*", "copy-*", "create-*", "upload-*", "abort-*", "complete-*", "restore-*"]
+        },
+        "logs": {
+          "extra_safe_patterns": ["filter-log-events", "start-query", "get-query-results", "stop-query", "tail"],
+          "_note": "Logs service has some 'start-*' operations that are actually read-only queries (start-query). Explicit overrides."
+        }
+      }
+    },
+
+    "gcloud":   {"default": "gcloud_cli"},
+    "az":       {"default": "az_cli"},
+
+    "terraform": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "validate", "fmt", "plan", "show", "state",
+        "output", "version", "providers", "console",
+        "graph", "force-unlock_DISABLED", "workspace"
+      ],
+      "unsafe_subcommands": [
+        "apply", "destroy", "import", "init", "refresh",
+        "taint", "untaint"
+      ],
+      "nested_subcommand": {
+        "state": {
+          "safe_subcommands": ["list", "show", "pull"],
+          "unsafe_subcommands": ["mv", "rm", "replace-provider", "push"]
+        },
+        "workspace": {
+          "safe_subcommands": ["list", "show"],
+          "unsafe_subcommands": ["new", "select", "delete"]
+        }
+      }
+    },
+
+    "npm": {
+      "default": "subcommand",
+      "safe_subcommands": ["ls", "list", "view", "info", "show", "outdated", "search", "help", "root", "prefix", "config", "doctor", "ping", "version", "whoami"],
+      "unsafe_subcommands": ["install", "i", "uninstall", "un", "update", "up", "run", "run-script", "start", "test", "publish", "unpublish", "link", "unlink", "adduser", "login", "logout", "access", "deprecate", "dist-tag", "pack", "rebuild", "audit", "ci", "init", "edit", "exec", "x"]
+    },
+
+    "yarn": {"default": "ask", "_note": "yarn invokes scripts by default. Punt."},
+    "pnpm": {"default": "ask"},
+
+    "pip": {
+      "default": "subcommand",
+      "safe_subcommands": ["list", "show", "freeze", "check", "help", "config", "search", "index", "inspect"],
+      "unsafe_subcommands": ["install", "uninstall", "download", "wheel", "hash"]
+    },
+    "pip3": {
+      "default": "subcommand",
+      "safe_subcommands": ["list", "show", "freeze", "check", "help", "config", "search", "index", "inspect"],
+      "unsafe_subcommands": ["install", "uninstall", "download", "wheel", "hash"]
+    },
+
+    "brew": {
+      "default": "subcommand",
+      "safe_subcommands": ["list", "ls", "info", "abv", "search", "deps", "uses", "leaves", "outdated", "home", "config", "doctor", "help", "--version"],
+      "unsafe_subcommands": ["install", "uninstall", "remove", "rm", "upgrade", "update", "reinstall", "pin", "unpin", "cleanup", "tap", "untap", "link", "unlink"]
+    }
+  }
+}

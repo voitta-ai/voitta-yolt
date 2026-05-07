@@ -1,18 +1,57 @@
 # YOLT - You Only Live Twice
 
-A Claude Code hook that statically analyzes Python scripts before execution,
-auto-allowing safe scripts and flagging destructive ones for review.
+A Claude Code hook that statically analyzes commands before execution,
+auto-allowing read-only invocations and flagging mutating ones for review.
+
+YOLT closes two gaps in Claude Code's built-in allowlist matcher:
+
+1. **Arbitrary-execution wrappers.** Interpreters (`python3`, `bash`, `node`,
+   ...) and dual-use CLIs (`gh api`, `curl`, `kubectl`, ...) can't be
+   allowlisted with a wildcard without granting arbitrary execution, so a
+   long tail of clearly read-only invocations prompt every time.
+2. **Compound shell commands.** The built-in matcher sees the outer wrapper
+   (`for`, `while`, `bash -c "..."`, `$(...)`), not the inner commands it
+   runs, so loops and command substitutions prompt even when every inner
+   command would be allowlisted on its own.
+
+YOLT ships with two analyzers that share a single `PreToolUse` hook entry:
+
+- **Shell classifier** (`hooks/shell_classifier.py`) - decomposes compound
+  commands, strips wrapper syntax, and classifies each atomic command
+  against `rules/shell.json`.
+- **Python analyzer** (`hooks/yolt_analyzer.py`) - parses Python source via
+  the AST and walks all calls against `rules/default.json`. Invoked by the
+  shell classifier for `python3 -c ...` and `python3 script.py`.
 
 ## How it works
 
-YOLT registers as a `PreToolUse` hook on the `Bash` tool. When Claude Code
-runs `python3 script.py`, YOLT:
+YOLT registers as a `PreToolUse` hook on the `Bash` tool. For every Bash
+invocation the hook:
 
-1. Extracts the script path (or `-c` inline code)
-2. Parses the Python AST (zero external dependencies)
-3. Walks all function calls, checking against configurable safety rules
-4. **Safe** scripts get auto-allowed (no permission prompt)
-5. **Destructive** scripts prompt for user review with details on what was detected
+1. Extracts `$(...)` and `` `...` `` substitutions, classifying each inner
+   command.
+2. Splits the remainder on top-level `;`, `&&`, `||`, `|`, `&`, and
+   newlines into simple commands, while respecting quoting.
+3. Strips leading shell keywords (`for VAR in`, `while`, `if`, `do`,
+   `done`, `case PAT in`, ...) and environment-variable assignments
+   (`FOO=bar cmd`).
+4. Strips redirections. If any redirection writes to a file target other
+   than `/dev/null`, the command is left for Claude Code's default prompt
+   instead of being auto-allowed.
+5. Classifies the remaining argv:
+   - Safe shell builtin (`echo`, `pwd`, `test`, `[`, `cd`, ...) -> safe.
+   - Known interpreter (`python3`, `bash`, ...) -> delegate to the Python
+     analyzer or recurse into the shell classifier.
+   - Known command with rules (`aws`, `gh`, `curl`, `kubectl`, `git`,
+     `docker`, `terraform`, `find`, `sed`, ...) -> per-command rule.
+   - Wrappers (`time`, `xargs`, `timeout`, `env`, `nice`, `watch`, ...) ->
+     re-classify the wrapped command.
+   - Anything else -> unknown.
+6. Aggregates decisions with precedence `unsafe > unknown > safe`.
+7. Emits a hook response:
+   - `safe` -> `permissionDecision: allow` with a short reason.
+   - `unsafe` -> `permissionDecision: ask` with the specific reason.
+   - `unknown` -> silent exit; Claude Code falls through to its default.
 
 ## Install
 
@@ -36,16 +75,49 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-> **Important:** You must **not** have `Bash(python3:*)` in your
-> `settings.local.json` allow list. Static allow rules take precedence over
-> PreToolUse hooks — if `python3` is pre-allowed, YOLT's hook never fires
-> and all scripts (including destructive ones) run without analysis.
-> YOLT replaces the need for that allow rule: safe scripts are auto-approved
-> by the hook's `permissionDecision: "allow"` response.
+> **Important:** A static allow rule in `settings.json` / `settings.local.json`
+> bypasses `PreToolUse` hooks. Do not allowlist `Bash(python3:*)`,
+> `Bash(aws:*)`, `Bash(gh:*)`, etc. with wildcards - YOLT's classifier
+> will never fire and mutating invocations will run without review. Narrow
+> allowlist patterns that don't cover mutating operations (e.g.
+> `Bash(aws ecs list-services*)`) are fine; they just short-circuit YOLT
+> for the matching subset.
 
-## Rules
+## What the shell classifier handles
 
-Default rules cover:
+Example decisions (see `rules/shell.json` for the full rule set):
+
+| Command                                                      | Decision |
+| ------------------------------------------------------------ | -------- |
+| `aws ec2 describe-instances`                                 | allow    |
+| `aws ec2 terminate-instances --instance-ids i-abc`           | ask      |
+| `aws --profile prod --region us-east-1 ec2 describe-instances --no-cli-pager` | allow |
+| `aws s3 ls` / `aws s3 rm s3://bucket/key`                    | allow / ask |
+| `aws logs start-query --log-group-name X --query-string ...` | allow (service override: `start-query` is read-only) |
+| `gh api /repos/x/y/issues`                                   | allow    |
+| `gh api -X POST /repos/x/y/issues`                           | ask      |
+| `gh pr list` / `gh pr merge`                                 | allow / ask |
+| `curl https://api.example.com/users`                         | allow    |
+| `curl -X POST ... -d ...`                                    | ask      |
+| `kubectl get pods` / `kubectl exec -it pod -- bash`          | allow / ask |
+| `terraform plan` / `terraform apply`                         | allow / ask |
+| `terraform state list` / `terraform state rm foo`            | allow / ask |
+| `git status` / `git push`                                    | allow / ask |
+| `find . -name '*.py'`                                        | allow    |
+| `find . -name '*.py' -delete`                                | ask      |
+| `sed 's/a/b/' f` / `sed -i 's/a/b/' f`                       | allow / ask |
+| `python3 -c "print(1+1)"`                                    | allow    |
+| `python3 -c "import os; os.system('rm -rf /')"`              | ask      |
+| `bash -c "ls /tmp"` / `bash -c "rm /etc/passwd"`             | allow / ask |
+| `for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done` | allow |
+| `echo foo \| xargs rm` / `echo foo \| xargs cat`             | ask / allow |
+| `time aws ec2 describe-instances`                            | allow    |
+| `cat file > /tmp/out`                                        | unknown (writes to a file) |
+| `aws ec2 describe-instances > /dev/null`                     | allow    |
+
+## Python-analyzer rules
+
+`rules/default.json` covers:
 
 - **AWS boto3** - `describe/list/get/head` safe; `delete/put/create/terminate` destructive
 - **File I/O** - `open()` write modes, `os.remove`, `shutil.rmtree`, etc.
@@ -59,7 +131,7 @@ won't false-positive.
 
 ## Custom rules
 
-Create `~/.claude/yolt/rules.json` to override defaults:
+### Python rules - `~/.claude/yolt/rules.json`
 
 ```json
 {
@@ -75,21 +147,64 @@ Create `~/.claude/yolt/rules.json` to override defaults:
 }
 ```
 
-User overrides merge with (and override) defaults per-key.
+### Shell rules - `~/.claude/yolt/shell.json`
+
+```json
+{
+  "commands": {
+    "mycli": {
+      "default": "subcommand",
+      "safe_subcommands": ["status", "show"],
+      "unsafe_subcommands": ["apply", "reset"]
+    }
+  },
+  "shell_builtins_safe": ["my-safe-wrapper"]
+}
+```
+
+User overrides merge with (and override) defaults per top-level key.
+Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
 
 ## CLI usage
 
-Analyze a script directly:
+Analyze a Python script directly:
 
 ```bash
 python3 hooks/yolt_analyzer.py script.py
 ```
 
-Returns JSON with `safe: true/false`, findings, and import analysis.
+Classify a shell command directly:
+
+```bash
+python3 hooks/shell_classifier.py 'for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done'
+```
+
+Both return JSON. The shell classifier's output shape is
+`{"decision": "safe|unsafe|unknown", "reason": "..."}`.
+
+## Tests and demo
+
+Unit tests cover the decomposition helpers, the classifier, and the hook
+entry point. They use stdlib `unittest` only:
+
+```bash
+python3 -m unittest discover -v tests
+```
+
+For a visual check across a broad range of representative commands (not
+asserted, just printed), run:
+
+```bash
+./examples/demo.sh
+```
+
+This prints the decision (`safe` / `unsafe` / `unknown`) for each
+command, colorized when the terminal supports it.
 
 ## Design principles
 
-- **Zero dependencies** - stdlib only (`ast`, `json`, `fnmatch`, `shlex`)
-- **False positives OK, false negatives not** - when in doubt, ask
-- **Configurable** - rules are data, not code
-- **Fast** - AST parsing is near-instant for typical scripts
+- **Zero dependencies** - stdlib only (`ast`, `json`, `fnmatch`, `shlex`, `re`)
+- **False positives OK, false negatives not** - unknown commands fall through
+  to Claude Code's default prompt rather than being auto-allowed.
+- **Configurable** - rules are data, not code.
+- **Fast** - classification is purely syntactic; no subprocess fork.

@@ -270,33 +270,42 @@ def make_hook_response(decision, reason=None):
     return output
 
 
-def run_hook():
-    """Run as a Claude Code PreToolUse hook."""
-    try:
-        hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        sys.exit(0)
+def _emit_python_analyzer_decision(result):
+    """Emit the Claude Code hook response for a Python analyzer result."""
+    if result["safe"]:
+        reason = "YOLT: Script analyzed - safe (imports: {})".format(
+            ", ".join(result["imports"]) if result["imports"] else "none"
+        )
+        response = make_hook_response("allow", reason)
+        print(json.dumps(response))
+        return
+    lines = ["YOLT: Destructive operations detected:"]
+    for finding in result["findings"]:
+        line_info = "  Line {}: {} ({})".format(
+            finding["line"], finding["call"], finding["category"]
+        )
+        source_line = finding.get("source_line", "")
+        if source_line:
+            line_info += "\n    > {}".format(source_line)
+        lines.append(line_info)
+    reason = "\n".join(lines)
+    response = make_hook_response("ask", reason)
+    print(json.dumps(response))
 
-    tool_name = hook_input.get("tool_name", "")
-    if tool_name != "Bash":
-        sys.exit(0)
 
-    command = hook_input.get("tool_input", {}).get("command", "")
-    if not command.lstrip().startswith("python3"):
-        sys.exit(0)
-
+def _run_python_only_hook(command):
+    """Legacy path - analyzes python3 invocations without the shell classifier.
+    Kept as a fallback when the shell classifier isn't importable."""
     source_type, source = extract_script_from_command(command)
     if source_type is None:
-        # Can't determine what script to analyze - ask user
         response = make_hook_response("ask", "YOLT: Could not extract script to analyze")
         print(json.dumps(response))
-        sys.exit(0)
+        return
 
     if source_type == "file":
         script_path = source
         if not os.path.isfile(script_path):
-            # File doesn't exist yet - let it fail naturally
-            sys.exit(0)
+            return
         with open(script_path, "r") as f:
             source_code = f.read()
     else:
@@ -310,28 +319,91 @@ def run_hook():
 
     analyzer = SafetyAnalyzer(rules)
     result = analyzer.analyze(source_code)
+    _emit_python_analyzer_decision(result)
 
-    if result["safe"]:
-        reason = "YOLT: Script analyzed - safe (imports: {})".format(
-            ", ".join(result["imports"]) if result["imports"] else "none"
+
+def run_hook():
+    """Run as a Claude Code PreToolUse hook.
+
+    Flow:
+      1. Validate this is a Bash invocation.
+      2. Decompose the command via shell_classifier (handles compound forms,
+         substitutions, wrappers, interpreters). The classifier delegates
+         python3 inline / script analysis to SafetyAnalyzer.
+      3. Map classifier decision -> hook response:
+           safe    -> permissionDecision: allow
+           unsafe  -> permissionDecision: ask (with explanation)
+           unknown -> exit silently, let Claude Code apply its default.
+    """
+    try:
+        hook_input = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError):
+        sys.exit(0)
+
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name != "Bash":
+        sys.exit(0)
+
+    command = hook_input.get("tool_input", {}).get("command", "")
+    if not command.strip():
+        sys.exit(0)
+
+    yolt_dir = Path(__file__).resolve().parent.parent
+    py_rules = load_rules(
+        rules_dir=yolt_dir / "rules",
+        user_overrides_path=Path.home() / ".claude" / "yolt" / "rules.json",
+    )
+
+    # Heredoc python3 invocations get handled directly - the heredoc body
+    # has embedded newlines that the shell decomposer would otherwise split
+    # into nonsense segments.
+    if command.lstrip().startswith("python3") and "<<" in command:
+        heredoc_source = extract_heredoc_script(command.lstrip())
+        if heredoc_source is not None:
+            analyzer = SafetyAnalyzer(py_rules)
+            result = analyzer.analyze(heredoc_source)
+            _emit_python_analyzer_decision(result)
+            sys.exit(0)
+
+    try:
+        hooks_dir = Path(__file__).resolve().parent
+        if str(hooks_dir) not in sys.path:
+            sys.path.insert(0, str(hooks_dir))
+        from shell_classifier import (
+            ShellClassifier, load_shell_rules,
+            DECISION_SAFE, DECISION_UNSAFE,
         )
-        response = make_hook_response("allow", reason)
+    except ImportError:
+        # Fallback: behave like the pre-shell-classifier version for python3
+        if not command.lstrip().startswith("python3"):
+            sys.exit(0)
+        _run_python_only_hook(command)
+        sys.exit(0)
+
+    shell_rules = load_shell_rules(
+        rules_dir=yolt_dir / "rules",
+        user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
+    )
+
+    def _python_factory():
+        retval = SafetyAnalyzer(py_rules)
+        return retval
+
+    classifier = ShellClassifier(shell_rules, python_analyzer_factory=_python_factory)
+    decision, reason = classifier.classify(command)
+
+    if decision == DECISION_SAFE:
+        response = make_hook_response("allow", "YOLT: {}".format(reason))
         print(json.dumps(response))
         sys.exit(0)
-    else:
-        lines = ["YOLT: Destructive operations detected:"]
-        for finding in result["findings"]:
-            line_info = "  Line {}: {} ({})".format(
-                finding["line"], finding["call"], finding["category"]
-            )
-            source_line = finding.get("source_line", "")
-            if source_line:
-                line_info += "\n    > {}".format(source_line)
-            lines.append(line_info)
-        reason = "\n".join(lines)
-        response = make_hook_response("ask", reason)
+    if decision == DECISION_UNSAFE:
+        response = make_hook_response(
+            "ask", "YOLT: Mutating command detected:\n  {}".format(reason)
+        )
         print(json.dumps(response))
         sys.exit(0)
+    # decision == DECISION_UNKNOWN: let Claude Code handle it
+    sys.exit(0)
 
 
 def run_cli():
