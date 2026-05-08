@@ -232,5 +232,121 @@ class TestHookAllowlistDiscovery(unittest.TestCase):
         self.assertEqual(self._decision("rm -rf /tmp/foo"), "ask")
 
 
+class TestHookLogFile(unittest.TestCase):
+    """When YOLT_LOG_FILE is set, the hook appends a JSON-line record per
+    Bash invocation regardless of the eventual decision. Used for
+    dogfooding and QA visibility."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="yolt-log-")
+        self.tmp = Path(self._tmp)
+        self.log_path = self.tmp / "yolt.log"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run_with_log(self, command):
+        env = dict(os.environ)
+        env["YOLT_LOG_FILE"] = str(self.log_path)
+        subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+    def _records(self):
+        if not self.log_path.exists():
+            return []
+        retval = []
+        for line in self.log_path.read_text().splitlines():
+            line = line.strip()
+            if line:
+                retval.append(json.loads(line))
+        return retval
+
+    def test_logs_safe_decision(self):
+        self._run_with_log("ls /tmp")
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["decision"], "safe")
+        self.assertEqual(recs[0]["command"], "ls /tmp")
+        self.assertIn("ts", recs[0])
+        self.assertIn("ls", recs[0]["reason"])
+
+    def test_logs_unsafe_decision(self):
+        self._run_with_log("rm -rf /tmp/foo")
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["decision"], "unsafe")
+        self.assertEqual(recs[0]["command"], "rm -rf /tmp/foo")
+
+    def test_logs_unknown_decision(self):
+        self._run_with_log("somecommand_unknown_xyz --flag")
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["decision"], "unknown")
+
+    def test_appends_across_invocations(self):
+        self._run_with_log("ls /tmp")
+        self._run_with_log("rm -rf /tmp/foo")
+        self._run_with_log("git status")
+        recs = self._records()
+        self.assertEqual(len(recs), 3)
+        decisions = [r["decision"] for r in recs]
+        self.assertEqual(decisions, ["safe", "unsafe", "safe"])
+
+    def test_long_command_is_truncated(self):
+        long_cmd = "echo " + ("x" * 1000)
+        self._run_with_log(long_cmd)
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertLessEqual(len(recs[0]["command"]), 500)
+
+    def test_no_log_file_when_env_unset(self):
+        # Sanity: without YOLT_LOG_FILE the hook does not write to the
+        # path even if it would have existed.
+        env = dict(os.environ)
+        env.pop("YOLT_LOG_FILE", None)
+        subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        self.assertFalse(self.log_path.exists())
+
+    def test_unwritable_log_path_does_not_break_hook(self):
+        # If the log path is unwritable, the hook must still emit its
+        # normal decision and exit cleanly. Logging is best-effort.
+        env = dict(os.environ)
+        env["YOLT_LOG_FILE"] = "/proc/cannot-write-here/yolt.log"
+        result = subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0)
+        # Decision is still emitted on stdout.
+        self.assertIn("hookSpecificOutput", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
