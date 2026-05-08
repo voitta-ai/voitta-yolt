@@ -1,0 +1,2 @@
+tree-sitter>=0.21
+tree-sitter-bash>=0.21

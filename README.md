@@ -14,44 +14,70 @@ YOLT closes two gaps in Claude Code's built-in allowlist matcher:
    runs, so loops and command substitutions prompt even when every inner
    command would be allowlisted on its own.
 
-YOLT ships with two analyzers that share a single `PreToolUse` hook entry:
+YOLT is built on three pieces, sharing a single `PreToolUse` hook entry:
 
-- **Shell classifier** (`hooks/shell_classifier.py`) - decomposes compound
-  commands, strips wrapper syntax, and classifies each atomic command
-  against `rules/shell.json`.
+- **Grammar classifier** (`hooks/grammar_classifier.py`) - parses the
+  Bash invocation with [tree-sitter-bash][ts-bash] and walks the resulting
+  AST, dispatching per node kind. This replaced the earlier hand-rolled
+  string walker (see [issue #4][issue-4] for the design rationale and
+  the migration's trigger bug).
+- **Rule classifier** (`hooks/rule_classifier.py`) - takes the argv tokens
+  the grammar walker reconstructs from each `command` node and looks them
+  up in `rules/shell.json`.
 - **Python analyzer** (`hooks/yolt_analyzer.py`) - parses Python source via
-  the AST and walks all calls against `rules/default.json`. Invoked by the
-  shell classifier for `python3 -c ...` and `python3 script.py`.
+  the stdlib `ast` module and walks all calls against `rules/default.json`.
+  Invoked by the grammar classifier for `python3 -c ...`,
+  `python3 script.py`, and `python3 <<EOF ... EOF` heredocs.
+
+[ts-bash]: https://github.com/tree-sitter/tree-sitter-bash
+[issue-4]: https://github.com/voitta-ai/voitta-yolt/issues/4
 
 ## How it works
 
 YOLT registers as a `PreToolUse` hook on the `Bash` tool. For every Bash
-invocation the hook:
+invocation the hook parses the command with tree-sitter-bash and walks
+the AST. Visitor dispatch:
 
-1. Extracts `$(...)` and `` `...` `` substitutions, classifying each inner
-   command.
-2. Splits the remainder on top-level `;`, `&&`, `||`, `|`, `&`, and
-   newlines into simple commands, while respecting quoting.
-3. Strips leading shell keywords (`for VAR in`, `while`, `if`, `do`,
-   `done`, `case PAT in`, ...) and environment-variable assignments
-   (`FOO=bar cmd`).
-4. Strips redirections. If any redirection writes to a file target other
-   than `/dev/null`, the command is left for Claude Code's default prompt
-   instead of being auto-allowed.
-5. Classifies the remaining argv:
-   - Safe shell builtin (`echo`, `pwd`, `test`, `[`, `cd`, ...) -> safe.
-   - Known interpreter (`python3`, `bash`, ...) -> delegate to the Python
-     analyzer or recurse into the shell classifier.
-   - Known command with rules (`aws`, `gh`, `curl`, `kubectl`, `git`,
-     `docker`, `terraform`, `find`, `sed`, ...) -> per-command rule.
-   - Wrappers (`time`, `xargs`, `timeout`, `env`, `nice`, `watch`, ...) ->
-     re-classify the wrapped command.
-   - Anything else -> unknown.
-6. Aggregates decisions with precedence `unsafe > unknown > safe`.
-7. Emits a hook response:
-   - `safe` -> `permissionDecision: allow` with a short reason.
-   - `unsafe` -> `permissionDecision: ask` with the specific reason.
-   - `unknown` -> silent exit; Claude Code falls through to its default.
+- `command` node — reconstruct argv from the typed argument children
+  (`word`, `string`, `raw_string`, `concatenation`, `simple_expansion`,
+  ...) and classify via `rules/shell.json`. Pre-command env assignments
+  (`FOO=bar baz`) are skipped, not folded into argv.
+- `pipeline`, `list`, `negated_command`, `subshell`, `compound_statement`
+  — recurse into children.
+- `if_statement`, `for_statement`, `while_statement`, `case_statement`,
+  `do_group` — recurse into bodies. No manual keyword stripping required;
+  the grammar already separates control-flow tokens from commands.
+- `redirected_statement` — check redirect targets. A write to anything
+  other than `/dev/null` falls through to `unknown` (Claude Code default
+  prompt). For `python3 << ... <<EOF` heredocs, the body goes to the
+  Python analyzer.
+- `command_substitution` (`$(...)`, `` `...` ``) and `process_substitution`
+  (`<(...)`) — recurse and classify the inner command separately. A
+  destructive substitution surfaces even when the outer command is safe
+  on its own.
+- `variable_assignment` — assignment is benign; only the RHS is walked
+  for nested substitutions.
+- `function_definition` — defining a function is not running it; the
+  body is dormant.
+
+After visiting, decisions are aggregated with precedence
+`unsafe > unknown > safe`, and the hook emits one of:
+
+- `safe` → `permissionDecision: allow` with a short reason.
+- `unsafe` → `permissionDecision: ask` with the specific reason.
+- `unknown` → silent exit; Claude Code falls through to its default.
+
+Within a `command`'s argv, classification dispatches by `command_name`:
+
+- Safe shell builtin (`echo`, `pwd`, `test`, `[`, `cd`, ...) → safe.
+- Interpreter (`python3`, `bash`, `sh`) → either delegate the inline
+  source to the Python analyzer (`-c '<script>'`, `script.py`, heredoc),
+  or re-parse and recurse via the grammar walker (`bash -c '<script>'`).
+- Known command with rules (`aws`, `gh`, `curl`, `kubectl`, `git`,
+  `docker`, `terraform`, `find`, `sed`, ...) → per-command rule.
+- Wrappers (`time`, `xargs`, `timeout`, `env`, `nice`, `watch`, ...) →
+  re-classify the wrapped command's argv.
+- Anything else → unknown.
 
 ## Install
 
@@ -143,7 +169,20 @@ Two rules apply:
   `aws iam delete-user` is mutating, a permissive `Bash(aws *)` does
   not turn it into safe - YOLT keeps flagging mutating calls.
 
-## What the shell classifier handles
+## Dependencies
+
+Two pure-Python deps via wheels:
+
+- [`tree-sitter`](https://pypi.org/project/tree-sitter/) — parser runtime.
+- [`tree-sitter-bash`](https://pypi.org/project/tree-sitter-bash/) — bash grammar.
+
+Install with `pip install -r requirements.txt`. The plugin install path
+expects them on the same Python that runs `hooks/pre-tool-use.sh`. If
+either is missing, the hook exits silently and Claude Code falls through
+to its default prompt — YOLT does not break the user's session on a
+broken install.
+
+## What the grammar classifier handles
 
 Example decisions (see `rules/shell.json` for the full rule set):
 
@@ -236,18 +275,19 @@ python3 hooks/yolt_analyzer.py script.py
 Classify a shell command directly:
 
 ```bash
-python3 hooks/shell_classifier.py 'for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done'
+python3 hooks/grammar_classifier.py 'for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done'
 ```
 
-Both return JSON. The shell classifier's output shape is
+Both return JSON. The grammar classifier's output shape is
 `{"decision": "safe|unsafe|unknown", "reason": "..."}`.
 
 ## Tests and demo
 
-Unit tests cover the decomposition helpers, the classifier, and the hook
-entry point. They use stdlib `unittest` only:
+Unit tests cover the rule classifier, the grammar classifier, and the
+hook entry point. They use stdlib `unittest` plus the two grammar deps:
 
 ```bash
+pip install -r requirements.txt
 python3 -m unittest discover -v tests
 ```
 
@@ -263,8 +303,13 @@ command, colorized when the terminal supports it.
 
 ## Design principles
 
-- **Zero dependencies** - stdlib only (`ast`, `json`, `fnmatch`, `shlex`, `re`)
-- **False positives OK, false negatives not** - unknown commands fall through
-  to Claude Code's default prompt rather than being auto-allowed.
-- **Configurable** - rules are data, not code.
-- **Fast** - classification is purely syntactic; no subprocess fork.
+- **Grammar-driven** — Bash decomposition uses the maintained
+  tree-sitter-bash grammar. Quoting, expansions, control flow, heredocs,
+  and process substitution are handled by the parser, not by string
+  walkers (see [issue #4][issue-4]).
+- **False positives OK, false negatives not** — unknown commands fall
+  through to Claude Code's default prompt rather than being auto-allowed.
+- **Configurable** — rules are data (`rules/shell.json`,
+  `rules/default.json`), not code.
+- **Fast** — classification is purely syntactic; no subprocess fork. A
+  representative compound command parses in ~1ms.

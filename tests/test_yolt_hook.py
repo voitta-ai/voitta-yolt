@@ -21,57 +21,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_DIR = REPO_ROOT / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
 
-from yolt_analyzer import (  # noqa: E402
-    extract_heredoc_script,
-    extract_script_from_command,
-)
-
-
-class TestHeredocExtraction(unittest.TestCase):
-    def test_simple_heredoc(self):
-        cmd = "python3 <<EOF\nprint(1)\nEOF\n"
-        self.assertEqual(extract_heredoc_script(cmd), "print(1)\n")
-
-    def test_single_quoted_delimiter(self):
-        cmd = "python3 <<'EOF'\nprint(1)\nEOF\n"
-        self.assertEqual(extract_heredoc_script(cmd), "print(1)\n")
-
-    def test_double_quoted_delimiter(self):
-        cmd = 'python3 <<"EOF"\nprint(1)\nEOF\n'
-        self.assertEqual(extract_heredoc_script(cmd), "print(1)\n")
-
-    def test_tab_strip_form(self):
-        cmd = "python3 <<-EOF\nprint(1)\nEOF\n"
-        self.assertEqual(extract_heredoc_script(cmd), "print(1)\n")
-
-    def test_no_heredoc(self):
-        self.assertIsNone(extract_heredoc_script("python3 script.py"))
-
-
-class TestExtractScriptFromCommand(unittest.TestCase):
-    def test_dash_c_inline(self):
-        kind, src = extract_script_from_command('python3 -c "print(1)"')
-        self.assertEqual((kind, src), ("inline", "print(1)"))
-
-    def test_heredoc_inline(self):
-        kind, src = extract_script_from_command(
-            "python3 <<EOF\nprint(1)\nEOF\n"
-        )
-        self.assertEqual(kind, "inline")
-        self.assertIn("print(1)", src)
-
-    def test_file_path(self):
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False
-        ) as f:
-            f.write("print(1)\n")
-            path = f.name
-        try:
-            kind, src = extract_script_from_command("python3 {}".format(path))
-            self.assertEqual((kind, src), ("file", path))
-        finally:
-            os.unlink(path)
-
 
 class HookSubprocess:
     """Helper to invoke yolt_analyzer.py --hook and parse the response."""
@@ -233,7 +182,8 @@ class TestHookEndToEnd(unittest.TestCase):
         resp = HookSubprocess.response_of(result)
         self.assertIsNotNone(resp)
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("Line 2", reason)
+        # SafetyAnalyzer reports findings as `L<line>:` in its reason field.
+        self.assertIn("L2", reason)
         self.assertIn("os.system", reason)
 
 

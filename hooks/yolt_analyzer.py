@@ -10,7 +10,6 @@ Zero external dependencies - stdlib only.
 import ast
 import json
 import os
-import shlex
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
@@ -208,55 +207,6 @@ class SafetyAnalyzer(ast.NodeVisitor):
         return retval
 
 
-def extract_heredoc_script(command):
-    """Extract Python source from a heredoc command like: python3 << 'EOF'\n...\nEOF"""
-    import re
-    # Match heredoc operator with optional quoting of delimiter
-    # Supports: << EOF, << 'EOF', << "EOF", <<-EOF, <<-'EOF', <<-"EOF"
-    match = re.match(r"python3\s+<<-?\s*['\"]?(\w+)['\"]?\s*\n", command)
-    if not match:
-        return None
-    delimiter = match.group(1)
-    # Find the closing delimiter on its own line
-    body_start = match.end()
-    closing_pattern = re.compile(r"^\s*" + re.escape(delimiter) + r"\s*$", re.MULTILINE)
-    closing_match = closing_pattern.search(command, body_start)
-    if not closing_match:
-        return None
-    retval = command[body_start:closing_match.start()]
-    return retval
-
-
-def extract_script_from_command(command):
-    """Extract the Python script path or inline code from a command string."""
-    # Check for heredoc before shlex.split (which doesn't understand heredocs)
-    if "<<" in command:
-        heredoc_source = extract_heredoc_script(command)
-        if heredoc_source is not None:
-            return "inline", heredoc_source
-
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return None, None
-
-    if not parts or parts[0] != "python3":
-        return None, None
-
-    if "-c" in parts:
-        idx = parts.index("-c")
-        if idx + 1 < len(parts):
-            return "inline", parts[idx + 1]
-
-    for part in parts[1:]:
-        if part.startswith("-"):
-            continue
-        if part.endswith(".py") or os.path.isfile(part):
-            return "file", part
-
-    return None, None
-
-
 def make_hook_response(decision, reason=None):
     """Build the Claude Code hook JSON response."""
     output = {
@@ -270,70 +220,23 @@ def make_hook_response(decision, reason=None):
     return output
 
 
-def _emit_python_analyzer_decision(result):
-    """Emit the Claude Code hook response for a Python analyzer result."""
-    if result["safe"]:
-        reason = "YOLT: Script analyzed - safe (imports: {})".format(
-            ", ".join(result["imports"]) if result["imports"] else "none"
-        )
-        response = make_hook_response("allow", reason)
-        print(json.dumps(response))
-        return
-    lines = ["YOLT: Destructive operations detected:"]
-    for finding in result["findings"]:
-        line_info = "  Line {}: {} ({})".format(
-            finding["line"], finding["call"], finding["category"]
-        )
-        source_line = finding.get("source_line", "")
-        if source_line:
-            line_info += "\n    > {}".format(source_line)
-        lines.append(line_info)
-    reason = "\n".join(lines)
-    response = make_hook_response("ask", reason)
-    print(json.dumps(response))
-
-
-def _run_python_only_hook(command):
-    """Legacy path - analyzes python3 invocations without the shell classifier.
-    Kept as a fallback when the shell classifier isn't importable."""
-    source_type, source = extract_script_from_command(command)
-    if source_type is None:
-        response = make_hook_response("ask", "YOLT: Could not extract script to analyze")
-        print(json.dumps(response))
-        return
-
-    if source_type == "file":
-        script_path = source
-        if not os.path.isfile(script_path):
-            return
-        with open(script_path, "r") as f:
-            source_code = f.read()
-    else:
-        source_code = source
-
-    yolt_dir = Path(__file__).resolve().parent.parent
-    rules = load_rules(
-        rules_dir=yolt_dir / "rules",
-        user_overrides_path=Path.home() / ".claude" / "yolt" / "rules.json",
-    )
-
-    analyzer = SafetyAnalyzer(rules)
-    result = analyzer.analyze(source_code)
-    _emit_python_analyzer_decision(result)
-
-
 def run_hook():
     """Run as a Claude Code PreToolUse hook.
 
     Flow:
       1. Validate this is a Bash invocation.
-      2. Decompose the command via shell_classifier (handles compound forms,
-         substitutions, wrappers, interpreters). The classifier delegates
-         python3 inline / script analysis to SafetyAnalyzer.
+      2. Parse the command with tree-sitter-bash and walk the AST via
+         GrammarClassifier (handles compound forms, substitutions,
+         wrappers, interpreters, heredocs uniformly). The classifier
+         delegates python3 inline / script analysis to SafetyAnalyzer.
       3. Map classifier decision -> hook response:
            safe    -> permissionDecision: allow
            unsafe  -> permissionDecision: ask (with explanation)
            unknown -> exit silently, let Claude Code apply its default.
+
+    If tree-sitter-bash is not importable on the host (broken install,
+    unsupported platform), exit silently so Claude Code falls through to
+    its default prompt rather than failing the hook.
     """
     try:
         hook_input = json.load(sys.stdin)
@@ -354,30 +257,18 @@ def run_hook():
         user_overrides_path=Path.home() / ".claude" / "yolt" / "rules.json",
     )
 
-    # Heredoc python3 invocations get handled directly - the heredoc body
-    # has embedded newlines that the shell decomposer would otherwise split
-    # into nonsense segments.
-    if command.lstrip().startswith("python3") and "<<" in command:
-        heredoc_source = extract_heredoc_script(command.lstrip())
-        if heredoc_source is not None:
-            analyzer = SafetyAnalyzer(py_rules)
-            result = analyzer.analyze(heredoc_source)
-            _emit_python_analyzer_decision(result)
-            sys.exit(0)
-
     try:
         hooks_dir = Path(__file__).resolve().parent
         if str(hooks_dir) not in sys.path:
             sys.path.insert(0, str(hooks_dir))
-        from shell_classifier import (
-            ShellClassifier, load_shell_rules, load_allow_patterns,
+        from grammar_classifier import GrammarClassifier
+        from rule_classifier import (
             DECISION_SAFE, DECISION_UNSAFE,
+            load_allow_patterns, load_shell_rules,
         )
     except ImportError:
-        # Fallback: behave like the pre-shell-classifier version for python3
-        if not command.lstrip().startswith("python3"):
-            sys.exit(0)
-        _run_python_only_hook(command)
+        # Most likely tree-sitter-bash isn't installed. Stay silent so
+        # Claude Code falls through to its default prompt.
         sys.exit(0)
 
     shell_rules = load_shell_rules(
@@ -385,10 +276,6 @@ def run_hook():
         user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
     )
 
-    # The user's settings.json `permissions.allow` Bash() entries become a
-    # secondary upgrade pass: any decomposed atom that the rule classifier
-    # would call `unknown` is upgraded to `safe` if its segment matches one
-    # of the user's allow patterns. Unsafe is never weakened.
     cwd_str = hook_input.get("cwd") or os.getcwd()
     cwd = Path(cwd_str)
     allow_patterns = load_allow_patterns([
@@ -398,10 +285,9 @@ def run_hook():
     ])
 
     def _python_factory():
-        retval = SafetyAnalyzer(py_rules)
-        return retval
+        return SafetyAnalyzer(py_rules)
 
-    classifier = ShellClassifier(
+    classifier = GrammarClassifier(
         shell_rules,
         python_analyzer_factory=_python_factory,
         allow_patterns=allow_patterns,
