@@ -8,6 +8,7 @@
 > [for James Bond ](https://www.youtube.com/watch?v=hs8uYxTJ530) in the rest of us. The hook gives
 > the agent a second pass before the destructive Bash actually runs.
 
+https://www.youtube.com/watch?v=hs8uYxTJ530
 
 A Claude Code hook that statically analyzes Bash invocations before
 execution, auto-allowing read-only ones and flagging mutating ones for
