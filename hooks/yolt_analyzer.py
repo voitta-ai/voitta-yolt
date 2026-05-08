@@ -8,6 +8,7 @@ Zero external dependencies - stdlib only.
 """
 
 import ast
+import datetime
 import json
 import os
 import sys
@@ -220,6 +221,35 @@ def make_hook_response(decision, reason=None):
     return output
 
 
+def _log_hook_decision(command, decision, reason):
+    """Append a JSON-line record of this hook fire to $YOLT_LOG_FILE if set.
+
+    Useful for dogfooding / QA: a user opens a fresh Claude Code session
+    with `YOLT_LOG_FILE=~/.claude/yolt.log` exported, runs commands as
+    normal, and tails the log to see exactly which decision YOLT made on
+    every Bash invocation — even when the user's `permissions.allow`
+    short-circuits the hook display in the Claude Code UI.
+
+    Failures (unwritable path, full disk) are swallowed: logging must
+    never break the hook. The Bash command is truncated to 500 chars to
+    avoid pathologically long lines.
+    """
+    log_path = os.environ.get("YOLT_LOG_FILE")
+    if not log_path:
+        return
+    try:
+        record = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "decision": decision,
+            "reason": reason,
+            "command": command[:500] if command else "",
+        }
+        with open(log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
 def run_hook():
     """Run as a Claude Code PreToolUse hook.
 
@@ -237,6 +267,9 @@ def run_hook():
     If tree-sitter-bash is not importable on the host (broken install,
     unsupported platform), exit silently so Claude Code falls through to
     its default prompt rather than failing the hook.
+
+    When `YOLT_LOG_FILE` is set, every examined Bash invocation appends
+    a JSON-line record there — including the silent-fallthrough cases.
     """
     try:
         hook_input = json.load(sys.stdin)
@@ -266,9 +299,8 @@ def run_hook():
             DECISION_SAFE, DECISION_UNSAFE,
             load_allow_patterns, load_shell_rules,
         )
-    except ImportError:
-        # Most likely tree-sitter-bash isn't installed. Stay silent so
-        # Claude Code falls through to its default prompt.
+    except ImportError as e:
+        _log_hook_decision(command, "import-error", str(e))
         sys.exit(0)
 
     shell_rules = load_shell_rules(
@@ -293,6 +325,7 @@ def run_hook():
         allow_patterns=allow_patterns,
     )
     decision, reason = classifier.classify(command)
+    _log_hook_decision(command, decision, reason)
 
     if decision == DECISION_SAFE:
         response = make_hook_response("allow", "YOLT: {}".format(reason))
