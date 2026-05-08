@@ -67,6 +67,28 @@ The plugin's `hooks/hooks.json` registers the `PreToolUse` hook on `Bash`
 automatically — no manual `settings.json` edit needed. Run
 `/plugin uninstall yolt@voitta-yolt` to remove.
 
+### Updating
+
+- **Plugin install:** `/plugin marketplace update voitta-yolt` pulls the
+  latest catalog; `/plugin update yolt@voitta-yolt` installs new versions.
+- **Manual install:** `git pull` in your local clone of this repo. The
+  hook script in your `settings.json` already points at
+  `<clone>/hooks/pre-tool-use.sh`, so the next Bash invocation picks up
+  the new code without further action.
+
+### Migrating from manual to plugin install
+
+If you already have the manual hook block in `~/.claude/settings.json`
+from an earlier install and want to switch to the plugin form:
+
+1. Remove the `hooks.PreToolUse` entry that points at
+   `voitta-yolt/hooks/pre-tool-use.sh` from your `settings.json`.
+2. Run `/plugin marketplace add voitta-ai/voitta-yolt` and
+   `/plugin install yolt@voitta-yolt`.
+
+Both forms run the same code; the plugin form just removes the manual
+edit and gives you `/plugin update` for upgrades.
+
 ### Manual install (without the plugin system)
 
 Add to `~/.claude/settings.json`:
