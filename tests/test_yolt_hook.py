@@ -309,11 +309,15 @@ class TestHookLogFile(unittest.TestCase):
         self.assertEqual(len(recs), 1)
         self.assertLessEqual(len(recs[0]["command"]), 500)
 
-    def test_no_log_file_when_env_unset(self):
-        # Sanity: without YOLT_LOG_FILE the hook does not write to the
-        # path even if it would have existed.
+    def test_default_log_path_used_when_env_unset(self):
+        # When YOLT_LOG_FILE is unset, the hook writes to the default
+        # path (~/.claude/yolt.log via $HOME). Redirect HOME so we can
+        # observe the default-path write without polluting the real one.
+        fake_home = self.tmp / "fake-home"
+        fake_home.mkdir()
         env = dict(os.environ)
         env.pop("YOLT_LOG_FILE", None)
+        env["HOME"] = str(fake_home)
         subprocess.run(
             [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
             input=json.dumps({
@@ -325,6 +329,33 @@ class TestHookLogFile(unittest.TestCase):
             timeout=30,
             env=env,
         )
+        default_log = fake_home / ".claude" / "yolt.log"
+        self.assertTrue(default_log.exists(), "default log path was not written")
+        line = default_log.read_text().strip()
+        record = json.loads(line)
+        self.assertEqual(record["decision"], "safe")
+        self.assertEqual(record["command"], "ls /tmp")
+
+    def test_empty_string_opts_out_of_logging(self):
+        # YOLT_LOG_FILE="" means the user explicitly opted out — no
+        # log file, default or otherwise.
+        fake_home = self.tmp / "fake-home"
+        fake_home.mkdir()
+        env = dict(os.environ)
+        env["YOLT_LOG_FILE"] = ""
+        env["HOME"] = str(fake_home)
+        subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        self.assertFalse((fake_home / ".claude" / "yolt.log").exists())
         self.assertFalse(self.log_path.exists())
 
     def test_unwritable_log_path_does_not_break_hook(self):

@@ -221,23 +221,43 @@ def make_hook_response(decision, reason=None):
     return output
 
 
+DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
+
+
+def _resolve_log_path():
+    """Resolve the log destination.
+
+    - `YOLT_LOG_FILE` unset -> default to ~/.claude/yolt.log (always-on
+      so plugin install gives users a usable log out of the box).
+    - `YOLT_LOG_FILE` set to an empty string -> opt out, no logging.
+    - Otherwise -> the path the user specified.
+    """
+    env_value = os.environ.get("YOLT_LOG_FILE")
+    if env_value is None:
+        return DEFAULT_LOG_PATH
+    if env_value == "":
+        return None
+    return Path(env_value)
+
+
 def _log_hook_decision(command, decision, reason):
-    """Append a JSON-line record of this hook fire to $YOLT_LOG_FILE if set.
+    """Append a JSON-line record of this hook fire to the resolved log
+    path. Logs by default to `~/.claude/yolt.log`; the user can override
+    with `YOLT_LOG_FILE=<path>` or opt out with `YOLT_LOG_FILE=""`.
 
-    Useful for dogfooding / QA: a user opens a fresh Claude Code session
-    with `YOLT_LOG_FILE=~/.claude/yolt.log` exported, runs commands as
-    normal, and tails the log to see exactly which decision YOLT made on
-    every Bash invocation — even when the user's `permissions.allow`
-    short-circuits the hook display in the Claude Code UI.
+    Useful for dogfooding / QA: tail the log to see exactly which
+    decision YOLT made on every Bash invocation — including the silent
+    unknown-fallthrough cases that the Claude Code UI hides.
 
-    Failures (unwritable path, full disk) are swallowed: logging must
-    never break the hook. The Bash command is truncated to 500 chars to
+    Failures (unwritable path, full disk, ...) are swallowed: logging
+    must never break the hook. The command is truncated to 500 chars to
     avoid pathologically long lines.
     """
-    log_path = os.environ.get("YOLT_LOG_FILE")
-    if not log_path:
+    log_path = _resolve_log_path()
+    if log_path is None:
         return
     try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "decision": decision,

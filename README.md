@@ -266,29 +266,32 @@ Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
 
 ## Debug / dogfood log
 
-Set `YOLT_LOG_FILE` and the hook appends one JSON line per Bash
-invocation it examines, regardless of the eventual decision:
-
-```bash
-export YOLT_LOG_FILE="$HOME/.claude/yolt.log"
-# Open a Claude Code session that inherits this env var.
-tail -f "$YOLT_LOG_FILE"
-```
-
-Each record:
+YOLT logs every examined Bash invocation by default to
+`~/.claude/yolt.log`. Each line is a JSON record:
 
 ```json
 {"ts": "2026-05-08T14:00:00.000+00:00", "decision": "safe", "reason": "ls: read-only", "command": "ls /tmp"}
 ```
 
-`decision` is one of `safe`, `unsafe`, `unknown`, or `import-error` (when
-the tree-sitter dependency is missing). The `command` field is truncated
-to 500 characters. Logging failures are swallowed — the hook never
-breaks the session because of an unwritable log path.
+`decision` is one of `safe`, `unsafe`, `unknown`, or `import-error` (the
+last when the tree-sitter dependency is missing). The `command` field is
+truncated to 500 characters. Logging failures are swallowed — the hook
+never breaks the session because of an unwritable log path.
+
+```bash
+tail -f ~/.claude/yolt.log
+```
 
 This is the cleanest way to QA YOLT against your own session: the
 Claude Code UI hides the hook's contribution when your `permissions.allow`
 already covers the command, but the log records every fire.
+
+To override the log location, set `YOLT_LOG_FILE` to an absolute path.
+To opt out entirely, set `YOLT_LOG_FILE=""` (empty string).
+
+> The log grows unbounded. There is no rotation today — if the file
+> gets uncomfortable, `truncate -s 0 ~/.claude/yolt.log` or rotate it
+> with your tool of choice.
 
 ## CLI usage
 
