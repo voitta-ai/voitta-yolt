@@ -1,33 +1,54 @@
-# YOLT - You Only Live Twice
+# YOLT — You Only Live Twice
 
-A Claude Code hook that statically analyzes commands before execution,
-auto-allowing read-only invocations and flagging mutating ones for review.
+> *YOLO* — "You Only Live Once" — is the
+> [vibe-coder's mantra][yolo-coding] for shipping fast and dealing with
+> consequences later.
+>
+> *YOLT* — "You Only Live Twice" — is the
+> [Nancy Sinatra title track][nancy] for the rest of us. The hook gives
+> the agent a second pass before the destructive Bash actually runs.
+
+[yolo-coding]: https://www.reddit.com/r/vibecoding/comments/1qyuvwe/the_transition_from_vibe_coding_to_yolo_coding/
+[nancy]: https://www.youtube.com/watch?v=hs8uYxTJ530
+
+A Claude Code hook that statically analyzes Bash invocations before
+execution, auto-allowing read-only ones and flagging mutating ones for
+review.
 
 YOLT closes two gaps in Claude Code's built-in allowlist matcher:
 
-1. **Arbitrary-execution wrappers.** Interpreters (`python3`, `bash`, `node`,
-   ...) and dual-use CLIs (`gh api`, `curl`, `kubectl`, ...) can't be
-   allowlisted with a wildcard without granting arbitrary execution, so a
-   long tail of clearly read-only invocations prompt every time.
+1. **Arbitrary-execution wrappers.** Interpreters (`bash`, `python3`,
+   `node`, ...) and dual-use CLIs (`gh api`, `curl`, `kubectl`, ...) can't
+   be allowlisted with a wildcard without granting arbitrary execution,
+   so a long tail of clearly read-only invocations prompt every time.
 2. **Compound shell commands.** The built-in matcher sees the outer wrapper
    (`for`, `while`, `bash -c "..."`, `$(...)`), not the inner commands it
    runs, so loops and command substitutions prompt even when every inner
    command would be allowlisted on its own.
 
-YOLT is built on three pieces, sharing a single `PreToolUse` hook entry:
+The hook entry is one piece, with two specialized followers:
 
-- **Grammar classifier** (`hooks/grammar_classifier.py`) - parses the
+- **Grammar classifier** (`hooks/grammar_classifier.py`) — parses the
   Bash invocation with [tree-sitter-bash][ts-bash] and walks the resulting
   AST, dispatching per node kind. This replaced the earlier hand-rolled
-  string walker (see [issue #4][issue-4] for the design rationale and
-  the migration's trigger bug).
-- **Rule classifier** (`hooks/rule_classifier.py`) - takes the argv tokens
+  string walker (see [issue #4][issue-4] for the design rationale and the
+  migration's trigger bug).
+- **Rule classifier** (`hooks/rule_classifier.py`) — takes the argv tokens
   the grammar walker reconstructs from each `command` node and looks them
   up in `rules/shell.json`.
-- **Python analyzer** (`hooks/yolt_analyzer.py`) - parses Python source via
-  the stdlib `ast` module and walks all calls against `rules/default.json`.
-  Invoked by the grammar classifier for `python3 -c ...`,
-  `python3 script.py`, and `python3 <<EOF ... EOF` heredocs.
+
+When the Bash invocation invokes an interpreter inline — `bash -c '...'`,
+`sh -c '...'`, `python3 -c '...'`, `python3 file.py`,
+`python3 <<EOF ... EOF` — the grammar classifier delegates the inner
+source to a per-language analyzer:
+
+- `bash`, `sh` → re-enter the grammar walker on the inline script.
+- `python3` → `hooks/yolt_analyzer.py` walks the Python source via the
+  stdlib `ast` module against `rules/default.json`.
+
+Other interpreters (`node`, `ruby`, ...) are not analyzed inline today;
+they fall through to `unknown`. Adding one means writing an analyzer of
+the same shape and registering it in `rules/shell.json`.
 
 [ts-bash]: https://github.com/tree-sitter/tree-sitter-bash
 [issue-4]: https://github.com/voitta-ai/voitta-yolt/issues/4
