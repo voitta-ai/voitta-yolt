@@ -1,15 +1,13 @@
 # YOLT — You Only Live Twice
 
 > *YOLO* — "You Only Live Once" — is the
-> [vibe-coder's mantra][yolo-coding] for shipping fast and dealing with
+> [vibe-coder's mantra][https://www.reddit.com/r/vibecoding/comments/1qyuvwe/the_transition_from_vibe_coding_to_yolo_coding/] for shipping fast and dealing with
 > consequences later.
 >
 > *YOLT* — "You Only Live Twice" — is the
-> [Nancy Sinatra title track][nancy] for the rest of us. The hook gives
+> [for James Bond ](https://www.youtube.com/watch?v=hs8uYxTJ530) in the rest of us. The hook gives
 > the agent a second pass before the destructive Bash actually runs.
 
-[yolo-coding]: https://www.reddit.com/r/vibecoding/comments/1qyuvwe/the_transition_from_vibe_coding_to_yolo_coding/
-[nancy]: https://www.youtube.com/watch?v=hs8uYxTJ530
 
 A Claude Code hook that statically analyzes Bash invocations before
 execution, auto-allowing read-only ones and flagging mutating ones for
