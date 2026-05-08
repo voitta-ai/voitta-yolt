@@ -1,0 +1,31 @@
+{
+  "_comment": "Place this file at ~/.claude/yolt/shell.json to override shell classifier defaults. Overrides merge per top-level key, one level deep.",
+
+  "commands": {
+    "mycli": {
+      "default": "subcommand",
+      "safe_subcommands": ["status", "show", "describe"],
+      "unsafe_subcommands": ["apply", "reset"]
+    },
+
+    "aws": {
+      "service_overrides": {
+        "athena": {
+          "extra_safe_patterns": ["start-query-execution", "stop-query-execution"]
+        }
+      }
+    }
+  },
+
+  "shell_builtins_safe": [
+    "echo", "printf", "pwd", "true", "false",
+    "test", "[", "[[",
+    "cd", "pushd", "popd", "dirs",
+    "type", "command", "hash",
+    "alias", "unalias",
+    "history", "fc",
+    "jobs", "wait",
+    "let", "read",
+    "my-safe-wrapper"
+  ]
+}
