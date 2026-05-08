@@ -84,7 +84,7 @@ commands=(
   'curl --data foo=bar https://api.example.com/users'
   'kubectl exec -it pod -- bash'
   'kubectl apply -f manifest.yaml'
-  'git push origin main'
+  'git push origin master'
   'terraform apply'
   'terraform state rm foo.bar'
 
