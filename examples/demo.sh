@@ -1,10 +1,10 @@
 #!/bin/bash
-# examples/demo.sh - show the shell classifier's decision on a range of
+# examples/demo.sh - show the grammar classifier's decision on a range of
 # representative invocations.
 #
 # This is a "visual" check, not an assertion-backed test: it prints the
 # decision for each command so a human can confirm the classifier behaves
-# sensibly. For programmatic checks see tests/test_shell_classifier.py.
+# sensibly. For programmatic checks see tests/test_grammar_classifier.py.
 #
 # Usage:
 #     ./examples/demo.sh
@@ -17,7 +17,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 YOLT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLS="$YOLT_ROOT/hooks/shell_classifier.py"
+CLS="$YOLT_ROOT/hooks/grammar_classifier.py"
 
 if [[ ! -f "$CLS" ]]; then
   echo "error: cannot find $CLS" >&2
