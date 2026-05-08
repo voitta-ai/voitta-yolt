@@ -1,7 +1,7 @@
 # YOLT — You Only Live Twice
 
 > *YOLO* — "You Only Live Once" — is the
-> [vibe-coder's mantra][https://www.reddit.com/r/vibecoding/comments/1qyuvwe/the_transition_from_vibe_coding_to_yolo_coding/] for shipping fast and dealing with
+> [vibe-coder's mantra](https://www.reddit.com/r/vibecoding/comments/1qyuvwe/the_transition_from_vibe_coding_to_yolo_coding/) for shipping fast and dealing with
 > consequences later.
 >
 > *YOLT* — "You Only Live Twice" — is the
