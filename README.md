@@ -88,17 +88,11 @@ After visiting, decisions are aggregated with precedence
 - `unsafe` → `permissionDecision: ask` with the specific reason.
 - `unknown` → silent exit; Claude Code falls through to its default.
 
-Within a `command`'s argv, classification dispatches by `command_name`:
-
-- Safe shell builtin (`echo`, `pwd`, `test`, `[`, `cd`, ...) → safe.
-- Interpreter (`python3`, `bash`, `sh`) → either delegate the inline
-  source to the Python analyzer (`-c '<script>'`, `script.py`, heredoc),
-  or re-parse and recurse via the grammar walker (`bash -c '<script>'`).
-- Known command with rules (`aws`, `gh`, `curl`, `kubectl`, `git`,
-  `docker`, `terraform`, `find`, `sed`, ...) → per-command rule.
-- Wrappers (`time`, `xargs`, `timeout`, `env`, `nice`, `watch`, ...) →
-  re-classify the wrapped command's argv.
-- Anything else → unknown.
+Argv is dispatched per-`command_name`: safe builtins → safe;
+interpreters delegate inline scripts (see lead-in); known CLIs use
+their `rules/shell.json` spec; wrappers (`time`, `xargs`, `timeout`,
+`env`, `nice`, `watch`, ...) re-classify the wrapped command; anything
+else → unknown.
 
 ## Install
 
@@ -116,8 +110,12 @@ automatically — no manual `settings.json` edit needed. Run
 
 ### Updating
 
-- **Plugin install:** `/plugin marketplace update voitta-yolt` pulls the
-  latest catalog; `/plugin update yolt@voitta-yolt` installs new versions.
+- **Plugin install:** `/plugin marketplace update voitta-yolt` pulls
+  the latest code into your local marketplace clone. Then either
+  `/reload-plugins` or restart Claude Code so the running session
+  picks up the new code. (Some Claude Code versions don't have a
+  `/plugin update` subcommand — `marketplace update` + reload is the
+  reliable path.)
 - **Manual install:** `git pull` in your local clone of this repo. The
   hook script in your `settings.json` already points at
   `<clone>/hooks/pre-tool-use.sh`, so the next Bash invocation picks up
@@ -133,8 +131,9 @@ from an earlier install and want to switch to the plugin form:
 2. Run `/plugin marketplace add voitta-ai/voitta-yolt` and
    `/plugin install yolt@voitta-yolt`.
 
-Both forms run the same code; the plugin form just removes the manual
-edit and gives you `/plugin update` for upgrades.
+Both forms run the same code; the plugin form removes the manual edit
+and lets you upgrade with `/plugin marketplace update voitta-yolt` plus
+a reload.
 
 ### Manual install (without the plugin system)
 
@@ -170,25 +169,24 @@ Add to `~/.claude/settings.json`:
 
 YOLT reads your `permissions.allow` Bash() entries from
 `~/.claude/settings.json`, the project's `.claude/settings.json`, and
-`.claude/settings.local.json`. After the rule classifier runs, any
-*decomposed segment* that would otherwise be `unknown` is upgraded to
-`safe` if it matches one of those patterns.
+`.claude/settings.local.json`. After the rule classifier runs on each
+AST `command` node, any node that would otherwise be `unknown` is
+upgraded to `safe` if its reconstructed argv matches one of those
+patterns.
 
 This earns its keep on compound forms. The built-in matcher only sees
 the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
-already allowlisted (`Bash(mycli list*)`) still prompts. YOLT splits the
-loop into atomic segments, each of which gets the allowlist match.
+already allowlisted (`Bash(mycli list*)`) still prompts. YOLT walks
+into the loop body and matches each command against the allowlist.
 
 Two rules apply:
 
-- The match works on the segment string after substitution extraction
-  and top-level splitting, using `fnmatch` glob semantics - the same
-  semantics Claude Code's outer matcher uses. `Bash(env)` matches
-  `env` exactly; `Bash(aws s3 ls*)` matches anything that starts with
-  `aws s3 ls`.
+- The match uses `fnmatch` glob semantics — the same semantics Claude
+  Code's outer matcher uses. `Bash(env)` matches `env` exactly;
+  `Bash(aws s3 ls*)` matches anything that starts with `aws s3 ls`.
 - A match **never weakens an `unsafe` decision**. If your rules say
   `aws iam delete-user` is mutating, a permissive `Bash(aws *)` does
-  not turn it into safe - YOLT keeps flagging mutating calls.
+  not turn it into safe — YOLT keeps flagging mutating calls.
 
 ## Dependencies
 
@@ -235,19 +233,26 @@ Example decisions (see `rules/shell.json` for the full rule set):
 | `cat file > /tmp/out`                                        | unknown (writes to a file) |
 | `aws ec2 describe-instances > /dev/null`                     | allow    |
 
-## Python-analyzer rules
+## Python rules (interpreter delegate)
+
+When the grammar walker hands a Python source body to the analyzer
+(`python3 -c '...'`, `python3 file.py`, `python3 <<EOF ... EOF`), the
+analyzer walks the source via the stdlib `ast` module and matches calls
+against `rules/default.json`. Bash classification stays in charge — the
+Python analyzer just answers "is this python body destructive?" when
+asked.
 
 `rules/default.json` covers:
 
-- **AWS boto3** - `describe/list/get/head` safe; `delete/put/create/terminate` destructive
-- **File I/O** - `open()` write modes, `os.remove`, `shutil.rmtree`, etc.
-- **Subprocess** - `subprocess.run`, `os.system`, etc. (always flagged)
-- **Network** - `requests.get` safe; `requests.post/put/delete` destructive
-- **Database** - connection creation flagged for review
+- **AWS boto3** — `describe/list/get/head` safe; `delete/put/create/terminate` destructive.
+- **File I/O** — `open()` write modes, `os.remove`, `shutil.rmtree`, etc.
+- **Subprocess** — `subprocess.run`, `os.system`, etc. (always flagged).
+- **Network** — `requests.get` safe; `requests.post/put/delete` destructive.
+- **Database** — connection creation flagged for review.
 
-Rules use `trigger_imports` to scope checks. For example, boto3 patterns only
-apply when `boto3` is imported, so `cache.delete_item()` in a non-AWS script
-won't false-positive.
+Rules use `trigger_imports` to scope checks. For example, boto3 patterns
+only apply when `boto3` is imported, so `cache.delete_item()` in a
+non-AWS script doesn't false-positive.
 
 ## Custom rules
 
@@ -316,20 +321,21 @@ To opt out entirely, set `YOLT_LOG_FILE=""` (empty string).
 
 ## CLI usage
 
-Analyze a Python script directly:
-
-```bash
-python3 hooks/yolt_analyzer.py script.py
-```
-
-Classify a shell command directly:
+Classify a Bash command directly — same code path as the hook:
 
 ```bash
 python3 hooks/grammar_classifier.py 'for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done'
 ```
 
-Both return JSON. The grammar classifier's output shape is
-`{"decision": "safe|unsafe|unknown", "reason": "..."}`.
+Output: `{"decision": "safe|unsafe|unknown", "reason": "..."}`.
+
+The Python analyzer is invoked through the grammar classifier in
+normal use. To analyze a `.py` file in isolation (debugging the rules,
+not the hook flow):
+
+```bash
+python3 hooks/yolt_analyzer.py script.py
+```
 
 ## Tests and demo
 
