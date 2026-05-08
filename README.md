@@ -55,6 +55,20 @@ invocation the hook:
 
 ## Install
 
+YOLT ships as a [Claude Code plugin](https://code.claude.com/docs/en/plugins).
+This repo is its own marketplace, so the install is two slash commands:
+
+```
+/plugin marketplace add voitta-ai/voitta-yolt
+/plugin install yolt@voitta-yolt
+```
+
+The plugin's `hooks/hooks.json` registers the `PreToolUse` hook on `Bash`
+automatically — no manual `settings.json` edit needed. Run
+`/plugin uninstall yolt@voitta-yolt` to remove.
+
+### Manual install (without the plugin system)
+
 Add to `~/.claude/settings.json`:
 
 ```json

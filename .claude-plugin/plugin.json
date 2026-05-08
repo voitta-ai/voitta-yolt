@@ -1,0 +1,11 @@
+{
+  "name": "yolt",
+  "description": "Static safety analyzer for Bash invocations - auto-allows read-only commands and prompts for mutating ones, plus a Python AST analyzer for python3 / python3 -c / heredoc invocations.",
+  "version": "0.1.0",
+  "author": {
+    "name": "voitta-ai"
+  },
+  "homepage": "https://github.com/voitta-ai/voitta-yolt",
+  "repository": "https://github.com/voitta-ai/voitta-yolt",
+  "license": "MIT"
+}

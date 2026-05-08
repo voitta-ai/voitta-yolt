@@ -1,0 +1,14 @@
+{
+  "name": "voitta-yolt",
+  "owner": {
+    "name": "voitta-ai"
+  },
+  "description": "YOLT - You Only Live Twice. Bash safety analyzer for Claude Code.",
+  "plugins": [
+    {
+      "name": "yolt",
+      "source": ".",
+      "description": "Static safety analyzer for Bash invocations - auto-allows read-only commands and prompts for mutating ones."
+    }
+  ]
+}
