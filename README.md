@@ -30,7 +30,7 @@
 
 ## Introduction
 
-A Claude Code hook that statically analyzes Bash invocations before
+A Claude Code hook that statically analyzes script invocations before
 execution, auto-allowing read-only ones and flagging mutating ones for
 review.
 
