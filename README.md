@@ -8,6 +8,27 @@
 > [for James Bond ](https://www.youtube.com/watch?v=hs8uYxTJ530) in the rest of us.
 > The hook gives the agent a second pass before the destructive Bash actually runs.
 
+## Contents
+
+- [Introduction](#introduction)
+- [How it works](#how-it-works)
+- [Install](#install)
+  - [Updating](#updating)
+  - [Migrating from manual to plugin install](#migrating-from-manual-to-plugin-install)
+  - [Manual install (without the plugin system)](#manual-install-without-the-plugin-system)
+- [User allowlist as a secondary upgrade pass](#user-allowlist-as-a-secondary-upgrade-pass)
+- [Dependencies](#dependencies)
+- [What the grammar classifier handles](#what-the-grammar-classifier-handles)
+- [Python rules (interpreter delegate)](#python-rules-interpreter-delegate)
+- [Custom rules](#custom-rules)
+  - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
+  - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
+- [Debug / dogfood log](#debug--dogfood-log)
+- [CLI usage](#cli-usage)
+- [Tests and demo](#tests-and-demo)
+- [Design principles](#design-principles)
+
+## Introduction
 
 A Claude Code hook that statically analyzes Bash invocations before
 execution, auto-allowing read-only ones and flagging mutating ones for
@@ -50,25 +71,6 @@ the same shape and registering it in `rules/shell.json`.
 
 [ts-bash]: https://github.com/tree-sitter/tree-sitter-bash
 [issue-4]: https://github.com/voitta-ai/voitta-yolt/issues/4
-
-## Contents
-
-- [How it works](#how-it-works)
-- [Install](#install)
-  - [Updating](#updating)
-  - [Migrating from manual to plugin install](#migrating-from-manual-to-plugin-install)
-  - [Manual install (without the plugin system)](#manual-install-without-the-plugin-system)
-- [User allowlist as a secondary upgrade pass](#user-allowlist-as-a-secondary-upgrade-pass)
-- [Dependencies](#dependencies)
-- [What the grammar classifier handles](#what-the-grammar-classifier-handles)
-- [Python rules (interpreter delegate)](#python-rules-interpreter-delegate)
-- [Custom rules](#custom-rules)
-  - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
-  - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
-- [Debug / dogfood log](#debug--dogfood-log)
-- [CLI usage](#cli-usage)
-- [Tests and demo](#tests-and-demo)
-- [Design principles](#design-principles)
 
 ## How it works
 
