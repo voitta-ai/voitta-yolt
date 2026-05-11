@@ -241,6 +241,7 @@ class RuleClassifier:
     def classify_interpreter(self, name, cmd_args, _depth):
         spec = self.interpreters[name]
         inline_flag = spec.get("inline_flag")
+        module_flag = spec.get("module_flag")
         delegate = spec.get("delegate", "unknown")
         read_script_file = spec.get("read_script_file", False)
 
@@ -262,6 +263,18 @@ class RuleClassifier:
                 return (d, "{} -c -> {}".format(name, r))
             return (DECISION_UNKNOWN, "cannot analyze inline {}".format(delegate))
 
+        # `python3 -m <module> [args...]` — classify by module name. The
+        # module-rule data lives in `interpreters.<name>.{safe,unsafe}_modules`
+        # plus `nested_modules` for cases like `pip` where the subcommand
+        # decides (install/uninstall = unsafe, list/show/freeze = safe).
+        if module_flag and module_flag in cmd_args:
+            idx = cmd_args.index(module_flag)
+            if idx + 1 < len(cmd_args):
+                module = cmd_args[idx + 1]
+                module_args = cmd_args[idx + 2:]
+                return self._classify_module(name, module, module_args, spec)
+            return (DECISION_UNKNOWN, "{} {}: no module".format(name, module_flag))
+
         if read_script_file and delegate == "python":
             for arg in cmd_args:
                 if arg.startswith("-"):
@@ -276,6 +289,59 @@ class RuleClassifier:
                 break
 
         return (DECISION_UNKNOWN, "{} invocation not analyzable".format(name))
+
+    def _classify_module(self, name, module, module_args, spec):
+        safe_modules = set(spec.get("safe_modules", []))
+        unsafe_modules = set(spec.get("unsafe_modules", []))
+        nested = spec.get("nested_modules", {})
+
+        if module in safe_modules:
+            return (DECISION_SAFE, "{} -m {}: read-only".format(name, module))
+        if module in unsafe_modules:
+            return (DECISION_UNSAFE, "{} -m {}: mutating".format(name, module))
+
+        if module in nested:
+            return self._classify_nested_module(
+                name, module, module_args, nested[module]
+            )
+
+        for pat in spec.get("safe_module_patterns", []):
+            if fnmatch(module, pat):
+                return (DECISION_SAFE,
+                        "{} -m {}: matches safe pattern".format(name, module))
+        for pat in spec.get("unsafe_module_patterns", []):
+            if fnmatch(module, pat):
+                return (DECISION_UNSAFE,
+                        "{} -m {}: matches unsafe pattern".format(name, module))
+
+        return (DECISION_UNKNOWN, "{} -m {}: no rule".format(name, module))
+
+    def _classify_nested_module(self, name, module, args, mod_spec):
+        safe_subs = set(mod_spec.get("safe_subcommands", []))
+        unsafe_subs = set(mod_spec.get("unsafe_subcommands", []))
+
+        sub = None
+        for a in args:
+            if not a.startswith("-"):
+                sub = a
+                break
+
+        label = "{} -m {}".format(name, module)
+
+        if sub is None:
+            default = mod_spec.get("default")
+            if default == "safe":
+                return (DECISION_SAFE, "{}: read-only".format(label))
+            if default == "unsafe":
+                return (DECISION_UNSAFE, "{}: mutating".format(label))
+            return (DECISION_UNKNOWN, "{}: no subcommand".format(label))
+
+        if sub in safe_subs:
+            return (DECISION_SAFE, "{} {}: read-only".format(label, sub))
+        if sub in unsafe_subs:
+            return (DECISION_UNSAFE, "{} {}: mutating".format(label, sub))
+
+        return (DECISION_UNKNOWN, "{} {}: no rule".format(label, sub))
 
     def classify_python_source(self, source, description):
         if self.python_analyzer_factory is None:

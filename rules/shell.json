@@ -40,8 +40,54 @@
   ],
 
   "interpreters": {
-    "python3": {"inline_flag": "-c", "delegate": "python", "read_script_file": true},
-    "python":  {"inline_flag": "-c", "delegate": "python", "read_script_file": true},
+    "python3": {
+      "inline_flag": "-c",
+      "module_flag": "-m",
+      "delegate": "python",
+      "read_script_file": true,
+      "safe_modules": [
+        "json.tool",
+        "tokenize", "dis", "ast", "py_compile", "tabnanny",
+        "this", "antigravity",
+        "calendar", "uuid", "secrets",
+        "site", "sysconfig", "platform",
+        "pdb",
+        "timeit", "cProfile", "profile",
+        "doctest",
+        "base64", "binhex"
+      ],
+      "unsafe_modules": [
+        "http.server",
+        "SimpleHTTPServer",
+        "smtpd",
+        "webbrowser",
+        "compileall",
+        "venv",
+        "ensurepip",
+        "zipfile"
+      ],
+      "nested_modules": {
+        "pip": {
+          "safe_subcommands": [
+            "list", "show", "freeze", "help", "search", "check",
+            "config", "debug", "inspect", "index", "hash", "completion"
+          ],
+          "unsafe_subcommands": [
+            "install", "uninstall", "download", "wheel"
+          ]
+        },
+        "unittest": {
+          "safe_subcommands": ["discover"],
+          "default": "safe"
+        }
+      }
+    },
+    "python":  {
+      "inline_flag": "-c",
+      "module_flag": "-m",
+      "delegate": "python",
+      "read_script_file": true
+    },
     "bash":    {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
     "sh":      {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
     "zsh":     {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
