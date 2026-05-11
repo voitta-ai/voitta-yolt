@@ -256,13 +256,35 @@ class TestClassifyScenarios(unittest.TestCase):
             "somecommand_unknown --flag", DECISION_UNKNOWN,
         )
 
-    def test_redirect_write_to_file_is_unknown(self):
+    def test_redirect_write_to_unknown_dir_is_unknown(self):
+        # A relative path in the cwd is not on the safe-write list.
         self.assertDecision(
             "aws ec2 describe-instances > out.json", DECISION_UNKNOWN,
         )
 
     def test_echo_to_system_file_is_unknown(self):
         self.assertDecision("echo x > /etc/profile", DECISION_UNKNOWN)
+
+    def test_redirect_to_tmp_is_safe(self):
+        # /tmp/* is on the default safe-write list — benign in practice
+        # and a common shape for CLI pipelines that stash intermediate
+        # results.
+        self.assertDecision(
+            "gh api /users/me/events 2>/dev/null | jq . > /tmp/events.json",
+            DECISION_SAFE,
+        )
+
+    def test_redirect_to_var_folders_is_safe(self):
+        # macOS temp dir.
+        self.assertDecision(
+            "echo hi > /var/folders/y6/abc/T/scratch.json",
+            DECISION_SAFE,
+        )
+
+    def test_redirect_to_home_cache_is_safe(self):
+        # ~/.cache is on the default list. Both the literal tilde and
+        # the expanded form should match.
+        self.assertDecision("echo hi > ~/.cache/foo", DECISION_SAFE)
 
 
 class TestMultilineHandling(unittest.TestCase):
@@ -428,6 +450,40 @@ class TestGrammarSpecific(unittest.TestCase):
             "while read x; do rm -rf \"$x\"; done < list.txt",
             DECISION_UNSAFE,
         )
+
+
+class TestSafeWriteTargets(unittest.TestCase):
+    """Custom safe-write-target lists from `rules.safe_write_targets`."""
+
+    def _make_classifier_with_targets(self, targets):
+        py_rules = load_py_rules(REPO_ROOT / "rules")
+        shell_rules = dict(load_shell_rules(REPO_ROOT / "rules"))
+        shell_rules["safe_write_targets"] = targets
+
+        def factory():
+            return SafetyAnalyzer(py_rules)
+
+        return GrammarClassifier(shell_rules, python_analyzer_factory=factory)
+
+    def test_only_dev_null_when_list_minimal(self):
+        clf = self._make_classifier_with_targets(["/dev/null"])
+        d, _ = clf.classify("echo x > /tmp/foo")
+        self.assertEqual(d, DECISION_UNKNOWN)
+        d, _ = clf.classify("echo x > /dev/null")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_custom_glob_match(self):
+        clf = self._make_classifier_with_targets(["/dev/null", "/scratch/*"])
+        d, _ = clf.classify("echo x > /scratch/foo.json")
+        self.assertEqual(d, DECISION_SAFE)
+        d, _ = clf.classify("echo x > /elsewhere/foo.json")
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_append_redirect_is_also_checked(self):
+        # `>>` is an append-write; still subject to the same rule.
+        clf = self._make_classifier_with_targets(["/dev/null"])
+        d, _ = clf.classify("echo x >> /tmp/foo")
+        self.assertEqual(d, DECISION_UNKNOWN)
 
 
 class TestClassifierAllowPatterns(unittest.TestCase):
