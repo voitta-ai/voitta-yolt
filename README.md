@@ -217,11 +217,25 @@ Two pure-Python deps via wheels:
 - [`tree-sitter`](https://pypi.org/project/tree-sitter/) — parser runtime.
 - [`tree-sitter-bash`](https://pypi.org/project/tree-sitter-bash/) — bash grammar.
 
-Install with `pip install -r requirements.txt`. The plugin install path
-expects them on the same Python that runs `hooks/pre-tool-use.sh`. If
-either is missing, the hook exits silently and Claude Code falls through
-to its default prompt — YOLT does not break the user's session on a
-broken install.
+`hooks/pre-tool-use.sh` bootstraps these on first run: probes the import,
+and if missing, runs `pip install --user -r requirements.txt` (falling
+back to `--break-system-packages` for PEP 668 environments). A marker
+under `~/.cache/yolt/deps-installed-<sha>` records success and is keyed
+to the `requirements.txt` content hash, so a dep bump triggers re-bootstrap.
+Subsequent hook fires skip the import probe entirely.
+
+If the bootstrap fails (no network, locked-down pip, exotic Python
+distribution), the hook exits silently and Claude Code falls through to
+its default prompt — YOLT does not break the user's session on a broken
+install. The failure is recorded in `~/.claude/yolt.log` as
+`decision: "import-error"`; the user can fix manually with
+`pip install -r requirements.txt` and the next hook fire picks it up.
+
+To force re-bootstrap (after a venv switch or manual uninstall):
+
+```bash
+rm ~/.cache/yolt/deps-installed-*
+```
 
 ## What the grammar classifier handles
 

@@ -232,6 +232,65 @@ class TestHookAllowlistDiscovery(unittest.TestCase):
         self.assertEqual(self._decision("rm -rf /tmp/foo"), "ask")
 
 
+class TestBootstrapShell(unittest.TestCase):
+    """The shell wrapper `pre-tool-use.sh` bootstraps tree-sitter deps on
+    first run, then execs the Python analyzer. These tests exercise the
+    bash bootstrap path without actually running pip — we point HOME at a
+    fresh temp dir and verify that a marker appears after a successful
+    run (deps are already importable in the test process), and that
+    subsequent invocations skip the import probe entirely."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="yolt-bootstrap-")
+        self.tmp = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run(self, command, env_overrides=None):
+        env = dict(os.environ)
+        env["HOME"] = str(self.tmp)
+        env["YOLT_LOG_FILE"] = ""  # opt out of log noise for this class
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(
+            [str(HOOKS_DIR / "pre-tool-use.sh")],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+
+    def test_first_run_creates_marker(self):
+        result = self._run("ls /tmp")
+        self.assertEqual(result.returncode, 0)
+        cache = self.tmp / ".cache" / "yolt"
+        markers = list(cache.glob("deps-installed-*"))
+        self.assertEqual(len(markers), 1, "expected one marker file under {}".format(cache))
+
+    def test_subsequent_run_keeps_same_marker(self):
+        self._run("ls /tmp")
+        self._run("ls /tmp")
+        markers = list((self.tmp / ".cache" / "yolt").glob("deps-installed-*"))
+        self.assertEqual(len(markers), 1)
+
+    def test_hook_still_emits_decision_through_bootstrap(self):
+        # Sanity: the bootstrap wrapper transparently passes through to
+        # the analyzer's stdout.
+        result = self._run("rm -rf /tmp/yolt-bootstrap-fake")
+        self.assertEqual(result.returncode, 0)
+        last = [l for l in result.stdout.splitlines() if l.strip()][-1]
+        parsed = json.loads(last)
+        self.assertEqual(
+            parsed["hookSpecificOutput"]["permissionDecision"], "ask",
+        )
+
+
 class TestHookLogFile(unittest.TestCase):
     """When YOLT_LOG_FILE is set, the hook appends a JSON-line record per
     Bash invocation regardless of the eventual decision. Used for
