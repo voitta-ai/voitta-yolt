@@ -452,6 +452,60 @@ class TestGrammarSpecific(unittest.TestCase):
         )
 
 
+class TestPython3DashM(unittest.TestCase):
+    """`python3 -m <module>` classification via interpreters.python3
+    safe_modules / unsafe_modules / nested_modules rule data."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, r = self.clf.classify(cmd)
+        self.assertEqual(d, expected, msg="cmd={!r}, reason={}".format(cmd, r))
+
+    def test_safe_module_json_tool(self):
+        self.assertDecision("python3 -m json.tool < /tmp/foo.json", DECISION_SAFE)
+
+    def test_safe_module_dis(self):
+        self.assertDecision("python3 -m dis script.py", DECISION_SAFE)
+
+    def test_unsafe_module_http_server(self):
+        # Opens a listener; treat as side-effecting.
+        self.assertDecision("python3 -m http.server 8000", DECISION_UNSAFE)
+
+    def test_unsafe_module_venv(self):
+        self.assertDecision("python3 -m venv .venv", DECISION_UNSAFE)
+
+    def test_unsafe_module_compileall(self):
+        self.assertDecision("python3 -m compileall .", DECISION_UNSAFE)
+
+    def test_unsafe_module_webbrowser(self):
+        self.assertDecision(
+            "python3 -m webbrowser https://example.com",
+            DECISION_UNSAFE,
+        )
+
+    def test_nested_pip_list_safe(self):
+        self.assertDecision("python3 -m pip list", DECISION_SAFE)
+
+    def test_nested_pip_show_safe(self):
+        self.assertDecision("python3 -m pip show requests", DECISION_SAFE)
+
+    def test_nested_pip_install_unsafe(self):
+        self.assertDecision("python3 -m pip install requests", DECISION_UNSAFE)
+
+    def test_nested_pip_uninstall_unsafe(self):
+        self.assertDecision("python3 -m pip uninstall -y requests", DECISION_UNSAFE)
+
+    def test_nested_unittest_discover_safe(self):
+        self.assertDecision("python3 -m unittest discover tests", DECISION_SAFE)
+
+    def test_nested_unittest_default_safe_when_no_subcommand(self):
+        # unittest spec has "default": "safe" so bare invocation is fine.
+        self.assertDecision("python3 -m unittest", DECISION_SAFE)
+
+
 class TestSafeWriteTargets(unittest.TestCase):
     """Custom safe-write-target lists from `rules.safe_write_targets`."""
 

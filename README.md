@@ -262,6 +262,8 @@ Example decisions (see `rules/shell.json` for the full rule set):
 | `sed 's/a/b/' f` / `sed -i 's/a/b/' f`                       | allow / ask |
 | `python3 -c "print(1+1)"`                                    | allow    |
 | `python3 -c "import os; os.system('rm -rf /')"`              | ask      |
+| `python3 -m json.tool` / `python3 -m http.server`            | allow / ask |
+| `python3 -m pip list` / `python3 -m pip install requests`    | allow / ask |
 | `bash -c "ls /tmp"` / `bash -c "rm /etc/passwd"`             | allow / ask |
 | `for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done` | allow |
 | `echo foo \| xargs rm` / `echo foo \| xargs cat`             | ask / allow |
