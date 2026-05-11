@@ -111,10 +111,13 @@ After visiting, decisions are aggregated with precedence
 - `unknown` → silent exit; Claude Code falls through to its default.
 
 Argv is dispatched per-`command_name`: safe builtins → safe;
-interpreters delegate inline scripts (see lead-in); known CLIs use
-their `rules/shell.json` spec; wrappers (`time`, `xargs`, `timeout`,
-`env`, `nice`, `watch`, ...) re-classify the wrapped command; anything
-else → unknown.
+interpreters delegate inline scripts (see lead-in); `python3 -m <mod>`
+consults the `safe_modules` / `unsafe_modules` / `nested_modules` lists
+in `rules/shell.json#interpreters.python3` (so e.g. `python3 -m pip list`
+is safe but `python3 -m pip install` is unsafe); known CLIs use their
+`rules/shell.json` spec; wrappers (`time`, `xargs`, `timeout`, `env`,
+`nice`, `watch`, ...) re-classify the wrapped command; anything else →
+unknown.
 
 ## Install
 
@@ -126,8 +129,14 @@ This repo is its own marketplace, so the install is two slash commands:
 /plugin install yolt@voitta-yolt
 ```
 
-The plugin's `hooks/hooks.json` registers the `PreToolUse` hook on `Bash`
-automatically — no manual `settings.json` edit needed. Run
+On first Bash invocation after install, the hook bootstraps the two
+Python deps (`tree-sitter`, `tree-sitter-bash`) into your user
+site-packages automatically — no separate `pip install` step needed.
+See [Dependencies](#dependencies) for the bootstrap details and
+fallback behavior on locked-down Python environments.
+
+The plugin's `hooks/hooks.json` registers the `PreToolUse` hook on
+`Bash` automatically — no manual `settings.json` edit needed. Run
 `/plugin uninstall yolt@voitta-yolt` to remove.
 
 ### Updating
@@ -322,12 +331,41 @@ non-AWS script doesn't false-positive.
       "unsafe_subcommands": ["apply", "reset"]
     }
   },
-  "shell_builtins_safe": ["my-safe-wrapper"]
+  "shell_builtins_safe": ["my-safe-wrapper"],
+
+  "safe_write_targets": [
+    "/dev/null",
+    "/tmp/*",
+    "/var/folders/*",
+    "~/.cache/*",
+    "~/.claude/*",
+    "/scratch/*"
+  ],
+
+  "interpreters": {
+    "python3": {
+      "inline_flag": "-c",
+      "module_flag": "-m",
+      "delegate": "python",
+      "read_script_file": true,
+      "safe_modules": ["json.tool", "my_internal_tool"],
+      "unsafe_modules": ["http.server"],
+      "nested_modules": {
+        "my_cli": {
+          "safe_subcommands": ["list", "show"],
+          "unsafe_subcommands": ["delete"]
+        }
+      }
+    }
+  }
 }
 ```
 
-User overrides merge with (and override) defaults per top-level key.
-Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
+User overrides merge with (and override) defaults per top-level key, so
+overriding `safe_write_targets` replaces the entire list; if you want to
+add `/scratch/*` while keeping the defaults, copy the default list
+through. Examples: `examples/user-overrides.json`,
+`examples/shell-overrides.json`.
 
 ## Debug / dogfood log
 
