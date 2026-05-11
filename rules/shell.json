@@ -25,6 +25,20 @@
     "!", "{", "}", "(", ")"
   ],
 
+  "_safe_write_targets_note": "Redirect targets that count as benign. Anything matching one of these globs does not flip the classifier to 'writes to a file via redirection'. Glob semantics are fnmatch. Tilde and $HOME are expanded before matching.",
+  "safe_write_targets": [
+    "/dev/null",
+    "/dev/stderr",
+    "/dev/stdout",
+    "/dev/fd/*",
+    "/tmp/*",
+    "/var/tmp/*",
+    "/var/folders/*",
+    "/dev/shm/*",
+    "~/.cache/*",
+    "~/.claude/*"
+  ],
+
   "interpreters": {
     "python3": {"inline_flag": "-c", "delegate": "python", "read_script_file": true},
     "python":  {"inline_flag": "-c", "delegate": "python", "read_script_file": true},

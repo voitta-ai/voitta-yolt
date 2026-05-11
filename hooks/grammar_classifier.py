@@ -16,6 +16,7 @@ grammar removes the whole class.
 import json
 import os
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 import tree_sitter_bash as _tsb
@@ -54,6 +55,7 @@ class GrammarClassifier:
         self.rules = rules
         self.python_analyzer_factory = python_analyzer_factory
         self.allow_patterns = list(allow_patterns) if allow_patterns else []
+        self.safe_write_targets = list(rules.get("safe_write_targets", ["/dev/null"]))
         self._rules = RuleClassifier(
             rules,
             python_analyzer_factory=python_analyzer_factory,
@@ -251,9 +253,28 @@ class GrammarClassifier:
             return False
         if target is None:
             return False
-        if target == "/dev/null":
+        if self._target_is_safe_write(target):
             return False
         return True
+
+    def _target_is_safe_write(self, target):
+        """Match `target` against the configured safe-write globs from
+        rules/shell.json#safe_write_targets. Expands `~/` and `$HOME/`
+        before matching so users who write `~/.cache/foo` and the rule
+        `~/.cache/*` both line up. Uses fnmatch semantics."""
+        expanded = self._expand_home(target)
+        for pat in self.safe_write_targets:
+            pat_expanded = self._expand_home(pat)
+            if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
+                return True
+        return False
+
+    @staticmethod
+    def _expand_home(path):
+        home = os.environ.get("HOME")
+        if home and path.startswith("~/"):
+            return home + path[1:]
+        return path
 
     def _heredoc_body(self, heredoc_node, src):
         for c in heredoc_node.children:

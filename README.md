@@ -87,10 +87,13 @@ the AST. Visitor dispatch:
 - `if_statement`, `for_statement`, `while_statement`, `case_statement`,
   `do_group` — recurse into bodies. No manual keyword stripping required;
   the grammar already separates control-flow tokens from commands.
-- `redirected_statement` — check redirect targets. A write to anything
-  other than `/dev/null` falls through to `unknown` (Claude Code default
-  prompt). For `python3 << ... <<EOF` heredocs, the body goes to the
-  Python analyzer.
+- `redirected_statement` — check redirect targets against the
+  `safe_write_targets` glob list in `rules/shell.json` (defaults
+  include `/dev/null`, `/tmp/*`, `/var/folders/*`, `~/.cache/*`,
+  `~/.claude/*`, etc.). Anything not on the list falls through to
+  `unknown` so Claude Code default-prompts. For
+  `python3 << ... <<EOF` heredocs, the body goes to the Python
+  analyzer.
 - `command_substitution` (`$(...)`, `` `...` ``) and `process_substitution`
   (`<(...)`) — recurse and classify the inner command separately. A
   destructive substitution surfaces even when the outer command is safe
@@ -249,7 +252,8 @@ Example decisions (see `rules/shell.json` for the full rule set):
 | `for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done` | allow |
 | `echo foo \| xargs rm` / `echo foo \| xargs cat`             | ask / allow |
 | `time aws ec2 describe-instances`                            | allow    |
-| `cat file > /tmp/out`                                        | unknown (writes to a file) |
+| `cat file > /tmp/out`                                        | allow (`/tmp/*` is on the safe-write list) |
+| `cat file > /etc/profile`                                    | unknown (writes to a system path) |
 | `aws ec2 describe-instances > /dev/null`                     | allow    |
 
 ## Python rules (interpreter delegate)
