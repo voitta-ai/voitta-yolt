@@ -222,6 +222,7 @@ def make_hook_response(decision, reason=None):
 
 
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
+DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def _resolve_log_path():
@@ -240,6 +241,41 @@ def _resolve_log_path():
     return Path(env_value)
 
 
+def _resolve_log_max_bytes():
+    """Maximum log size before rotation. Defaults to 5MB. `YOLT_LOG_MAX_BYTES`
+    overrides; set to 0 to disable rotation entirely."""
+    raw = os.environ.get("YOLT_LOG_MAX_BYTES")
+    if raw is None:
+        return DEFAULT_LOG_MAX_BYTES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_LOG_MAX_BYTES
+
+
+def _maybe_rotate_log(log_path, max_bytes):
+    """Single-generation rotation. If `log_path` exceeds `max_bytes`,
+    rename it to `<log_path>.old` (clobbering any existing .old), so
+    the next write starts a fresh file. One previous generation kept.
+
+    No-op if `max_bytes` is 0 (rotation disabled), if the file doesn't
+    exist, or if the rename fails for any reason — rotation is
+    best-effort and must never break the hook."""
+    if max_bytes <= 0:
+        return
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return
+    if size < max_bytes:
+        return
+    try:
+        old = log_path.with_suffix(log_path.suffix + ".old")
+        os.replace(log_path, old)
+    except OSError:
+        pass
+
+
 def _log_hook_decision(command, decision, reason):
     """Append a JSON-line record of this hook fire to the resolved log
     path. Logs by default to `~/.claude/yolt.log`; the user can override
@@ -248,6 +284,10 @@ def _log_hook_decision(command, decision, reason):
     Useful for dogfooding / QA: tail the log to see exactly which
     decision YOLT made on every Bash invocation — including the silent
     unknown-fallthrough cases that the Claude Code UI hides.
+
+    Rotates the log when it grows past `YOLT_LOG_MAX_BYTES` (default
+    5MB) by renaming it to `<log>.old` — one previous generation
+    preserved. Set `YOLT_LOG_MAX_BYTES=0` to disable.
 
     Failures (unwritable path, full disk, ...) are swallowed: logging
     must never break the hook. The command is truncated to 500 chars to
@@ -258,6 +298,7 @@ def _log_hook_decision(command, decision, reason):
         return
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        _maybe_rotate_log(log_path, _resolve_log_max_bytes())
         record = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "decision": decision,
