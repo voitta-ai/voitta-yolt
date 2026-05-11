@@ -417,6 +417,79 @@ class TestHookLogFile(unittest.TestCase):
         self.assertFalse((fake_home / ".claude" / "yolt.log").exists())
         self.assertFalse(self.log_path.exists())
 
+    def test_log_rotates_when_size_exceeds_max(self):
+        # Set the rotation threshold tiny (200 bytes) so a single fire
+        # plus a pre-existing log overflows it. Verify the old log is
+        # preserved as `<log>.old` and the new write goes to a fresh
+        # `<log>`.
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text("x" * 500 + "\n")
+        env = dict(os.environ)
+        env["YOLT_LOG_FILE"] = str(self.log_path)
+        env["YOLT_LOG_MAX_BYTES"] = "200"
+        subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        old_path = self.log_path.with_suffix(self.log_path.suffix + ".old")
+        self.assertTrue(old_path.exists(), "rotated .old log was not created")
+        self.assertIn("xxx", old_path.read_text())
+        new_records = self._records()
+        self.assertEqual(len(new_records), 1)
+        self.assertEqual(new_records[0]["decision"], "safe")
+
+    def test_log_does_not_rotate_below_threshold(self):
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text("small\n")
+        env = dict(os.environ)
+        env["YOLT_LOG_FILE"] = str(self.log_path)
+        env["YOLT_LOG_MAX_BYTES"] = "10000"
+        subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        old_path = self.log_path.with_suffix(self.log_path.suffix + ".old")
+        self.assertFalse(old_path.exists(), "log rotated below threshold")
+        # Pre-existing line + the new record both present.
+        contents = self.log_path.read_text()
+        self.assertIn("small", contents)
+        self.assertIn('"decision": "safe"', contents)
+
+    def test_log_rotation_disabled_when_max_bytes_zero(self):
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        big = "x" * 10_000 + "\n"
+        self.log_path.write_text(big)
+        env = dict(os.environ)
+        env["YOLT_LOG_FILE"] = str(self.log_path)
+        env["YOLT_LOG_MAX_BYTES"] = "0"  # disable
+        subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        old_path = self.log_path.with_suffix(self.log_path.suffix + ".old")
+        self.assertFalse(old_path.exists(), "log rotated despite max_bytes=0")
+
     def test_unwritable_log_path_does_not_break_hook(self):
         # If the log path is unwritable, the hook must still emit its
         # normal decision and exit cleanly. Logging is best-effort.

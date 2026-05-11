@@ -352,9 +352,10 @@ already covers the command, but the log records every fire.
 To override the log location, set `YOLT_LOG_FILE` to an absolute path.
 To opt out entirely, set `YOLT_LOG_FILE=""` (empty string).
 
-> The log grows unbounded. There is no rotation today — if the file
-> gets uncomfortable, `truncate -s 0 ~/.claude/yolt.log` or rotate it
-> with your tool of choice.
+YOLT rotates the log when it grows past 5 MB by renaming it to
+`<log>.old`, clobbering any previous `.old`. One generation is
+preserved. `YOLT_LOG_MAX_BYTES` overrides the threshold; set
+`YOLT_LOG_MAX_BYTES=0` to disable rotation.
 
 ## CLI usage
 
