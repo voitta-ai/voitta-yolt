@@ -587,6 +587,140 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         self.assertEqual(d, DECISION_UNKNOWN)
 
 
+class TestSqlCli(unittest.TestCase):
+    """SQL clients: sqlite3 / psql / mysql / mariadb / duckdb. The argv
+    walker extracts SQL and the SQL keyword scan decides safe vs unsafe."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, r = self.clf.classify(cmd)
+        self.assertEqual(d, expected, msg="cmd={!r}, reason={}".format(cmd, r))
+
+    # sqlite3 positional SQL
+    def test_sqlite3_select_safe(self):
+        self.assertDecision(
+            'sqlite3 /tmp/db.sqlite "SELECT * FROM foo"',
+            DECISION_SAFE,
+        )
+
+    def test_sqlite3_multiline_select_safe(self):
+        cmd = (
+            'sqlite3 /Users/x/voitta.db "SELECT sync_status,\n'
+            "COALESCE(sync_error,'none') AS err, "
+            "(SELECT count(*) FROM llm_tldr_indexed_files WHERE\n"
+            "folder_path='vrag-test-4') AS tldr_rows "
+            "FROM folder_sync_sources WHERE folder_path='vrag-test-4';\""
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_sqlite3_drop_unsafe(self):
+        self.assertDecision(
+            "sqlite3 /tmp/db.sqlite 'DROP TABLE foo'",
+            DECISION_UNSAFE,
+        )
+
+    def test_sqlite3_insert_unsafe(self):
+        self.assertDecision(
+            "sqlite3 /tmp/db.sqlite 'INSERT INTO foo VALUES (1)'",
+            DECISION_UNSAFE,
+        )
+
+    def test_sqlite3_interactive_is_unknown(self):
+        # Bare invocation drops the user into a REPL — no SQL to analyze.
+        self.assertDecision("sqlite3 /tmp/db.sqlite", DECISION_UNKNOWN)
+
+    def test_sqlite3_dot_tables_safe(self):
+        self.assertDecision(
+            "sqlite3 /tmp/db.sqlite '.tables'",
+            DECISION_SAFE,
+        )
+
+    def test_sqlite3_dot_import_unsafe(self):
+        self.assertDecision(
+            "sqlite3 /tmp/db.sqlite '.import foo.csv mytable'",
+            DECISION_UNSAFE,
+        )
+
+    def test_sqlite3_cmd_flag(self):
+        self.assertDecision(
+            'sqlite3 -cmd "SELECT 1" /tmp/db.sqlite',
+            DECISION_SAFE,
+        )
+
+    def test_sqlite3_readonly_flag_does_not_eat_positional(self):
+        # -readonly is valueless; it must not consume /tmp/db.sqlite.
+        self.assertDecision(
+            'sqlite3 -readonly /tmp/db.sqlite "SELECT 1"',
+            DECISION_SAFE,
+        )
+
+    # psql -c
+    def test_psql_dash_c_select_safe(self):
+        self.assertDecision(
+            'psql -c "SELECT 1" mydb',
+            DECISION_SAFE,
+        )
+
+    def test_psql_dash_c_delete_unsafe(self):
+        self.assertDecision(
+            'psql -c "DELETE FROM users WHERE id = 1" mydb',
+            DECISION_UNSAFE,
+        )
+
+    def test_psql_command_long_form(self):
+        self.assertDecision(
+            'psql --command "SELECT now()" mydb',
+            DECISION_SAFE,
+        )
+
+    def test_psql_dash_f_file_is_unknown(self):
+        # File contents are opaque to a static checker.
+        self.assertDecision(
+            "psql -f queries.sql mydb",
+            DECISION_UNKNOWN,
+        )
+
+    def test_psql_bare_dbname_is_unknown(self):
+        self.assertDecision("psql mydb", DECISION_UNKNOWN)
+
+    # mysql -e
+    def test_mysql_dash_e_select_safe(self):
+        self.assertDecision(
+            'mysql -e "SELECT VERSION()" mydb',
+            DECISION_SAFE,
+        )
+
+    def test_mysql_dash_e_drop_unsafe(self):
+        self.assertDecision(
+            'mysql -e "DROP TABLE foo" mydb',
+            DECISION_UNSAFE,
+        )
+
+    def test_mysql_execute_equals_form(self):
+        self.assertDecision(
+            'mysql --execute=SHOW DATABASES',
+            DECISION_SAFE,
+        )
+
+    # SQL injected via $(...) substitution — placeholders preserve safety.
+    def test_sqlite3_with_substitution_in_select(self):
+        self.assertDecision(
+            'sqlite3 /tmp/db "SELECT * FROM t WHERE id = $(echo 1)"',
+            DECISION_SAFE,
+        )
+
+    # Compound: SELECT then mutating substitution.
+    def test_sqlite3_with_destructive_substitution(self):
+        # The outer SQL is SELECT (safe), but the substitution runs `rm`.
+        self.assertDecision(
+            'sqlite3 /tmp/db "SELECT $(rm -rf /tmp/x)"',
+            DECISION_UNSAFE,
+        )
+
+
 class TestClassifierCLI(unittest.TestCase):
     """grammar_classifier.py is also runnable as a standalone CLI."""
 

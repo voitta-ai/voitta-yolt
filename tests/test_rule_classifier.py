@@ -25,9 +25,11 @@ from rule_classifier import (  # noqa: E402
     DECISION_UNSAFE,
     aggregate_decisions,
     check_unsafe_flags,
+    classify_sql_text,
     load_allow_patterns,
     match_allow_patterns,
     parse_aws_positionals,
+    parse_sql_cli_argv,
 )
 
 
@@ -188,6 +190,206 @@ class TestMatchAllowPatterns(unittest.TestCase):
 
     def test_strips_whitespace(self):
         self.assertEqual(match_allow_patterns("  env  ", ["env"]), "env")
+
+
+class TestClassifySqlText(unittest.TestCase):
+    def test_simple_select_safe(self):
+        d, _ = classify_sql_text("sqlite3", "SELECT * FROM foo")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_select_with_subquery_safe(self):
+        sql = (
+            "SELECT sync_status, COALESCE(sync_error,'none') AS err, "
+            "(SELECT count(*) FROM t WHERE path='x') AS n "
+            "FROM s WHERE path='x';"
+        )
+        d, _ = classify_sql_text("sqlite3", sql)
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_with_cte_select_safe(self):
+        d, _ = classify_sql_text(
+            "psql",
+            "WITH t AS (SELECT 1) SELECT * FROM t",
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_insert_unsafe(self):
+        d, _ = classify_sql_text("psql", "INSERT INTO t VALUES (1)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_update_unsafe(self):
+        d, _ = classify_sql_text("mysql", "UPDATE t SET x = 1 WHERE id = 2")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_delete_unsafe(self):
+        d, _ = classify_sql_text("psql", "DELETE FROM t WHERE id = 1")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_drop_unsafe(self):
+        d, _ = classify_sql_text("sqlite3", "DROP TABLE foo")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_create_unsafe(self):
+        d, _ = classify_sql_text("psql", "CREATE TABLE t (id int)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_alter_unsafe(self):
+        d, _ = classify_sql_text("psql", "ALTER TABLE t ADD COLUMN x int")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_truncate_unsafe(self):
+        d, _ = classify_sql_text("mysql", "TRUNCATE TABLE t")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_with_cte_delete_unsafe(self):
+        # CTE with mutating tail.
+        d, _ = classify_sql_text(
+            "psql",
+            "WITH t AS (SELECT id FROM s) DELETE FROM s WHERE id IN (SELECT id FROM t)",
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_delete_in_string_literal_safe(self):
+        # The string literal is stripped before scanning.
+        d, _ = classify_sql_text(
+            "psql",
+            "SELECT name FROM users WHERE label = 'DELETE FROM users'",
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_delete_in_line_comment_does_not_flag(self):
+        d, _ = classify_sql_text(
+            "psql",
+            "SELECT 1 -- DELETE FROM x\nFROM dual",
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_delete_in_block_comment_does_not_flag(self):
+        d, _ = classify_sql_text(
+            "psql",
+            "SELECT 1 /* DELETE FROM x */ FROM dual",
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_multiple_statements_one_unsafe(self):
+        d, _ = classify_sql_text(
+            "psql",
+            "SELECT 1; INSERT INTO t VALUES (1); SELECT 2;",
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_explain_safe(self):
+        d, _ = classify_sql_text("psql", "EXPLAIN SELECT * FROM t")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_show_safe(self):
+        d, _ = classify_sql_text("mysql", "SHOW TABLES")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_describe_safe(self):
+        d, _ = classify_sql_text("mysql", "DESCRIBE foo")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_pragma_read_safe(self):
+        d, _ = classify_sql_text("sqlite3", "PRAGMA table_info(foo)")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_pragma_assignment_unsafe(self):
+        d, _ = classify_sql_text("sqlite3", "PRAGMA journal_mode = WAL")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_unknown_first_keyword(self):
+        d, _ = classify_sql_text("psql", "BANANA FROM t")
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_empty_sql_safe(self):
+        d, _ = classify_sql_text("sqlite3", "")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_sqlite_dot_tables_safe(self):
+        d, _ = classify_sql_text("sqlite3", ".tables")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_sqlite_dot_schema_safe(self):
+        d, _ = classify_sql_text("sqlite3", ".schema foo")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_sqlite_dot_import_unsafe(self):
+        d, _ = classify_sql_text("sqlite3", ".import foo.csv mytable")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_sqlite_dot_unknown_falls_through(self):
+        d, _ = classify_sql_text("sqlite3", ".weirdcmd foo")
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_select_with_single_quote_escape(self):
+        # 'don''t' is a single-quoted string containing an escaped quote.
+        d, _ = classify_sql_text(
+            "psql",
+            "SELECT 'don''t' FROM dual",
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+
+class TestParseSqlCliArgv(unittest.TestCase):
+    def test_sqlite3_positional_sql(self):
+        spec = {"sql_positional_index": 1}
+        sqls, file_in = parse_sql_cli_argv(
+            ["/path/db.sqlite", "SELECT 1"], spec,
+        )
+        self.assertEqual(sqls, ["SELECT 1"])
+        self.assertFalse(file_in)
+
+    def test_sqlite3_interactive_no_sql(self):
+        spec = {"sql_positional_index": 1}
+        sqls, _ = parse_sql_cli_argv(["/path/db.sqlite"], spec)
+        self.assertEqual(sqls, [])
+
+    def test_psql_dash_c_flag(self):
+        spec = {"sql_flags": ["-c", "--command"]}
+        sqls, _ = parse_sql_cli_argv(
+            ["-c", "SELECT 1", "mydb"], spec,
+        )
+        self.assertEqual(sqls, ["SELECT 1"])
+
+    def test_mysql_dash_e_flag(self):
+        spec = {"sql_flags": ["-e", "--execute"]}
+        sqls, _ = parse_sql_cli_argv(
+            ["-e", "SHOW TABLES", "mydb"], spec,
+        )
+        self.assertEqual(sqls, ["SHOW TABLES"])
+
+    def test_long_flag_with_equals(self):
+        spec = {"sql_flags": ["-e", "--execute"]}
+        sqls, _ = parse_sql_cli_argv(
+            ["--execute=SELECT 1"], spec,
+        )
+        self.assertEqual(sqls, ["SELECT 1"])
+
+    def test_file_input_flag(self):
+        spec = {"sql_file_flags": ["-f", "--file"]}
+        _, file_in = parse_sql_cli_argv(["-f", "queries.sql"], spec)
+        self.assertTrue(file_in)
+
+    def test_valueless_flag_does_not_consume_positional(self):
+        spec = {
+            "sql_positional_index": 1,
+            "valueless_flags": ["-batch"],
+        }
+        sqls, _ = parse_sql_cli_argv(
+            ["-batch", "/path/db", "SELECT 1"], spec,
+        )
+        self.assertEqual(sqls, ["SELECT 1"])
+
+    def test_short_flag_with_value_consumes_next(self):
+        # `-cmd CMD` form (sqlite3): no `--`, takes a value.
+        spec = {"sql_flags": ["-cmd"], "sql_positional_index": 1}
+        sqls, _ = parse_sql_cli_argv(
+            ["-cmd", "SELECT 1", "/path/db"], spec,
+        )
+        # `-cmd` captured as SQL flag; remaining positional[0] is the DB,
+        # no positional[1].
+        self.assertEqual(sqls, ["SELECT 1"])
 
 
 if __name__ == "__main__":

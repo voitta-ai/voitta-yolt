@@ -39,6 +39,189 @@ ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASH_PATTERN_RE = re.compile(r"^Bash\((.*)\)$")
 
 
+# --- SQL safety detection (used by sql_cli default) ---
+#
+# Conservative scan: strip string literals and comments, then look for
+# mutating keywords anywhere. If none, classify by the first remaining
+# keyword. This treats `EXPLAIN DELETE FROM t` as unsafe (the DELETE
+# keyword is still present even though it would not execute); we accept
+# that false-positive to keep the rule simple.
+
+SQL_MUTATING_KEYWORDS = frozenset({
+    "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+    "TRUNCATE", "REPLACE", "MERGE", "GRANT", "REVOKE",
+    "VACUUM", "REINDEX", "ATTACH", "DETACH",
+    "COMMIT", "ROLLBACK", "BEGIN", "SAVEPOINT", "RELEASE",
+    "CALL", "EXEC", "EXECUTE",
+    "COPY", "LOAD", "IMPORT",
+    "LOCK", "UNLOCK",
+    "SET", "RESET",
+})
+
+SQL_SAFE_FIRST_KEYWORDS = frozenset({
+    "SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC",
+    "VALUES", "TABLE",
+})
+
+# Strip comments and string/identifier literals before keyword scanning.
+# Order in the regex matters — line comments are matched before block
+# comments to keep nested `/*` inside `-- ...` from leaking through.
+_SQL_STRIP_RE = re.compile(
+    r"""
+    --[^\n]*               # -- line comment
+    | /\*.*?\*/            # /* block comment */
+    | '(?:[^']|'')*'       # 'single' quoted string ('' is escape)
+    | \"(?:[^\"]|\"\")*\"  # "double" quoted ident/string
+    | `[^`]*`              # `backtick` ident (MySQL)
+    """,
+    re.DOTALL | re.VERBOSE,
+)
+
+_SQL_WORD_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+
+# sqlite3 has a separate "dot-command" namespace (.tables, .schema, ...)
+# that runs inside the CLI but isn't SQL. Most read state; a few load
+# or write files.
+SQLITE_DOT_SAFE = frozenset({
+    ".tables", ".schema", ".databases", ".indexes", ".indices",
+    ".show", ".help", ".headers", ".mode", ".width", ".print",
+    ".timer", ".eqp", ".changes", ".dbinfo", ".dbconfig",
+    ".fullschema", ".scanstats", ".limit", ".nullvalue",
+    ".separator", ".prompt", ".excel", ".version", ".lint",
+    ".stats", ".explain", ".binary", ".filectrl",
+})
+SQLITE_DOT_UNSAFE = frozenset({
+    ".import", ".load", ".save", ".backup", ".restore",
+    ".system", ".shell", ".read", ".cd", ".open", ".dump",
+    ".archive", ".clone", ".log", ".recover",
+})
+
+
+def classify_sql_text(cmd_name, sql):
+    """Return (decision, reason) for a single SQL string passed to a
+    SQL CLI. Handles sqlite3 dot-commands too — they're not SQL but they
+    arrive through the same channel (positional / -cmd / -e)."""
+    sql = sql.strip()
+    if not sql:
+        retval = (DECISION_SAFE, "{}: empty SQL".format(cmd_name))
+        return retval
+
+    if cmd_name == "sqlite3" and sql.startswith("."):
+        first_line = sql.split("\n", 1)[0].strip()
+        dot_tokens = first_line.split()
+        dot = dot_tokens[0] if dot_tokens else ""
+        if dot in SQLITE_DOT_SAFE:
+            retval = (DECISION_SAFE,
+                      "sqlite3 dot-cmd {}: read-only".format(dot))
+            return retval
+        if dot in SQLITE_DOT_UNSAFE:
+            retval = (DECISION_UNSAFE,
+                      "sqlite3 dot-cmd {}: mutating".format(dot))
+            return retval
+        retval = (DECISION_UNKNOWN,
+                  "sqlite3 dot-cmd {}: no rule".format(dot))
+        return retval
+
+    stripped = _SQL_STRIP_RE.sub(" ", sql).upper()
+
+    first_word = None
+    for m in _SQL_WORD_RE.finditer(stripped):
+        word = m.group(1)
+        if first_word is None:
+            first_word = word
+        if word in SQL_MUTATING_KEYWORDS:
+            retval = (DECISION_UNSAFE,
+                      "{}: SQL contains mutating keyword {}".format(cmd_name, word))
+            return retval
+
+    if first_word == "PRAGMA":
+        if "=" in stripped:
+            retval = (DECISION_UNSAFE,
+                      "{}: PRAGMA assignment".format(cmd_name))
+            return retval
+        retval = (DECISION_SAFE, "{}: PRAGMA read".format(cmd_name))
+        return retval
+
+    if first_word in SQL_SAFE_FIRST_KEYWORDS:
+        retval = (DECISION_SAFE,
+                  "{}: read-only SQL ({})".format(cmd_name, first_word))
+        return retval
+
+    if first_word is None:
+        retval = (DECISION_SAFE, "{}: no SQL keywords".format(cmd_name))
+        return retval
+
+    retval = (DECISION_UNKNOWN,
+              "{}: unclassified SQL ({})".format(cmd_name, first_word))
+    return retval
+
+
+def parse_sql_cli_argv(cmd_args, spec):
+    """Walk argv for a SQL CLI, returning (sql_strings, sql_from_file).
+    `spec` carries: sql_flags (list), valueless_flags (list),
+    sql_file_flags (list), sql_positional_index (int or None)."""
+    sql_flags = set(spec.get("sql_flags", []))
+    sql_file_flags = set(spec.get("sql_file_flags", []))
+    valueless = set(spec.get("valueless_flags", []))
+    sql_positional_index = spec.get("sql_positional_index")
+
+    sqls = []
+    positionals = []
+    file_input = False
+
+    i = 0
+    while i < len(cmd_args):
+        tok = cmd_args[i]
+
+        if tok.startswith("--") and "=" in tok:
+            flag, _, value = tok.partition("=")
+            if flag in sql_flags:
+                sqls.append(value)
+            elif flag in sql_file_flags:
+                file_input = True
+            i += 1
+            continue
+
+        if tok in sql_flags:
+            if i + 1 < len(cmd_args):
+                sqls.append(cmd_args[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if tok in sql_file_flags:
+            file_input = True
+            if i + 1 < len(cmd_args) and not cmd_args[i + 1].startswith("-"):
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if tok in valueless:
+            i += 1
+            continue
+
+        if tok.startswith("-") and len(tok) > 1:
+            if i + 1 < len(cmd_args) and not cmd_args[i + 1].startswith("-"):
+                i += 2
+                continue
+            i += 1
+            continue
+
+        positionals.append(tok)
+        i += 1
+
+    if (
+        sql_positional_index is not None
+        and sql_positional_index < len(positionals)
+    ):
+        sqls.append(positionals[sql_positional_index])
+
+    retval = (sqls, file_input)
+    return retval
+
+
 def load_shell_rules(rules_dir, user_overrides_path=None):
     """Load shell rules from rules_dir/shell.json plus optional overrides.
     Overrides merge per top-level key, one level deep."""
@@ -378,6 +561,8 @@ class RuleClassifier:
             return self.classify_verb_cli(cmd_args, spec, label="gcloud")
         if default == "az_cli":
             return self.classify_verb_cli(cmd_args, spec, label="az")
+        if default == "sql_cli":
+            return self.classify_sql_cli(cmd_name, cmd_args, spec)
 
         return (DECISION_UNKNOWN, "{}: unknown default '{}'".format(cmd_name, default))
 
@@ -503,6 +688,17 @@ class RuleClassifier:
                 return (DECISION_UNSAFE, "aws {} {}: global mutating".format(service, operation))
 
         return (DECISION_UNKNOWN, "aws {} {}: unclassified".format(service, operation))
+
+    def classify_sql_cli(self, cmd_name, cmd_args, spec):
+        sqls, file_input = parse_sql_cli_argv(cmd_args, spec)
+        if file_input:
+            return (DECISION_UNKNOWN,
+                    "{}: SQL from file (opaque)".format(cmd_name))
+        if not sqls:
+            return (DECISION_UNKNOWN,
+                    "{}: no inline SQL (interactive or stdin)".format(cmd_name))
+        decisions = [classify_sql_text(cmd_name, s) for s in sqls]
+        return aggregate_decisions(decisions)
 
     def classify_verb_cli(self, cmd_args, spec, label):
         positional = self._skip_flags(cmd_args)
