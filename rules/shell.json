@@ -488,6 +488,78 @@
       "default": "subcommand",
       "safe_subcommands": ["list", "ls", "info", "abv", "search", "deps", "uses", "leaves", "outdated", "home", "config", "doctor", "help", "--version"],
       "unsafe_subcommands": ["install", "uninstall", "remove", "rm", "upgrade", "update", "reinstall", "pin", "unpin", "cleanup", "tap", "untap", "link", "unlink"]
+    },
+
+    "sqlite3": {
+      "default": "sql_cli",
+      "sql_flags": ["-cmd"],
+      "sql_positional_index": 1,
+      "valueless_flags": [
+        "-batch", "-bail", "-csv", "-echo", "-fullschema",
+        "-header", "-noheader", "-help", "-html", "-interactive",
+        "-line", "-list", "-nofollow", "-quote", "-readonly",
+        "-stats", "-table", "-tabs", "-version", "-zip", "-A",
+        "-markdown", "-box", "-json", "-safe"
+      ],
+      "_note": "sqlite3 DB [SQL] — second positional is the SQL string. Dot-commands (.tables, .schema, .import, ...) come through the same channel and are classified separately."
+    },
+    "psql": {
+      "default": "sql_cli",
+      "sql_flags": ["-c", "--command"],
+      "sql_file_flags": ["-f", "--file"],
+      "valueless_flags": [
+        "-l", "--list", "-?", "-V", "--version", "-X", "--no-psqlrc",
+        "-1", "--single-transaction", "-A", "--no-align",
+        "-e", "--echo-queries", "-E", "--echo-hidden",
+        "-H", "--html", "-n", "--no-readline",
+        "-q", "--quiet", "-s", "--single-step", "-S", "--single-line",
+        "-t", "--tuples-only", "-w", "--no-password", "-W", "--password",
+        "-x", "--expanded", "-z", "--field-separator-zero",
+        "-0", "--record-separator-zero", "-a", "--echo-all",
+        "-b", "--echo-errors"
+      ],
+      "_note": "psql -c 'SQL' / -f file.sql. Bare positionals are dbname/username, not SQL."
+    },
+    "mysql": {
+      "default": "sql_cli",
+      "sql_flags": ["-e", "--execute"],
+      "valueless_flags": [
+        "-?", "--help", "-V", "--version",
+        "-A", "--no-auto-rehash",
+        "-B", "--batch", "-C", "--compress",
+        "-E", "--vertical", "-f", "--force",
+        "-N", "--skip-column-names", "-s", "--silent",
+        "-t", "--table", "-v", "--verbose",
+        "-w", "--wait", "-X", "--xml",
+        "--column-names", "--auto-rehash", "--auto-vertical-output",
+        "--show-warnings", "--no-defaults", "--no-beep"
+      ],
+      "_note": "mysql -e 'SQL'. Bare positional is the database name."
+    },
+    "mariadb": {
+      "default": "sql_cli",
+      "sql_flags": ["-e", "--execute"],
+      "valueless_flags": [
+        "-?", "--help", "-V", "--version",
+        "-A", "--no-auto-rehash",
+        "-B", "--batch", "-C", "--compress",
+        "-E", "--vertical", "-f", "--force",
+        "-N", "--skip-column-names", "-s", "--silent",
+        "-t", "--table", "-v", "--verbose",
+        "-w", "--wait", "-X", "--xml",
+        "--column-names", "--auto-rehash"
+      ]
+    },
+    "duckdb": {
+      "default": "sql_cli",
+      "sql_flags": ["-c", "-cmd"],
+      "sql_positional_index": 1,
+      "valueless_flags": [
+        "-readonly", "-batch", "-csv", "-echo", "-header", "-noheader",
+        "-html", "-interactive", "-json", "-line", "-list", "-markdown",
+        "-quote", "-table", "-version", "-help"
+      ],
+      "_note": "duckdb CLI mirrors sqlite3 surface: DB [SQL], plus -c/-cmd flags."
     }
   }
 }

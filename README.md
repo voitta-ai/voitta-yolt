@@ -19,6 +19,7 @@
 - [User allowlist as a secondary upgrade pass](#user-allowlist-as-a-secondary-upgrade-pass)
 - [Dependencies](#dependencies)
 - [What the grammar classifier handles](#what-the-grammar-classifier-handles)
+- [SQL CLIs](#sql-clis)
 - [Python rules (interpreter delegate)](#python-rules-interpreter-delegate)
 - [Custom rules](#custom-rules)
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
@@ -280,6 +281,39 @@ Example decisions (see `rules/shell.json` for the full rule set):
 | `cat file > /tmp/out`                                        | allow (`/tmp/*` is on the safe-write list) |
 | `cat file > /etc/profile`                                    | unknown (writes to a system path) |
 | `aws ec2 describe-instances > /dev/null`                     | allow    |
+| `sqlite3 db.sqlite "SELECT * FROM t"`                        | allow    |
+| `sqlite3 db.sqlite "DROP TABLE t"`                           | ask      |
+| `sqlite3 db.sqlite ".tables"` / `... ".import f.csv t"`      | allow / ask |
+| `psql -c "SELECT now()" mydb` / `psql -c "DELETE FROM t" mydb` | allow / ask |
+| `mysql -e "SHOW DATABASES" mydb` / `mysql -e "DROP TABLE t" mydb` | allow / ask |
+
+## SQL CLIs
+
+`sqlite3`, `psql`, `mysql`, `mariadb`, and `duckdb` are classified via
+the `sql_cli` default. The argv walker pulls the SQL string out
+(positional for sqlite3/duckdb, `-c` / `--command` for psql, `-e` /
+`--execute` for mysql/mariadb) and runs a conservative scan:
+
+1. Strip line comments (`-- ...`), block comments (`/* ... */`), and
+   string/identifier literals (`'...'`, `"..."`, `` `...` ``).
+2. If any of `INSERT / UPDATE / DELETE / DROP / CREATE / ALTER /
+   TRUNCATE / REPLACE / MERGE / GRANT / REVOKE / VACUUM / REINDEX /
+   ATTACH / DETACH / COPY / LOAD / IMPORT / LOCK / CALL / EXEC /
+   SET / RESET / BEGIN / COMMIT / ROLLBACK / ...` survives → `unsafe`.
+3. Otherwise, if the first remaining keyword is `SELECT / WITH /
+   EXPLAIN / SHOW / DESCRIBE / DESC / VALUES / TABLE` → `safe`.
+4. `PRAGMA` is `safe` for reads, `unsafe` if it contains `=`
+   (sqlite assignment form).
+5. Anything else → `unknown` (Claude Code's default prompt fires).
+
+SQL fed via file (`psql -f queries.sql`, `mysql < queries.sql`) is
+opaque to a static checker and stays `unknown`. Bare `sqlite3 db.sqlite`
+also stays `unknown` because it opens an interactive shell.
+
+sqlite3 dot-commands (`.tables`, `.schema`, `.import`, `.read`, ...)
+are classified separately by name — `.tables` / `.schema` / `.headers`
+are safe; `.import` / `.load` / `.read` / `.shell` / `.backup` are
+unsafe.
 
 ## Python rules (interpreter delegate)
 

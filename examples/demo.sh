@@ -68,6 +68,18 @@ commands=(
   'aws ec2 describe-instances > /dev/null'
   'aws ec2 describe-instances 2>/dev/null | jq .'
 
+  # Safe: SQL CLIs reading
+  'sqlite3 /tmp/db.sqlite "SELECT * FROM foo"'
+  'sqlite3 /tmp/db.sqlite ".tables"'
+  'psql -c "SELECT now()" mydb'
+  'mysql -e "SHOW DATABASES" mydb'
+
+  # Unsafe: SQL CLIs mutating
+  'sqlite3 /tmp/db.sqlite "DROP TABLE foo"'
+  'sqlite3 /tmp/db.sqlite ".import foo.csv mytable"'
+  'psql -c "DELETE FROM users WHERE id = 1" mydb'
+  'mysql -e "TRUNCATE TABLE foo" mydb'
+
   # Unsafe: direct mutation
   'rm -rf /tmp/foo'
   'sed -i "s/a/b/" file.txt'
