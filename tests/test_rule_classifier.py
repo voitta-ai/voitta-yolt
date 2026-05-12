@@ -27,9 +27,11 @@ from rule_classifier import (  # noqa: E402
     check_unsafe_flags,
     classify_sql_text,
     load_allow_patterns,
+    load_shell_rules,
     match_allow_patterns,
     parse_aws_positionals,
     parse_sql_cli_argv,
+    validate_shell_rules,
 )
 
 
@@ -61,6 +63,53 @@ class TestCheckUnsafeFlags(unittest.TestCase):
     def test_none_of_the_above(self):
         spec = {"unsafe_flag_values": {"-X": ["POST"]}}
         self.assertIsNone(check_unsafe_flags(["--foo", "bar"], spec))
+
+    def test_unsafe_flag_value_prefix_split_form(self):
+        spec = {"unsafe_flag_value_prefix": {"--input": "*"}}
+        result = check_unsafe_flags(["--input", "body.json"], spec)
+        self.assertIsNotNone(result)
+        self.assertIn("--input", result)
+        self.assertIn("body.json", result)
+
+    def test_unsafe_flag_value_prefix_inline_form(self):
+        spec = {"unsafe_flag_value_prefix": {"--input": "*"}}
+        result = check_unsafe_flags(["--input=body.json"], spec)
+        self.assertIsNotNone(result)
+        self.assertIn("body.json", result)
+
+    def test_unsafe_flag_value_prefix_find_exec(self):
+        spec = {
+            "unsafe_flag_value_prefix": {
+                "-exec": "*", "-execdir": "*", "-ok": "*", "-okdir": "*",
+            },
+        }
+        self.assertIsNotNone(
+            check_unsafe_flags(["-name", "*.py", "-exec", "rm", "{}", r"\;"], spec)
+        )
+        self.assertIsNotNone(
+            check_unsafe_flags(["-execdir", "rm", "{}", r"\;"], spec)
+        )
+        self.assertIsNotNone(
+            check_unsafe_flags(["-ok", "rm", "{}", r"\;"], spec)
+        )
+        self.assertIsNotNone(
+            check_unsafe_flags(["-okdir", "rm", "{}", r"\;"], spec)
+        )
+
+    def test_unsafe_flag_value_prefix_no_value(self):
+        # Flag at end of argv with no value following — no match.
+        spec = {"unsafe_flag_value_prefix": {"--input": "*"}}
+        self.assertIsNone(check_unsafe_flags(["--input"], spec))
+
+    def test_unsafe_flag_value_prefix_narrow_pattern(self):
+        # Glob narrower than `*` must still match the actual value.
+        spec = {"unsafe_flag_value_prefix": {"--input": "body.*"}}
+        self.assertIsNotNone(
+            check_unsafe_flags(["--input", "body.json"], spec)
+        )
+        self.assertIsNone(
+            check_unsafe_flags(["--input", "request.json"], spec)
+        )
 
 
 class TestParseAwsPositionals(unittest.TestCase):
@@ -390,6 +439,81 @@ class TestParseSqlCliArgv(unittest.TestCase):
         # `-cmd` captured as SQL flag; remaining positional[0] is the DB,
         # no positional[1].
         self.assertEqual(sqls, ["SELECT 1"])
+
+
+class TestValidateShellRules(unittest.TestCase):
+    def test_default_rules_validate_clean(self):
+        rules = load_shell_rules(REPO_ROOT / "rules")
+        errors = validate_shell_rules(rules)
+        self.assertEqual(
+            errors, [],
+            "rules/shell.json has schema drift: {}".format(errors),
+        )
+
+    def test_unknown_top_level_key_flagged(self):
+        errors = validate_shell_rules({"bogus_key": []})
+        self.assertTrue(any("bogus_key" in e for e in errors), errors)
+
+    def test_unknown_command_key_flagged(self):
+        errors = validate_shell_rules({
+            "commands": {"mycli": {"default": "safe", "made_up_flag": []}}
+        })
+        self.assertTrue(any("made_up_flag" in e for e in errors), errors)
+
+    def test_unknown_default_flagged(self):
+        errors = validate_shell_rules({
+            "commands": {"mycli": {"default": "not-a-real-default"}}
+        })
+        self.assertTrue(
+            any("not-a-real-default" in e for e in errors), errors,
+        )
+
+    def test_unknown_nested_subcommand_key_flagged(self):
+        errors = validate_shell_rules({
+            "commands": {
+                "mycli": {
+                    "default": "subcommand",
+                    "nested_subcommand": {
+                        "sub": {"default": "safe", "ghost_field": []},
+                    },
+                },
+            },
+        })
+        self.assertTrue(any("ghost_field" in e for e in errors), errors)
+
+    def test_unknown_service_override_key_flagged(self):
+        errors = validate_shell_rules({
+            "commands": {
+                "aws": {
+                    "default": "aws_cli",
+                    "service_overrides": {
+                        "s3": {"bogus": []},
+                    },
+                },
+            },
+        })
+        self.assertTrue(any("bogus" in e for e in errors), errors)
+
+    def test_unknown_interpreter_key_flagged(self):
+        errors = validate_shell_rules({
+            "interpreters": {
+                "python3": {"inline_flag": "-c", "weird_field": []},
+            },
+        })
+        self.assertTrue(any("weird_field" in e for e in errors), errors)
+
+    def test_unknown_nested_module_key_flagged(self):
+        errors = validate_shell_rules({
+            "interpreters": {
+                "python3": {
+                    "module_flag": "-m",
+                    "nested_modules": {
+                        "pip": {"safe_subcommands": ["list"], "rogue": []},
+                    },
+                },
+            },
+        })
+        self.assertTrue(any("rogue" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

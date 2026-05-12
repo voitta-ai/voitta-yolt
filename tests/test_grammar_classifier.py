@@ -223,6 +223,36 @@ class TestClassifyScenarios(unittest.TestCase):
     def test_find_delete_unsafe(self):
         self.assertDecision("find . -name '*.py' -delete", DECISION_UNSAFE)
 
+    def test_find_exec_unsafe(self):
+        self.assertDecision(
+            r"find . -name '*.py' -exec rm {} \;", DECISION_UNSAFE,
+        )
+
+    def test_find_execdir_unsafe(self):
+        self.assertDecision(
+            r"find . -name '*.py' -execdir rm {} \;", DECISION_UNSAFE,
+        )
+
+    def test_find_ok_unsafe(self):
+        self.assertDecision(
+            r"find . -name '*.py' -ok rm {} \;", DECISION_UNSAFE,
+        )
+
+    def test_find_okdir_unsafe(self):
+        self.assertDecision(
+            r"find . -name '*.py' -okdir rm {} \;", DECISION_UNSAFE,
+        )
+
+    def test_gh_api_input_split_unsafe(self):
+        self.assertDecision(
+            "gh api /repos/x/y/issues --input body.json", DECISION_UNSAFE,
+        )
+
+    def test_gh_api_input_inline_unsafe(self):
+        self.assertDecision(
+            "gh api /repos/x/y/issues --input=body.json", DECISION_UNSAFE,
+        )
+
     def test_sed_inplace_unsafe(self):
         self.assertDecision("sed -i 's/a/b/' file.txt", DECISION_UNSAFE)
 

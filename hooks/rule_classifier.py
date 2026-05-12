@@ -308,10 +308,26 @@ def aggregate_decisions(decisions):
 
 def check_unsafe_flags(cmd_args, spec):
     """Check whether cmd_args contains a flag combination the command spec
-    declares unsafe. Returns a human-readable description, or None."""
+    declares unsafe. Returns a human-readable description, or None.
+
+    Recognized fields on `spec`:
+
+    - `unsafe_flags_without_value`: list of flags that are unsafe by their
+      presence alone (`find -delete`).
+    - `unsafe_flag_values`: dict flag -> list of values. Match is
+      case-insensitive equality against the value (`curl -X POST`).
+    - `unsafe_flag_any_value`: list of flags unsafe whenever they appear,
+      regardless of value (`curl -d ...`).
+    - `unsafe_flag_value_prefix`: dict flag -> fnmatch glob pattern.
+      The flag carries a value (inline `--flag=value` or split
+      `--flag value`); the value is matched against the glob
+      (`find -exec rm`, `gh api --input body.json`). `"*"` matches any
+      value.
+    """
     unsafe_flag_values = spec.get("unsafe_flag_values", {})
     unsafe_flag_any_value = set(spec.get("unsafe_flag_any_value", []))
     unsafe_flags_without_value = set(spec.get("unsafe_flags_without_value", []))
+    unsafe_flag_value_prefix = spec.get("unsafe_flag_value_prefix", {})
 
     i = 0
     while i < len(cmd_args):
@@ -335,12 +351,162 @@ def check_unsafe_flags(cmd_args, spec):
                     if value_upper == unsafe_val.upper():
                         return "{} {}".format(flag, value)
 
+        if flag in unsafe_flag_value_prefix:
+            value = inline_value
+            if value is None and i + 1 < len(cmd_args):
+                value = cmd_args[i + 1]
+            if value is not None:
+                pat = unsafe_flag_value_prefix[flag]
+                if fnmatch(value, pat):
+                    return "{} {}".format(flag, value)
+
         if flag in unsafe_flag_any_value:
             return flag
 
         i += 1
 
     return None
+
+
+_ALLOWED_DEFAULTS = frozenset({
+    "safe", "unsafe", "ask", "unknown",
+    "subcommand", "delegate_to_argument",
+    "aws_cli", "gcloud_cli", "az_cli", "sql_cli",
+})
+
+_ALLOWED_TOP_LEVEL_KEYS = frozenset({
+    "_meta", "_safe_write_targets_note",
+    "shell_builtins_safe", "shell_keywords",
+    "safe_write_targets",
+    "commands", "interpreters",
+})
+
+_ALLOWED_COMMAND_KEYS = frozenset({
+    "default", "_note", "_skip_first_positional",
+    "unsafe_flag_values", "unsafe_flag_any_value",
+    "unsafe_flags_without_value", "unsafe_flag_value_prefix",
+    "valueless_flags",
+    "safe_subcommands", "unsafe_subcommands",
+    "safe_subcommand_patterns", "unsafe_subcommand_patterns",
+    "nested_subcommand",
+    "service_overrides",
+    "safe_operation_patterns", "unsafe_operation_patterns",
+    "sql_flags", "sql_file_flags", "sql_positional_index",
+})
+
+_ALLOWED_SERVICE_OVERRIDE_KEYS = frozenset({
+    "_note",
+    "safe_subcommands", "unsafe_subcommands",
+    "safe_operation_patterns", "unsafe_operation_patterns",
+    "extra_safe_patterns",
+})
+
+_ALLOWED_INTERPRETER_KEYS = frozenset({
+    "inline_flag", "module_flag", "delegate", "read_script_file",
+    "safe_modules", "unsafe_modules",
+    "safe_module_patterns", "unsafe_module_patterns",
+    "nested_modules",
+})
+
+_ALLOWED_NESTED_MODULE_KEYS = frozenset({
+    "default",
+    "safe_subcommands", "unsafe_subcommands",
+    "safe_subcommand_patterns", "unsafe_subcommand_patterns",
+})
+
+
+def validate_shell_rules(rules):
+    """Schema-check a loaded shell.json. Returns a list of error strings —
+    empty list means the data only uses keys / defaults the classifier
+    actually evaluates. Catches drift where the rule file references a
+    field the implementation silently ignores."""
+    errors = []
+
+    for key in rules:
+        if key not in _ALLOWED_TOP_LEVEL_KEYS:
+            errors.append("top-level: unknown key '{}'".format(key))
+
+    commands = rules.get("commands", {})
+    if not isinstance(commands, dict):
+        errors.append("commands: must be a dict")
+        commands = {}
+
+    for name, spec in commands.items():
+        if not isinstance(spec, dict):
+            errors.append("commands.{}: must be a dict".format(name))
+            continue
+        _validate_command_spec("commands.{}".format(name), spec, errors)
+
+    interpreters = rules.get("interpreters", {})
+    if not isinstance(interpreters, dict):
+        errors.append("interpreters: must be a dict")
+        interpreters = {}
+
+    for name, spec in interpreters.items():
+        if not isinstance(spec, dict):
+            errors.append("interpreters.{}: must be a dict".format(name))
+            continue
+        for key in spec:
+            if key not in _ALLOWED_INTERPRETER_KEYS:
+                errors.append(
+                    "interpreters.{}: unknown key '{}'".format(name, key)
+                )
+        nested = spec.get("nested_modules", {})
+        if isinstance(nested, dict):
+            for mod, mod_spec in nested.items():
+                if not isinstance(mod_spec, dict):
+                    errors.append(
+                        "interpreters.{}.nested_modules.{}: must be a dict"
+                        .format(name, mod)
+                    )
+                    continue
+                for key in mod_spec:
+                    if key not in _ALLOWED_NESTED_MODULE_KEYS:
+                        errors.append(
+                            "interpreters.{}.nested_modules.{}: unknown key '{}'"
+                            .format(name, mod, key)
+                        )
+
+    return errors
+
+
+def _validate_command_spec(path, spec, errors):
+    for key in spec:
+        if key not in _ALLOWED_COMMAND_KEYS:
+            errors.append("{}: unknown key '{}'".format(path, key))
+
+    default = spec.get("default")
+    if default is not None and default not in _ALLOWED_DEFAULTS:
+        errors.append("{}: unknown default '{}'".format(path, default))
+
+    nested = spec.get("nested_subcommand", {})
+    if isinstance(nested, dict):
+        for sub, sub_spec in nested.items():
+            if not isinstance(sub_spec, dict):
+                errors.append(
+                    "{}.nested_subcommand.{}: must be a dict".format(path, sub)
+                )
+                continue
+            _validate_command_spec(
+                "{}.nested_subcommand.{}".format(path, sub),
+                sub_spec,
+                errors,
+            )
+
+    overrides = spec.get("service_overrides", {})
+    if isinstance(overrides, dict):
+        for svc, svc_spec in overrides.items():
+            if not isinstance(svc_spec, dict):
+                errors.append(
+                    "{}.service_overrides.{}: must be a dict".format(path, svc)
+                )
+                continue
+            for key in svc_spec:
+                if key not in _ALLOWED_SERVICE_OVERRIDE_KEYS:
+                    errors.append(
+                        "{}.service_overrides.{}: unknown key '{}'"
+                        .format(path, svc, key)
+                    )
 
 
 def parse_aws_positionals(cmd_args):
