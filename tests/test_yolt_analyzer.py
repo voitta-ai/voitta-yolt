@@ -293,6 +293,75 @@ class TestImportScopeAndOrder(unittest.TestCase):
         self.assertFalse(result["safe"], result)
         self.assertIn("os.system", result["reason"])
 
+    # --- Module-scope execution order: PR #20 review item 3 ---
+
+    def test_call_before_top_level_rebind_still_flagged(self):
+        # Call appears at line 2, rebind at line 3. The call must see
+        # the binding that existed at its position, not the final state.
+        source = (
+            "from os import system\n"
+            'system("rm -rf /tmp/x")\n'
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_call_before_top_level_reimport_still_flagged(self):
+        # Earlier call sees `os.system`; a later re-import swaps the
+        # binding to `pathlib.Path`. The earlier call must NOT be
+        # rewritten by the later import.
+        source = (
+            "from os import system\n"
+            'system("rm -rf /tmp/x")\n'
+            "from pathlib import Path as system\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_call_before_alias_rebind_still_flagged(self):
+        source = (
+            "import os as x\n"
+            'x.system("rm -rf /tmp/x")\n'
+            "x = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_call_between_two_top_level_imports_uses_first(self):
+        # Three statements: import, call, re-import. The middle call
+        # must resolve through the first import only.
+        source = (
+            "from os import system\n"
+            'system("dangerous")\n'
+            "from pathlib import Path as system\n"
+            'system("benign")\n'
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        # Only the first call should be flagged; the second resolves to
+        # pathlib.Path which is not in any destructive rule.
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["findings"][0]["line"], 2)
+
+    def test_function_body_call_uses_final_snapshot(self):
+        # A call inside a function is conceptually executed when the
+        # function is invoked, conceptually after module setup. It
+        # therefore sees the *final* module snapshot. The pre-#20
+        # behavior is preserved for in-function calls.
+        source = (
+            "from os import system\n"
+            "system = print\n"
+            "def f():\n"
+            '    system("hello")\n'
+        )
+        result = self._analyze(source)
+        # Final snapshot has `system` dropped, so in-function call
+        # does not resolve to os.system.
+        self.assertTrue(result["safe"], result)
+
 
 if __name__ == "__main__":
     unittest.main()

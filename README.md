@@ -364,6 +364,22 @@ including assignments inside top-level `if`/`for` blocks) drops the
 binding; function-internal rebinds keep the module-level binding
 intact since they have their own scope.
 
+Module-scope calls resolve against the binding snapshot effective at
+their source line, so a call that appears *before* a later rebind /
+re-import still sees its original binding. For example:
+
+```python
+from os import system
+system("rm -rf /tmp/x")          # unsafe (resolves to os.system)
+system = print                   # later rebind does not retroactively
+                                 # un-flag the earlier call
+```
+
+Calls inside function or class bodies resolve against the final module
+snapshot (after all top-level events), since the body executes when
+the enclosing function/class is invoked rather than at module-load
+time.
+
 Still out of scope: variable rebinding via attribute access,
 `from mod import *`, and relative imports (`from . import x`).
 Anything the analyzer cannot resolve statically is left at its surface
