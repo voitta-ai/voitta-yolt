@@ -358,16 +358,21 @@ def run_hook():
         from grammar_classifier import GrammarClassifier
         from rule_classifier import (
             DECISION_SAFE, DECISION_UNSAFE,
+            ShellRulesValidationError,
             load_allow_patterns, load_shell_rules,
         )
     except ImportError as e:
         _log_hook_decision(command, "import-error", str(e))
         sys.exit(0)
 
-    shell_rules = load_shell_rules(
-        rules_dir=yolt_dir / "rules",
-        user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
-    )
+    try:
+        shell_rules = load_shell_rules(
+            rules_dir=yolt_dir / "rules",
+            user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
+        )
+    except ShellRulesValidationError as e:
+        _log_hook_decision(command, "rules-validation-error", str(e))
+        sys.exit(0)
 
     cwd_str = hook_input.get("cwd") or os.getcwd()
     cwd = Path(cwd_str)
