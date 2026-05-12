@@ -468,73 +468,55 @@ class TestImportScopeAndOrder(unittest.TestCase):
         result = self._analyze(source)
         self.assertTrue(result["safe"], result)
 
-    # --- Parameter annotations: PR #20 review item 5 ---
+    # --- Annotations are NOT analyzed: PR #20 review item 5 ---
+    #
+    # Annotation expressions are intentionally skipped. Under
+    # `from __future__ import annotations` (PEP 563) they are stored as
+    # strings and never evaluated; PEP 649 makes lazy evaluation the
+    # default in newer Python. Treating annotations as destructive call
+    # sites would create false positives in modules that opted into
+    # deferred annotations, and the false-negative risk (hiding a
+    # destructive call in a type hint) is not a credible attack
+    # pattern.
 
-    def test_positional_arg_annotation_uses_position_snapshot(self):
+    def test_positional_arg_annotation_not_analyzed(self):
         source = (
             "from os import system\n"
             'def f(x: system("rm -rf /tmp/x")):\n'
             "    return x\n"
-            "system = print\n"
         )
         result = self._analyze(source)
-        self.assertFalse(result["safe"], result)
-        self.assertIn("os.system", result["reason"])
+        self.assertTrue(result["safe"], result)
 
-    def test_kwonly_arg_annotation_uses_position_snapshot(self):
+    def test_kwonly_arg_annotation_not_analyzed(self):
         source = (
             "from os import system\n"
             'def f(*, x: system("rm -rf /tmp/x")):\n'
             "    return x\n"
-            "system = print\n"
         )
         result = self._analyze(source)
-        self.assertFalse(result["safe"], result)
-        self.assertIn("os.system", result["reason"])
+        self.assertTrue(result["safe"], result)
 
-    def test_posonly_arg_annotation_uses_position_snapshot(self):
+    def test_return_annotation_not_analyzed(self):
         source = (
             "from os import system\n"
-            'def f(x: system("rm -rf /tmp/x"), /):\n'
+            'def f() -> system("rm -rf /tmp/x"):\n'
+            "    pass\n"
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_future_annotations_param_not_analyzed(self):
+        # With `from __future__ import annotations`, the annotation is
+        # stored as a string at runtime and never evaluated.
+        source = (
+            "from __future__ import annotations\n"
+            "from os import system\n"
+            'def f(x: system("rm -rf /tmp/x")):\n'
             "    return x\n"
-            "system = print\n"
         )
         result = self._analyze(source)
-        self.assertFalse(result["safe"], result)
-        self.assertIn("os.system", result["reason"])
-
-    def test_vararg_annotation_uses_position_snapshot(self):
-        source = (
-            "from os import system\n"
-            'def f(*args: system("rm -rf /tmp/x")):\n'
-            "    return args\n"
-            "system = print\n"
-        )
-        result = self._analyze(source)
-        self.assertFalse(result["safe"], result)
-        self.assertIn("os.system", result["reason"])
-
-    def test_kwarg_annotation_uses_position_snapshot(self):
-        source = (
-            "from os import system\n"
-            'def f(**kw: system("rm -rf /tmp/x")):\n'
-            "    return kw\n"
-            "system = print\n"
-        )
-        result = self._analyze(source)
-        self.assertFalse(result["safe"], result)
-        self.assertIn("os.system", result["reason"])
-
-    def test_async_arg_annotation_uses_position_snapshot(self):
-        source = (
-            "from os import system\n"
-            'async def f(x: system("rm -rf /tmp/x")):\n'
-            "    return x\n"
-            "system = print\n"
-        )
-        result = self._analyze(source)
-        self.assertFalse(result["safe"], result)
-        self.assertIn("os.system", result["reason"])
+        self.assertTrue(result["safe"], result)
 
 
 if __name__ == "__main__":

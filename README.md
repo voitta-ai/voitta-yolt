@@ -378,11 +378,17 @@ system = print                   # later rebind does not retroactively
 Calls in deferred positions — `def` / `async def` / `lambda` bodies —
 resolve against the *final* module snapshot, since those bodies execute
 when the function is invoked rather than at module-load time. Calls in
-positions that run at module load — class bodies, decorators, default
-and keyword-default argument values, parameter annotations (positional,
-positional-only, keyword-only, `*args`, and `**kwargs`), and return
-annotations — resolve against the position-aware snapshot like any
-other module-scope call.
+positions that unconditionally run at module load — class bodies,
+decorators, default and keyword-default argument values — resolve
+against the position-aware snapshot like any other module-scope call.
+
+Annotation expressions (parameter and return) are intentionally not
+analyzed. Under `from __future__ import annotations` (PEP 563) the
+annotation is stored as a string at runtime and never evaluated; PEP
+649 makes lazy annotation evaluation the default in newer Python.
+Flagging annotations would create false positives for modules that
+opted into deferred annotations, and a destructive call hidden inside
+a type hint is not a credible attack pattern.
 
 Still out of scope: variable rebinding via attribute access,
 `from mod import *`, and relative imports (`from . import x`).

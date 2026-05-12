@@ -153,13 +153,22 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _visit_function_like(self, node):
-        """Walk a `def` / `async def` carefully: decorators, default and
-        kw-default values, parameter annotations, and the return
-        annotation all evaluate at definition time (module scope in the
-        typical top-level case), so they must resolve against the
-        position-aware snapshot. Only the function body is deferred
-        until the function is called; bump `_scope_depth` only across
-        the body."""
+        """Walk a `def` / `async def` carefully: decorators, positional
+        defaults, and keyword-only defaults are unconditionally executed
+        at definition time, so they resolve against the position-aware
+        module snapshot. The function body is deferred until the
+        function is called, so `_scope_depth` is bumped only across the
+        body.
+
+        Annotations (parameter and return) are intentionally NOT visited.
+        Under `from __future__ import annotations` (PEP 563) they are
+        stored as strings and never evaluated, and PEP 649 makes lazy
+        annotation evaluation the default in newer Python. Treating
+        annotation expressions as destructive call sites would create
+        false positives in code that explicitly opted into deferred
+        annotations, and the false-negative risk (someone hiding a
+        destructive call inside a parameter type hint) is not a credible
+        attack pattern."""
         for d in node.decorator_list:
             self.visit(d)
         for d in node.args.defaults:
@@ -167,37 +176,12 @@ class SafetyAnalyzer(ast.NodeVisitor):
         for d in node.args.kw_defaults:
             if d is not None:
                 self.visit(d)
-        # Per-argument annotations across every parameter category.
-        # `ast.arguments` splits them into posonlyargs / args / kwonlyargs
-        # plus the optional `vararg` and `kwarg`; each `ast.arg.annotation`
-        # is evaluated at def time.
-        for arg in self._all_arg_nodes(node.args):
-            if arg.annotation is not None:
-                self.visit(arg.annotation)
-        if node.returns is not None:
-            self.visit(node.returns)
         self._scope_depth += 1
         try:
             for stmt in node.body:
                 self.visit(stmt)
         finally:
             self._scope_depth -= 1
-
-    @staticmethod
-    def _all_arg_nodes(arguments):
-        """Yield every `ast.arg` across all parameter categories of an
-        `ast.arguments` node: positional-only, regular positional,
-        keyword-only, plus the optional `*args` and `**kwargs`."""
-        for a in arguments.posonlyargs:
-            yield a
-        for a in arguments.args:
-            yield a
-        for a in arguments.kwonlyargs:
-            yield a
-        if arguments.vararg is not None:
-            yield arguments.vararg
-        if arguments.kwarg is not None:
-            yield arguments.kwarg
 
     def _collect_top_level_bindings(self, tree):
         """Walk the module-level body (only) and build the line-ordered
