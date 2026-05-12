@@ -375,10 +375,12 @@ system = print                   # later rebind does not retroactively
                                  # un-flag the earlier call
 ```
 
-Calls inside function or class bodies resolve against the final module
-snapshot (after all top-level events), since the body executes when
-the enclosing function/class is invoked rather than at module-load
-time.
+Calls in deferred positions — `def` / `async def` / `lambda` bodies —
+resolve against the *final* module snapshot, since those bodies execute
+when the function is invoked rather than at module-load time. Calls in
+positions that run at module load — class bodies, decorators, default
+and keyword-default argument values, return annotations — resolve
+against the position-aware snapshot like any other module-scope call.
 
 Still out of scope: variable rebinding via attribute access,
 `from mod import *`, and relative imports (`from . import x`).

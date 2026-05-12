@@ -125,19 +125,55 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node):
-        self._scope_depth += 1
-        self.generic_visit(node)
-        self._scope_depth -= 1
+        self._visit_function_like(node)
 
     def visit_AsyncFunctionDef(self, node):
+        self._visit_function_like(node)
+
+    def visit_Lambda(self, node):
+        # Defaults run at lambda-creation time (module scope); body runs
+        # when the lambda is called.
+        for d in node.args.defaults:
+            self.visit(d)
+        for d in node.args.kw_defaults:
+            if d is not None:
+                self.visit(d)
         self._scope_depth += 1
-        self.generic_visit(node)
-        self._scope_depth -= 1
+        try:
+            self.visit(node.body)
+        finally:
+            self._scope_depth -= 1
 
     def visit_ClassDef(self, node):
-        self._scope_depth += 1
+        # A class body executes at module load (it's just a sequence of
+        # statements run in a fresh namespace), so calls inside it must
+        # resolve against the position-aware module snapshot. Decorators,
+        # bases, and keyword arguments also evaluate at the class
+        # statement's position. Do NOT bump `_scope_depth`.
         self.generic_visit(node)
-        self._scope_depth -= 1
+
+    def _visit_function_like(self, node):
+        """Walk a `def` / `async def` carefully: decorators, default and
+        kw-default values, and annotations all evaluate at definition
+        time (module scope in the typical top-level case), so they must
+        resolve against the position-aware snapshot. Only the function
+        body is deferred until the function is called; bump
+        `_scope_depth` only across the body."""
+        for d in node.decorator_list:
+            self.visit(d)
+        for d in node.args.defaults:
+            self.visit(d)
+        for d in node.args.kw_defaults:
+            if d is not None:
+                self.visit(d)
+        if node.returns is not None:
+            self.visit(node.returns)
+        self._scope_depth += 1
+        try:
+            for stmt in node.body:
+                self.visit(stmt)
+        finally:
+            self._scope_depth -= 1
 
     def _collect_top_level_bindings(self, tree):
         """Walk the module-level body (only) and build the line-ordered

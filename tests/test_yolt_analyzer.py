@@ -362,6 +362,112 @@ class TestImportScopeAndOrder(unittest.TestCase):
         # does not resolve to os.system.
         self.assertTrue(result["safe"], result)
 
+    # --- Definition-time expressions: PR #20 review item 4 ---
+
+    def test_class_body_call_uses_position_snapshot(self):
+        # A class body runs at the class statement's position during
+        # module load, not when something later "uses" the class. An
+        # earlier destructive call inside the body must not be erased
+        # by a later top-level rebind.
+        source = (
+            "from os import system\n"
+            "class C:\n"
+            '    system("rm -rf /tmp/x")\n'
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_function_default_arg_uses_position_snapshot(self):
+        # `def f(x=system(...))` evaluates `system(...)` at def time
+        # (module load), not when `f` is invoked. Must resolve against
+        # the binding active at the def statement's position.
+        source = (
+            "from os import system\n"
+            'def f(x=system("rm -rf /tmp/x")):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_function_kwonly_default_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'def f(*, x=system("rm -rf /tmp/x")):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_function_decorator_uses_position_snapshot(self):
+        # Decorators run at def time. An earlier decorator expression
+        # must see the binding active at its position.
+        source = (
+            "from os import system\n"
+            '@system("rm -rf /tmp/x")\n'
+            "def f():\n"
+            "    pass\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_method_body_still_deferred_inside_class(self):
+        # A method body inside a class is still deferred until call
+        # time, even though the surrounding class body runs at module
+        # load. The method call sees the final snapshot.
+        source = (
+            "from os import system\n"
+            "class C:\n"
+            "    def m(self):\n"
+            '        system("hello")\n'
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        # Final snapshot has system dropped, so the method body call
+        # does not resolve to os.system.
+        self.assertTrue(result["safe"], result)
+
+    def test_async_function_default_arg_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'async def f(x=system("rm -rf /tmp/x")):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_lambda_default_uses_position_snapshot(self):
+        # `lambda x=system(...): x` — the default evaluates at lambda
+        # creation time (module load).
+        source = (
+            "from os import system\n"
+            'f = lambda x=system("rm -rf /tmp/x"): x\n'
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_lambda_body_call_uses_final_snapshot(self):
+        # Lambda body is deferred until the lambda is called, so it
+        # sees the final snapshot like a regular function body.
+        source = (
+            "from os import system\n"
+            "system = print\n"
+            "f = lambda: system(\"hello\")\n"
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
 
 if __name__ == "__main__":
     unittest.main()
