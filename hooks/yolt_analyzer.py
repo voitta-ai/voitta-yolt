@@ -154,11 +154,12 @@ class SafetyAnalyzer(ast.NodeVisitor):
 
     def _visit_function_like(self, node):
         """Walk a `def` / `async def` carefully: decorators, default and
-        kw-default values, and annotations all evaluate at definition
-        time (module scope in the typical top-level case), so they must
-        resolve against the position-aware snapshot. Only the function
-        body is deferred until the function is called; bump
-        `_scope_depth` only across the body."""
+        kw-default values, parameter annotations, and the return
+        annotation all evaluate at definition time (module scope in the
+        typical top-level case), so they must resolve against the
+        position-aware snapshot. Only the function body is deferred
+        until the function is called; bump `_scope_depth` only across
+        the body."""
         for d in node.decorator_list:
             self.visit(d)
         for d in node.args.defaults:
@@ -166,6 +167,13 @@ class SafetyAnalyzer(ast.NodeVisitor):
         for d in node.args.kw_defaults:
             if d is not None:
                 self.visit(d)
+        # Per-argument annotations across every parameter category.
+        # `ast.arguments` splits them into posonlyargs / args / kwonlyargs
+        # plus the optional `vararg` and `kwarg`; each `ast.arg.annotation`
+        # is evaluated at def time.
+        for arg in self._all_arg_nodes(node.args):
+            if arg.annotation is not None:
+                self.visit(arg.annotation)
         if node.returns is not None:
             self.visit(node.returns)
         self._scope_depth += 1
@@ -174,6 +182,22 @@ class SafetyAnalyzer(ast.NodeVisitor):
                 self.visit(stmt)
         finally:
             self._scope_depth -= 1
+
+    @staticmethod
+    def _all_arg_nodes(arguments):
+        """Yield every `ast.arg` across all parameter categories of an
+        `ast.arguments` node: positional-only, regular positional,
+        keyword-only, plus the optional `*args` and `**kwargs`."""
+        for a in arguments.posonlyargs:
+            yield a
+        for a in arguments.args:
+            yield a
+        for a in arguments.kwonlyargs:
+            yield a
+        if arguments.vararg is not None:
+            yield arguments.vararg
+        if arguments.kwarg is not None:
+            yield arguments.kwarg
 
     def _collect_top_level_bindings(self, tree):
         """Walk the module-level body (only) and build the line-ordered

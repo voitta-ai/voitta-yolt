@@ -468,6 +468,74 @@ class TestImportScopeAndOrder(unittest.TestCase):
         result = self._analyze(source)
         self.assertTrue(result["safe"], result)
 
+    # --- Parameter annotations: PR #20 review item 5 ---
+
+    def test_positional_arg_annotation_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'def f(x: system("rm -rf /tmp/x")):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_kwonly_arg_annotation_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'def f(*, x: system("rm -rf /tmp/x")):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_posonly_arg_annotation_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'def f(x: system("rm -rf /tmp/x"), /):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_vararg_annotation_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'def f(*args: system("rm -rf /tmp/x")):\n'
+            "    return args\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_kwarg_annotation_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'def f(**kw: system("rm -rf /tmp/x")):\n'
+            "    return kw\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_async_arg_annotation_uses_position_snapshot(self):
+        source = (
+            "from os import system\n"
+            'async def f(x: system("rm -rf /tmp/x")):\n'
+            "    return x\n"
+            "system = print\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
