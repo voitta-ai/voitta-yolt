@@ -262,6 +262,24 @@ class TestClassifyScenarios(unittest.TestCase):
             DECISION_UNSAFE,
         )
 
+    def test_python3_c_aliased_os_system_unsafe(self):
+        self.assertDecision(
+            'python3 -c "import os as x; x.system(\\"rm -rf /tmp/x\\")"',
+            DECISION_UNSAFE,
+        )
+
+    def test_python3_c_from_import_os_system_unsafe(self):
+        self.assertDecision(
+            'python3 -c "from os import system; system(\\"rm -rf /tmp/x\\")"',
+            DECISION_UNSAFE,
+        )
+
+    def test_python3_c_from_import_alias_rmtree_unsafe(self):
+        self.assertDecision(
+            'python3 -c "from shutil import rmtree as wipe; wipe(\\"/tmp/x\\")"',
+            DECISION_UNSAFE,
+        )
+
     def test_bash_c_rm_unsafe(self):
         self.assertDecision('bash -c "rm -rf /etc"', DECISION_UNSAFE)
 

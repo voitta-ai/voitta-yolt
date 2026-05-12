@@ -38,7 +38,56 @@ def load_rules(rules_dir, user_overrides_path=None):
 
 
 class SafetyAnalyzer(ast.NodeVisitor):
-    """AST visitor that checks Python code against safety rules."""
+    """AST visitor that checks Python code against safety rules.
+
+    Import-binding resolution
+    -------------------------
+    Before the AST walk, a pre-pass scans only the *direct module-level*
+    statements of the parsed tree and builds two data structures:
+
+      - `_module_events`: a line-ordered list of binding events (imports
+        and reassignments) at module scope. Used to compute the binding
+        snapshot effective at any given source line, so a module-scope
+        call resolves against the bindings that existed *just before* it,
+        not against the final state of the module. This matters when
+        the script imports, calls, then later rebinds or re-imports the
+        same name — the earlier call should still see the original
+        binding.
+      - `alias_table`: the *final* snapshot, applied to calls that live
+        inside function / class bodies. Those bodies execute when their
+        enclosing function/class is invoked, conceptually after the
+        module-level code finishes, so they see the final state.
+
+    Supported import forms (recorded as binding events):
+
+      - `import mod`                       -> {"mod": "mod"}
+      - `import mod as alias`              -> {"alias": "mod"}
+      - `import mod.sub`                   -> {"mod": "mod"}
+      - `import mod.sub as alias`          -> {"alias": "mod.sub"}
+      - `from mod import name`             -> {"name": "mod.name"}
+      - `from mod import name as alias`    -> {"alias": "mod.name"}
+
+    Scope rules:
+
+      - Only top-of-file (direct module-body) imports are honored.
+        Imports nested under control flow (`if cond: import x`,
+        `if False:` branches, `try`/`except`, `with`) or inside a
+        function/class body are NOT honored — we cannot statically prove
+        they execute, so the surface name is left alone.
+      - Module-scope reassignments (`name = ...`, `for name in ...`,
+        `name += ...`, `with ... as name:`, including assignments
+        inside top-level `if`/`for` blocks) are recorded as "drop"
+        events at their source line, so a later module-scope call no
+        longer resolves through the old binding.
+      - Function-internal rebinds do NOT participate, because those
+        introduce their own scope.
+
+    `_resolve` rewrites the leading binding of each call target. Names
+    that have no recorded binding effective at the call's position are
+    left unchanged — we never guess. Still out of scope: variable
+    rebinding via attribute access, starred imports
+    (`from mod import *`), relative imports (`from . import x`), and
+    proving object identity for arbitrary locals."""
 
     def __init__(self, rules):
         self.rules = rules
@@ -46,6 +95,18 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.imports = set()
         self.import_modules = set()
         self.safe_imports = set(rules.get("_safe_imports", []))
+        # Final snapshot: used for calls inside function / class bodies.
+        # Populated by `_collect_top_level_bindings` before the AST walk.
+        self.alias_table = {}
+        # Ordered list of (lineno, name, target_or_None) module-scope
+        # binding events. `target=None` means the event drops the binding
+        # (reassignment). Snapshots at any line are computed by replaying
+        # events with `lineno < line`.
+        self._module_events = []
+        # Tracks whether the current AST position is inside a function
+        # or class body. Calls at depth 0 use position-specific
+        # resolution; deeper calls use the final snapshot.
+        self._scope_depth = 0
 
     def visit_Import(self, node):
         for alias in node.names:
@@ -55,11 +116,193 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-        if node.module:
-            top_level = node.module.split(".")[0]
-            self.imports.add(node.module)
-            self.import_modules.add(top_level)
+        if not node.module:
+            self.generic_visit(node)
+            return
+        top_level = node.module.split(".")[0]
+        self.imports.add(node.module)
+        self.import_modules.add(top_level)
         self.generic_visit(node)
+
+    def visit_FunctionDef(self, node):
+        self._visit_function_like(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self._visit_function_like(node)
+
+    def visit_Lambda(self, node):
+        # Defaults run at lambda-creation time (module scope); body runs
+        # when the lambda is called.
+        for d in node.args.defaults:
+            self.visit(d)
+        for d in node.args.kw_defaults:
+            if d is not None:
+                self.visit(d)
+        self._scope_depth += 1
+        try:
+            self.visit(node.body)
+        finally:
+            self._scope_depth -= 1
+
+    def visit_ClassDef(self, node):
+        # A class body executes at module load (it's just a sequence of
+        # statements run in a fresh namespace), so calls inside it must
+        # resolve against the position-aware module snapshot. Decorators,
+        # bases, and keyword arguments also evaluate at the class
+        # statement's position. Do NOT bump `_scope_depth`.
+        self.generic_visit(node)
+
+    def _visit_function_like(self, node):
+        """Walk a `def` / `async def` carefully: decorators, positional
+        defaults, and keyword-only defaults are unconditionally executed
+        at definition time, so they resolve against the position-aware
+        module snapshot. The function body is deferred until the
+        function is called, so `_scope_depth` is bumped only across the
+        body.
+
+        Annotations (parameter and return) are intentionally NOT visited.
+        Under `from __future__ import annotations` (PEP 563) they are
+        stored as strings and never evaluated, and PEP 649 makes lazy
+        annotation evaluation the default in newer Python. Treating
+        annotation expressions as destructive call sites would create
+        false positives in code that explicitly opted into deferred
+        annotations, and the false-negative risk (someone hiding a
+        destructive call inside a parameter type hint) is not a credible
+        attack pattern."""
+        for d in node.decorator_list:
+            self.visit(d)
+        for d in node.args.defaults:
+            self.visit(d)
+        for d in node.args.kw_defaults:
+            if d is not None:
+                self.visit(d)
+        self._scope_depth += 1
+        try:
+            for stmt in node.body:
+                self.visit(stmt)
+        finally:
+            self._scope_depth -= 1
+
+    def _collect_top_level_bindings(self, tree):
+        """Walk the module-level body (only) and build the line-ordered
+        binding event list plus the final snapshot. See class docstring
+        for the scoping rationale."""
+        if not isinstance(tree, ast.Module):
+            return
+
+        events = []
+
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    if alias.asname:
+                        events.append((stmt.lineno, alias.asname, alias.name))
+                    else:
+                        # `import os.path` binds the top-level name `os`.
+                        top_level = alias.name.split(".")[0]
+                        events.append((stmt.lineno, top_level, top_level))
+            elif isinstance(stmt, ast.ImportFrom):
+                if not stmt.module:
+                    # Relative imports: package context unavailable, skip.
+                    continue
+                for alias in stmt.names:
+                    if alias.name == "*":
+                        # Starred imports: bound names are not statically
+                        # knowable, do not guess.
+                        continue
+                    local = alias.asname or alias.name
+                    events.append((
+                        stmt.lineno,
+                        local,
+                        "{}.{}".format(stmt.module, alias.name),
+                    ))
+            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # Function / class definitions don't bind module-scope
+                # names other than their own; that name's "binding" is
+                # not something the resolver should rewrite, so skip.
+                continue
+            else:
+                # Walk this top-level statement collecting module-scope
+                # reassignments as drop events keyed to their source line.
+                for node in self._walk_module_scope(stmt):
+                    line = getattr(node, "lineno", stmt.lineno)
+                    if isinstance(node, ast.Assign):
+                        for tgt in node.targets:
+                            for name in self._names_in_target(tgt):
+                                events.append((line, name, None))
+                    elif isinstance(node, ast.AugAssign):
+                        for name in self._names_in_target(node.target):
+                            events.append((line, name, None))
+                    elif isinstance(node, ast.AnnAssign):
+                        if node.value is not None:
+                            for name in self._names_in_target(node.target):
+                                events.append((line, name, None))
+                    elif isinstance(node, ast.For):
+                        for name in self._names_in_target(node.target):
+                            events.append((line, name, None))
+                    elif isinstance(node, ast.With):
+                        for item in node.items:
+                            if item.optional_vars is not None:
+                                for name in self._names_in_target(
+                                    item.optional_vars
+                                ):
+                                    events.append((line, name, None))
+
+        # Stable sort by lineno preserves intra-line declaration order.
+        events.sort(key=lambda e: e[0])
+        self._module_events = events
+
+        # Final snapshot for function / class bodies.
+        final = {}
+        for _, name, target in events:
+            if target is None:
+                final.pop(name, None)
+            else:
+                final[name] = target
+        self.alias_table = final
+
+    def _snapshot_at_line(self, lineno):
+        """Replay binding events strictly before `lineno` and return the
+        resulting name -> target dict. Used for module-scope calls so
+        they see the binding state effective at their position rather
+        than the final module state."""
+        snapshot = {}
+        for evt_line, name, target in self._module_events:
+            if evt_line >= lineno:
+                break
+            if target is None:
+                snapshot.pop(name, None)
+            else:
+                snapshot[name] = target
+        return snapshot
+
+    @staticmethod
+    def _names_in_target(target):
+        """Extract the bare-name targets from an assignment target.
+        Handles `x`, `(x, y)`, `[x, y]`, and starred-tuple cases. Attribute
+        / subscript targets (`obj.x = ...`, `arr[0] = ...`) do not rebind
+        a local name so they're ignored."""
+        retval = set()
+        if isinstance(target, ast.Name):
+            retval.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                retval.update(SafetyAnalyzer._names_in_target(elt))
+        elif isinstance(target, ast.Starred):
+            retval.update(SafetyAnalyzer._names_in_target(target.value))
+        return retval
+
+    @staticmethod
+    def _walk_module_scope(stmt):
+        """Yield every descendant of `stmt` that still lives in module
+        scope. Walks past `if`/`for`/`while`/`try`/`with` since those
+        share the enclosing scope, but stops at function and class
+        boundaries which introduce their own."""
+        yield stmt
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        for child in ast.iter_child_nodes(stmt):
+            yield from SafetyAnalyzer._walk_module_scope(child)
 
     def visit_Call(self, node):
         call_name = self._get_call_name(node)
@@ -72,10 +315,13 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _get_call_name(self, node):
-        """Extract the full dotted name of a function call."""
+        """Extract the full dotted name of a function call, rewriting the
+        leading binding via the position-appropriate alias table. Module-
+        scope calls resolve against the binding snapshot effective just
+        before their line; calls inside function / class bodies resolve
+        against the final module snapshot."""
         if isinstance(node.func, ast.Name):
-            retval = node.func.id
-            return retval
+            return self._resolve(node.func.id, node)
         if isinstance(node.func, ast.Attribute):
             parts = []
             current = node.func
@@ -85,9 +331,25 @@ class SafetyAnalyzer(ast.NodeVisitor):
             if isinstance(current, ast.Name):
                 parts.append(current.id)
             parts.reverse()
-            retval = ".".join(parts)
-            return retval
+            return self._resolve(".".join(parts), node)
         return None
+
+    def _resolve(self, name, node):
+        """Rewrite the leading segment of `name` if it is a recorded
+        binding effective at the call's position; otherwise return `name`
+        unchanged. Never guesses for unknown leading names - see class
+        docstring for the supported forms and out-of-scope cases."""
+        if self._scope_depth == 0:
+            table = self._snapshot_at_line(node.lineno)
+        else:
+            table = self.alias_table
+        head, sep, rest = name.partition(".")
+        if head not in table:
+            return name
+        resolved_head = table[head]
+        if sep:
+            return "{}.{}".format(resolved_head, rest)
+        return resolved_head
 
     def _matches_pattern(self, name, pattern):
         """Check if a name matches a glob pattern.
@@ -184,6 +446,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
             return retval
 
         self.source_lines = source.splitlines()
+        self._collect_top_level_bindings(tree)
         self.visit(tree)
 
         is_safe = len(self.findings) == 0

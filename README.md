@@ -336,6 +336,65 @@ Rules use `trigger_imports` to scope checks. For example, boto3 patterns
 only apply when `boto3` is imported, so `cache.delete_item()` in a
 non-AWS script doesn't false-positive.
 
+The analyzer also resolves import bindings before matching, so the rule
+patterns (`os.system`, `shutil.rmtree`, ...) catch the same call written
+through any of the standard import forms:
+
+- `import mod`
+- `import mod as alias`
+- `import mod.sub` / `import mod.sub as alias`
+- `from mod import name`
+- `from mod import name as alias`
+
+For example, `from os import system; system("rm -rf /tmp/x")` and
+`import os as x; x.system(...)` both normalize to `os.system` and
+classify as destructive.
+
+Bindings are collected in a pre-pass over the parsed module body before
+the call walk, so traversal order does not matter — a call inside a
+function defined *before* the matching import still resolves through
+the binding.
+
+Only top-of-file unconditional imports are honored. Imports nested
+under control flow (`if cond: import x`, dead `if False:` branches,
+`try`/`except`, `with`, or inside a function/class body) are NOT
+applied — we cannot statically prove they execute. Top-level
+reassignment of a bound name (`from os import system; system = print`,
+including assignments inside top-level `if`/`for` blocks) drops the
+binding; function-internal rebinds keep the module-level binding
+intact since they have their own scope.
+
+Module-scope calls resolve against the binding snapshot effective at
+their source line, so a call that appears *before* a later rebind /
+re-import still sees its original binding. For example:
+
+```python
+from os import system
+system("rm -rf /tmp/x")          # unsafe (resolves to os.system)
+system = print                   # later rebind does not retroactively
+                                 # un-flag the earlier call
+```
+
+Calls in deferred positions — `def` / `async def` / `lambda` bodies —
+resolve against the *final* module snapshot, since those bodies execute
+when the function is invoked rather than at module-load time. Calls in
+positions that unconditionally run at module load — class bodies,
+decorators, default and keyword-default argument values — resolve
+against the position-aware snapshot like any other module-scope call.
+
+Annotation expressions (parameter and return) are intentionally not
+analyzed. Under `from __future__ import annotations` (PEP 563) the
+annotation is stored as a string at runtime and never evaluated; PEP
+649 makes lazy annotation evaluation the default in newer Python.
+Flagging annotations would create false positives for modules that
+opted into deferred annotations, and a destructive call hidden inside
+a type hint is not a credible attack pattern.
+
+Still out of scope: variable rebinding via attribute access,
+`from mod import *`, and relative imports (`from . import x`).
+Anything the analyzer cannot resolve statically is left at its surface
+name rather than guessed.
+
 ## Custom rules
 
 ### Python rules - `~/.claude/yolt/rules.json`
