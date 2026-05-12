@@ -42,9 +42,11 @@ class SafetyAnalyzer(ast.NodeVisitor):
 
     Import-binding resolution
     -------------------------
-    During traversal we record the local name introduced by each import so
-    that calls written via aliases or `from`-imports can be matched against
-    rule patterns that use the original dotted path. Supported forms:
+    Before the AST walk, a pre-pass scans only the *direct module-level*
+    statements of the parsed tree and records the local name each import
+    introduces so that calls written via aliases or `from`-imports can be
+    matched against rule patterns that use the original dotted path.
+    Supported forms:
 
       - `import mod`                       -> {"mod": "mod"}
       - `import mod as alias`              -> {"alias": "mod"}
@@ -53,12 +55,28 @@ class SafetyAnalyzer(ast.NodeVisitor):
       - `from mod import name`             -> {"name": "mod.name"}
       - `from mod import name as alias`    -> {"alias": "mod.name"}
 
-    `_resolve` rewrites the leading binding of each call target via this
-    table. Anything not bound by one of those import forms is left
-    unchanged - we never guess. Out of scope for this release: variable
-    rebinding (`f = os.system; f(...)`), reassignment through attribute
-    access, conditional / starred imports, and proving object identity
-    for arbitrary locals."""
+    Bindings are scoped to module-level top-of-file imports specifically
+    so that:
+
+      - traversal order is irrelevant: a call that lives inside a
+        function defined *before* the import statement still resolves
+        through the binding,
+      - imports nested under control flow (`if cond: import x`, dead
+        `if False:` branches, try/except, function or class bodies) are
+        NOT honored — we cannot statically prove they execute, so we
+        leave the surface name alone,
+      - top-level reassignment of a bound name (`from os import system;
+        system = print`) drops the binding so the later call is not
+        guessed as `os.system`. Function-internal rebinds keep the
+        module-level binding intact since they introduce a separate
+        scope.
+
+    `_resolve` rewrites the leading binding of each call target via the
+    pre-built table. Anything not bound is left unchanged — we never
+    guess. Still out of scope: variable rebinding via attribute access,
+    starred imports (`from mod import *`), relative imports
+    (`from . import x`), and proving object identity for arbitrary
+    locals."""
 
     def __init__(self, rules):
         self.rules = rules
@@ -67,6 +85,8 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.import_modules = set()
         self.safe_imports = set(rules.get("_safe_imports", []))
         # local-name -> fully-qualified dotted path it points to.
+        # Populated by `_collect_top_level_bindings` before the AST walk,
+        # never mutated during traversal.
         self.alias_table = {}
 
     def visit_Import(self, node):
@@ -74,31 +94,110 @@ class SafetyAnalyzer(ast.NodeVisitor):
             top_level = alias.name.split(".")[0]
             self.imports.add(alias.name)
             self.import_modules.add(top_level)
-            # `import os.path` binds the top-level name `os` in the local
-            # scope; `import os.path as p` binds `p` to the submodule.
-            if alias.asname:
-                self.alias_table[alias.asname] = alias.name
-            else:
-                self.alias_table[top_level] = top_level
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-        # Relative imports (`from . import x`) cannot be resolved without
-        # knowing the package context, so we skip the binding step.
         if not node.module:
             self.generic_visit(node)
             return
         top_level = node.module.split(".")[0]
         self.imports.add(node.module)
         self.import_modules.add(top_level)
-        for alias in node.names:
-            if alias.name == "*":
-                # `from mod import *` makes the bound names unknowable
-                # statically. Don't guess.
-                continue
-            local = alias.asname or alias.name
-            self.alias_table[local] = "{}.{}".format(node.module, alias.name)
         self.generic_visit(node)
+
+    def _collect_top_level_bindings(self, tree):
+        """Walk the module-level body (only) and populate `alias_table` from
+        unconditional imports. Then scan module-scope (excluding function /
+        class bodies) for reassignments to those bound names and drop them.
+        See class docstring for the scoping rationale."""
+        if not isinstance(tree, ast.Module):
+            return
+
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    if alias.asname:
+                        self.alias_table[alias.asname] = alias.name
+                    else:
+                        # `import os.path` binds the top-level name `os`.
+                        top_level = alias.name.split(".")[0]
+                        self.alias_table[top_level] = top_level
+            elif isinstance(stmt, ast.ImportFrom):
+                if not stmt.module:
+                    # Relative imports: package context unavailable, skip.
+                    continue
+                for alias in stmt.names:
+                    if alias.name == "*":
+                        # Starred imports: bound names are not statically
+                        # knowable, do not guess.
+                        continue
+                    local = alias.asname or alias.name
+                    self.alias_table[local] = "{}.{}".format(
+                        stmt.module, alias.name
+                    )
+
+        # Top-level reassignment invalidates the binding. Walking past
+        # function / class boundaries here is intentional: those introduce
+        # their own scope, so an internal rebind does not shadow the
+        # module-level binding for our purposes.
+        for name in self._find_module_scope_rebinds(tree):
+            self.alias_table.pop(name, None)
+
+    def _find_module_scope_rebinds(self, tree):
+        """Collect every name reassigned at module scope (outside function
+        and class bodies). Includes assignments inside `if`/`for`/`while`/
+        `try`/`with` blocks at the top level, since those execute in the
+        module's scope and may rebind the name at runtime."""
+        rebinds = set()
+        for stmt in tree.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            for node in self._walk_module_scope(stmt):
+                if isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        rebinds.update(self._names_in_target(tgt))
+                elif isinstance(node, ast.AugAssign):
+                    rebinds.update(self._names_in_target(node.target))
+                elif isinstance(node, ast.AnnAssign):
+                    if node.value is not None:
+                        rebinds.update(self._names_in_target(node.target))
+                elif isinstance(node, ast.For):
+                    rebinds.update(self._names_in_target(node.target))
+                elif isinstance(node, ast.With):
+                    for item in node.items:
+                        if item.optional_vars is not None:
+                            rebinds.update(self._names_in_target(item.optional_vars))
+        return rebinds
+
+    @staticmethod
+    def _names_in_target(target):
+        """Extract the bare-name targets from an assignment target.
+        Handles `x`, `(x, y)`, `[x, y]`, and starred-tuple cases. Attribute
+        / subscript targets (`obj.x = ...`, `arr[0] = ...`) do not rebind
+        a local name so they're ignored."""
+        retval = set()
+        if isinstance(target, ast.Name):
+            retval.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                retval.update(SafetyAnalyzer._names_in_target(elt))
+        elif isinstance(target, ast.Starred):
+            retval.update(SafetyAnalyzer._names_in_target(target.value))
+        return retval
+
+    @staticmethod
+    def _walk_module_scope(stmt):
+        """Yield every descendant of `stmt` that still lives in module
+        scope. Walks past `if`/`for`/`while`/`try`/`with` since those
+        share the enclosing scope, but stops at function and class
+        boundaries which introduce their own."""
+        yield stmt
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        for child in ast.iter_child_nodes(stmt):
+            yield from SafetyAnalyzer._walk_module_scope(child)
 
     def visit_Call(self, node):
         call_name = self._get_call_name(node)
@@ -237,6 +336,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
             return retval
 
         self.source_lines = source.splitlines()
+        self._collect_top_level_bindings(tree)
         self.visit(tree)
 
         is_safe = len(self.findings) == 0

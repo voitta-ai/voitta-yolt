@@ -160,5 +160,139 @@ class TestImportAliasResolution(unittest.TestCase):
         self.assertEqual(a.alias_table.get("os"), "os")
 
 
+class TestImportScopeAndOrder(unittest.TestCase):
+    """Verify the alias table is built scope-aware and source-order
+    independent: top-level imports apply to calls regardless of textual
+    position; imports nested under control flow / dead branches do NOT
+    apply; top-level rebinds drop their binding."""
+
+    def _analyze(self, source):
+        rules = load_rules(REPO_ROOT / "rules")
+        retval = SafetyAnalyzer(rules).analyze(source)
+        return retval
+
+    # --- Source-order independence: PR #20 review item 1 ---
+
+    def test_call_before_from_import_still_resolves(self):
+        # Function defined before the matching import. Pre-pass collects
+        # the import binding before traversal, so the in-function call
+        # resolves through it.
+        source = (
+            "def f():\n"
+            '    system("rm -rf /tmp/x")\n'
+            "from os import system\n"
+            "f()\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    def test_call_before_alias_import_still_resolves(self):
+        source = (
+            "def f():\n"
+            '    x.system("rm -rf /tmp/x")\n'
+            "import os as x\n"
+            "f()\n"
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+    # --- Conditional / dead imports: PR #20 review item 2a ---
+
+    def test_dead_if_false_import_does_not_bind(self):
+        # Static `if False:` is a dead branch; we cannot prove it runs.
+        # The binding must NOT be applied, so the later call stays at the
+        # surface name `system` and is not flagged as `os.system`.
+        source = (
+            "if False:\n"
+            "    from os import system\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_conditional_import_inside_if_does_not_bind(self):
+        source = (
+            "if cond:\n"
+            "    from os import system\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_import_inside_try_does_not_bind(self):
+        source = (
+            "try:\n"
+            "    from os import system\n"
+            "except ImportError:\n"
+            "    pass\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_import_inside_function_does_not_bind_module_scope(self):
+        # Module-level call below has no binding because the only import
+        # lives inside `g`. Resolves to surface `system`, not destructive.
+        source = (
+            "def g():\n"
+            "    from os import system\n"
+            "    return system\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    # --- Top-level rebinding: PR #20 review item 2b ---
+
+    def test_top_level_rebind_drops_binding(self):
+        source = (
+            "from os import system\n"
+            "system = print\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_top_level_rebind_inside_if_drops_binding(self):
+        # Conditional top-level reassignment: we cannot prove which value
+        # wins at runtime, so we drop the binding to be safe.
+        source = (
+            "from os import system\n"
+            "if cond:\n"
+            "    system = print\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_top_level_for_target_drops_binding(self):
+        # `for system in ...:` rebinds `system` at module scope.
+        source = (
+            "from os import system\n"
+            "for system in []:\n"
+            "    pass\n"
+            'system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_function_local_rebind_does_not_drop_module_binding(self):
+        # Inside `f`, `system = print` introduces a function-scope name —
+        # it must NOT invalidate the module-level binding. The module
+        # call below remains a destructive `os.system`.
+        source = (
+            "from os import system\n"
+            "def f():\n"
+            "    system = print\n"
+            "    return system\n"
+            'system("rm -rf /tmp/x")\n'
+        )
+        result = self._analyze(source)
+        self.assertFalse(result["safe"], result)
+        self.assertIn("os.system", result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

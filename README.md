@@ -348,10 +348,26 @@ through any of the standard import forms:
 
 For example, `from os import system; system("rm -rf /tmp/x")` and
 `import os as x; x.system(...)` both normalize to `os.system` and
-classify as destructive. Out of scope for this release: variable
-rebinding (`f = os.system; f(...)`), `from mod import *`, and
-relative imports — anything the analyzer cannot resolve statically
-is left at its surface name rather than guessed.
+classify as destructive.
+
+Bindings are collected in a pre-pass over the parsed module body before
+the call walk, so traversal order does not matter — a call inside a
+function defined *before* the matching import still resolves through
+the binding.
+
+Only top-of-file unconditional imports are honored. Imports nested
+under control flow (`if cond: import x`, dead `if False:` branches,
+`try`/`except`, `with`, or inside a function/class body) are NOT
+applied — we cannot statically prove they execute. Top-level
+reassignment of a bound name (`from os import system; system = print`,
+including assignments inside top-level `if`/`for` blocks) drops the
+binding; function-internal rebinds keep the module-level binding
+intact since they have their own scope.
+
+Still out of scope: variable rebinding via attribute access,
+`from mod import *`, and relative imports (`from . import x`).
+Anything the analyzer cannot resolve statically is left at its surface
+name rather than guessed.
 
 ## Custom rules
 
