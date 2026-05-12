@@ -410,10 +410,13 @@ YOLT logs every examined Bash invocation by default to
 {"ts": "2026-05-08T14:00:00.000+00:00", "decision": "safe", "reason": "ls: read-only", "command": "ls /tmp"}
 ```
 
-`decision` is one of `safe`, `unsafe`, `unknown`, or `import-error` (the
-last when the tree-sitter dependency is missing). The `command` field is
-truncated to 500 characters. Logging failures are swallowed — the hook
-never breaks the session because of an unwritable log path.
+`decision` is one of `safe`, `unsafe`, `unknown`, `import-error` (the
+tree-sitter dependency is missing), or `rules-validation-error` (the
+bundled or user-override `shell.json` failed schema validation; the
+`reason` field carries the list of offending keys / defaults so the
+user can fix the override). The `command` field is truncated to 500
+characters. Logging failures are swallowed — the hook never breaks the
+session because of an unwritable log path.
 
 ```bash
 tail -f ~/.claude/yolt.log

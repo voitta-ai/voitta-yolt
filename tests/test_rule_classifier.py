@@ -515,6 +515,111 @@ class TestValidateShellRules(unittest.TestCase):
         })
         self.assertTrue(any("rogue" in e for e in errors), errors)
 
+    def test_nested_module_unknown_default_flagged(self):
+        # `_classify_nested_module` only resolves "safe" and "unsafe"; any
+        # other value silently degrades to `unknown` at classify time.
+        errors = validate_shell_rules({
+            "interpreters": {
+                "python3": {
+                    "module_flag": "-m",
+                    "nested_modules": {
+                        "pip": {"default": "bogus"},
+                    },
+                },
+            },
+        })
+        self.assertTrue(
+            any("bogus" in e and "default" in e for e in errors), errors,
+        )
+
+    def test_nested_module_safe_default_accepted(self):
+        errors = validate_shell_rules({
+            "interpreters": {
+                "python3": {
+                    "module_flag": "-m",
+                    "nested_modules": {
+                        "unittest": {"default": "safe"},
+                    },
+                },
+            },
+        })
+        self.assertEqual(errors, [])
+
+    def test_nested_module_unsafe_default_accepted(self):
+        errors = validate_shell_rules({
+            "interpreters": {
+                "python3": {
+                    "module_flag": "-m",
+                    "nested_modules": {
+                        "blah": {"default": "unsafe"},
+                    },
+                },
+            },
+        })
+        self.assertEqual(errors, [])
+
+
+class TestLoadShellRulesValidation(unittest.TestCase):
+    """Verify validation is wired into `load_shell_rules` itself — the
+    production load path used by the hook entry and CLI — not just into
+    tests that call `validate_shell_rules` directly."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="yolt-shell-rules-")
+        self.tmp = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, name, data):
+        path = self.tmp / name
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_real_rules_load_clean(self):
+        # The bundled rules/shell.json must load through the validating
+        # path without raising.
+        rules = load_shell_rules(REPO_ROOT / "rules")
+        self.assertIn("commands", rules)
+
+    def test_malformed_default_raises(self):
+        # Drop a malformed rules dir in place of the real one.
+        rules_dir = self.tmp / "rules"
+        rules_dir.mkdir()
+        (rules_dir / "shell.json").write_text(json.dumps({
+            "commands": {"mycli": {"default": "totally-made-up"}},
+        }))
+        from rule_classifier import ShellRulesValidationError
+        with self.assertRaises(ShellRulesValidationError) as ctx:
+            load_shell_rules(rules_dir)
+        self.assertTrue(
+            any("totally-made-up" in e for e in ctx.exception.errors),
+            ctx.exception.errors,
+        )
+
+    def test_malformed_override_raises(self):
+        # Real defaults are clean; the user override introduces drift.
+        override = self._write("shell.json", {
+            "commands": {"mycli": {"default": "safe", "phantom_key": []}},
+        })
+        from rule_classifier import ShellRulesValidationError
+        with self.assertRaises(ShellRulesValidationError) as ctx:
+            load_shell_rules(REPO_ROOT / "rules", user_overrides_path=override)
+        self.assertTrue(
+            any("phantom_key" in e for e in ctx.exception.errors),
+            ctx.exception.errors,
+        )
+
+    def test_validate_false_bypasses_check(self):
+        rules_dir = self.tmp / "rules"
+        rules_dir.mkdir()
+        (rules_dir / "shell.json").write_text(json.dumps({
+            "commands": {"mycli": {"default": "totally-made-up"}},
+        }))
+        rules = load_shell_rules(rules_dir, validate=False)
+        self.assertIn("commands", rules)
+
 
 if __name__ == "__main__":
     unittest.main()

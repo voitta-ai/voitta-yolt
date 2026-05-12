@@ -511,5 +511,81 @@ class TestHookLogFile(unittest.TestCase):
         self.assertIn("hookSpecificOutput", result.stdout)
 
 
+class TestHookMalformedShellOverride(unittest.TestCase):
+    """If `~/.claude/yolt/shell.json` contains schema drift, the hook
+    must exit silently (Claude Code falls through to its default prompt)
+    and record the failure to the log so the user can diagnose."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="yolt-bad-override-")
+        self.tmp = Path(self._tmp)
+        self.fake_home = self.tmp / "home"
+        (self.fake_home / ".claude" / "yolt").mkdir(parents=True)
+        self.override_path = self.fake_home / ".claude" / "yolt" / "shell.json"
+        self.log_path = self.tmp / "yolt.log"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run(self, command):
+        env = dict(os.environ)
+        env["HOME"] = str(self.fake_home)
+        env["YOLT_LOG_FILE"] = str(self.log_path)
+        retval = subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        return retval
+
+    def _records(self):
+        if not self.log_path.exists():
+            return []
+        retval = []
+        for line in self.log_path.read_text().splitlines():
+            line = line.strip()
+            if line:
+                retval.append(json.loads(line))
+        return retval
+
+    def test_unknown_command_key_in_override_logs_rules_error(self):
+        self.override_path.write_text(json.dumps({
+            "commands": {"mycli": {"default": "safe", "phantom_key": []}},
+        }))
+        result = self._run("ls /tmp")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "")
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["decision"], "rules-validation-error")
+        self.assertIn("phantom_key", recs[0]["reason"])
+
+    def test_unknown_nested_module_default_in_override_logs_rules_error(self):
+        self.override_path.write_text(json.dumps({
+            "interpreters": {
+                "python3": {
+                    "module_flag": "-m",
+                    "nested_modules": {
+                        "pip": {"default": "bogus"},
+                    },
+                },
+            },
+        }))
+        result = self._run("ls /tmp")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "")
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["decision"], "rules-validation-error")
+        self.assertIn("bogus", recs[0]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -222,9 +222,16 @@ def parse_sql_cli_argv(cmd_args, spec):
     return retval
 
 
-def load_shell_rules(rules_dir, user_overrides_path=None):
+def load_shell_rules(rules_dir, user_overrides_path=None, validate=True):
     """Load shell rules from rules_dir/shell.json plus optional overrides.
-    Overrides merge per top-level key, one level deep."""
+    Overrides merge per top-level key, one level deep.
+
+    By default the merged result is schema-checked via `validate_shell_rules`
+    and a `ShellRulesValidationError` is raised on drift, so malformed rule
+    data (including user overrides under `~/.claude/yolt/shell.json`) fails
+    at load time rather than degrading silently to `unknown` at classify
+    time. Pass `validate=False` to skip — useful for tests that construct
+    intentionally-malformed rule fixtures."""
     rules = {}
 
     default_path = Path(rules_dir) / "shell.json"
@@ -241,7 +248,27 @@ def load_shell_rules(rules_dir, user_overrides_path=None):
             else:
                 rules[key] = value
 
+    if validate:
+        errors = validate_shell_rules(rules)
+        if errors:
+            raise ShellRulesValidationError(default_path, user_overrides_path, errors)
+
     return rules
+
+
+class ShellRulesValidationError(ValueError):
+    """Raised when shell rule data references keys or defaults the
+    classifier does not implement. Carries the source paths and the full
+    list of error strings so callers can log them verbatim."""
+
+    def __init__(self, default_path, user_overrides_path, errors):
+        self.default_path = default_path
+        self.user_overrides_path = user_overrides_path
+        self.errors = list(errors)
+        message = "shell rules failed validation ({} error(s)): {}".format(
+            len(self.errors), "; ".join(self.errors),
+        )
+        super().__init__(message)
 
 
 def load_allow_patterns(settings_paths):
@@ -414,6 +441,11 @@ _ALLOWED_NESTED_MODULE_KEYS = frozenset({
     "safe_subcommand_patterns", "unsafe_subcommand_patterns",
 })
 
+# `_classify_nested_module` only resolves "safe" and "unsafe"; any other
+# value silently degrades to `unknown` at classify time, which is exactly
+# the drift this validator exists to catch.
+_ALLOWED_NESTED_MODULE_DEFAULTS = frozenset({"safe", "unsafe"})
+
 
 def validate_shell_rules(rules):
     """Schema-check a loaded shell.json. Returns a list of error strings —
@@ -466,6 +498,15 @@ def validate_shell_rules(rules):
                             "interpreters.{}.nested_modules.{}: unknown key '{}'"
                             .format(name, mod, key)
                         )
+                mod_default = mod_spec.get("default")
+                if (
+                    mod_default is not None
+                    and mod_default not in _ALLOWED_NESTED_MODULE_DEFAULTS
+                ):
+                    errors.append(
+                        "interpreters.{}.nested_modules.{}: unknown default '{}'"
+                        .format(name, mod, mod_default)
+                    )
 
     return errors
 
