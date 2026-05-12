@@ -336,6 +336,23 @@ Rules use `trigger_imports` to scope checks. For example, boto3 patterns
 only apply when `boto3` is imported, so `cache.delete_item()` in a
 non-AWS script doesn't false-positive.
 
+The analyzer also resolves import bindings before matching, so the rule
+patterns (`os.system`, `shutil.rmtree`, ...) catch the same call written
+through any of the standard import forms:
+
+- `import mod`
+- `import mod as alias`
+- `import mod.sub` / `import mod.sub as alias`
+- `from mod import name`
+- `from mod import name as alias`
+
+For example, `from os import system; system("rm -rf /tmp/x")` and
+`import os as x; x.system(...)` both normalize to `os.system` and
+classify as destructive. Out of scope for this release: variable
+rebinding (`f = os.system; f(...)`), `from mod import *`, and
+relative imports — anything the analyzer cannot resolve statically
+is left at its surface name rather than guessed.
+
 ## Custom rules
 
 ### Python rules - `~/.claude/yolt/rules.json`

@@ -38,7 +38,27 @@ def load_rules(rules_dir, user_overrides_path=None):
 
 
 class SafetyAnalyzer(ast.NodeVisitor):
-    """AST visitor that checks Python code against safety rules."""
+    """AST visitor that checks Python code against safety rules.
+
+    Import-binding resolution
+    -------------------------
+    During traversal we record the local name introduced by each import so
+    that calls written via aliases or `from`-imports can be matched against
+    rule patterns that use the original dotted path. Supported forms:
+
+      - `import mod`                       -> {"mod": "mod"}
+      - `import mod as alias`              -> {"alias": "mod"}
+      - `import mod.sub`                   -> {"mod": "mod"}
+      - `import mod.sub as alias`          -> {"alias": "mod.sub"}
+      - `from mod import name`             -> {"name": "mod.name"}
+      - `from mod import name as alias`    -> {"alias": "mod.name"}
+
+    `_resolve` rewrites the leading binding of each call target via this
+    table. Anything not bound by one of those import forms is left
+    unchanged - we never guess. Out of scope for this release: variable
+    rebinding (`f = os.system; f(...)`), reassignment through attribute
+    access, conditional / starred imports, and proving object identity
+    for arbitrary locals."""
 
     def __init__(self, rules):
         self.rules = rules
@@ -46,19 +66,38 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.imports = set()
         self.import_modules = set()
         self.safe_imports = set(rules.get("_safe_imports", []))
+        # local-name -> fully-qualified dotted path it points to.
+        self.alias_table = {}
 
     def visit_Import(self, node):
         for alias in node.names:
             top_level = alias.name.split(".")[0]
             self.imports.add(alias.name)
             self.import_modules.add(top_level)
+            # `import os.path` binds the top-level name `os` in the local
+            # scope; `import os.path as p` binds `p` to the submodule.
+            if alias.asname:
+                self.alias_table[alias.asname] = alias.name
+            else:
+                self.alias_table[top_level] = top_level
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-        if node.module:
-            top_level = node.module.split(".")[0]
-            self.imports.add(node.module)
-            self.import_modules.add(top_level)
+        # Relative imports (`from . import x`) cannot be resolved without
+        # knowing the package context, so we skip the binding step.
+        if not node.module:
+            self.generic_visit(node)
+            return
+        top_level = node.module.split(".")[0]
+        self.imports.add(node.module)
+        self.import_modules.add(top_level)
+        for alias in node.names:
+            if alias.name == "*":
+                # `from mod import *` makes the bound names unknowable
+                # statically. Don't guess.
+                continue
+            local = alias.asname or alias.name
+            self.alias_table[local] = "{}.{}".format(node.module, alias.name)
         self.generic_visit(node)
 
     def visit_Call(self, node):
@@ -72,9 +111,10 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _get_call_name(self, node):
-        """Extract the full dotted name of a function call."""
+        """Extract the full dotted name of a function call, rewriting the
+        leading binding via the import-alias table when known."""
         if isinstance(node.func, ast.Name):
-            retval = node.func.id
+            retval = self._resolve(node.func.id)
             return retval
         if isinstance(node.func, ast.Attribute):
             parts = []
@@ -85,9 +125,22 @@ class SafetyAnalyzer(ast.NodeVisitor):
             if isinstance(current, ast.Name):
                 parts.append(current.id)
             parts.reverse()
-            retval = ".".join(parts)
+            retval = self._resolve(".".join(parts))
             return retval
         return None
+
+    def _resolve(self, name):
+        """Rewrite the leading segment of `name` via the import-alias table
+        if it is a recorded binding; otherwise return `name` unchanged.
+        Never guesses for unknown leading names - see class docstring for
+        the supported forms and out-of-scope cases."""
+        head, sep, rest = name.partition(".")
+        if head not in self.alias_table:
+            return name
+        resolved_head = self.alias_table[head]
+        if sep:
+            return "{}.{}".format(resolved_head, rest)
+        return resolved_head
 
     def _matches_pattern(self, name, pattern):
         """Check if a name matches a glob pattern.
