@@ -416,10 +416,13 @@ _ALLOWED_COMMAND_KEYS = frozenset({
     "safe_subcommands", "unsafe_subcommands",
     "safe_subcommand_patterns", "unsafe_subcommand_patterns",
     "nested_subcommand",
+    "empty_decision",
     "service_overrides",
     "safe_operation_patterns", "unsafe_operation_patterns",
     "sql_flags", "sql_file_flags", "sql_positional_index",
 })
+
+_ALLOWED_EMPTY_DECISIONS = frozenset({"safe", "unsafe"})
 
 _ALLOWED_SERVICE_OVERRIDE_KEYS = frozenset({
     "_note",
@@ -519,6 +522,14 @@ def _validate_command_spec(path, spec, errors):
     default = spec.get("default")
     if default is not None and default not in _ALLOWED_DEFAULTS:
         errors.append("{}: unknown default '{}'".format(path, default))
+
+    empty_decision = spec.get("empty_decision")
+    if empty_decision is not None and empty_decision not in _ALLOWED_EMPTY_DECISIONS:
+        errors.append(
+            "{}: empty_decision must be 'safe' or 'unsafe', got '{}'".format(
+                path, empty_decision
+            )
+        )
 
     nested = spec.get("nested_subcommand", {})
     if isinstance(nested, dict):
@@ -795,6 +806,12 @@ class RuleClassifier:
                     return (DECISION_SAFE, "{} {}: read-only".format(cmd_name, sub))
                 if nested_default == "unsafe":
                     return (DECISION_UNSAFE, "{} {}: mutating".format(cmd_name, sub))
+            empty_decision = nested_spec.get("empty_decision")
+            if empty_decision and not rest:
+                if empty_decision == "safe":
+                    return (DECISION_SAFE, "{} {}: read-only (no positional)".format(cmd_name, sub))
+                if empty_decision == "unsafe":
+                    return (DECISION_UNSAFE, "{} {}: mutating (no positional)".format(cmd_name, sub))
             return self._match_subcommand_lists(
                 "{} {}".format(cmd_name, sub), rest, nested_spec
             )

@@ -399,6 +399,124 @@ class TestValuelessGlobalFlags(unittest.TestCase):
         self.assertDecision("gh --no-pager pr list", DECISION_SAFE)
 
 
+class TestNestedSubcommandPaths(unittest.TestCase):
+    """Issue #17: path-aware classification for nested mutating verbs that
+    previously stopped at the first subcommand and were treated as safe."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, r = self.clf.classify(cmd)
+        self.assertEqual(
+            d, expected,
+            "cmd={!r}: got {}, reason={}".format(cmd, d, r),
+        )
+
+    # --- Acceptance criteria from issue #17 ---
+
+    def test_git_tag_create_not_safe(self):
+        # 'git tag v1.2.3' creates a lightweight tag. Was silently safe.
+        d, _ = self.clf.classify("git tag v1.2.3")
+        self.assertNotEqual(d, DECISION_SAFE)
+
+    def test_docker_image_rm_unsafe(self):
+        self.assertDecision("docker image rm alpine", DECISION_UNSAFE)
+
+    def test_kubectl_config_set_context_unsafe(self):
+        self.assertDecision("kubectl config set-context prod", DECISION_UNSAFE)
+
+    def test_helm_repo_add_unsafe(self):
+        self.assertDecision(
+            "helm repo add foo https://example.com",
+            DECISION_UNSAFE,
+        )
+
+    # --- git tag: positional means create, flag-based deletes/annotates ---
+
+    def test_git_tag_bare_lists_safe(self):
+        self.assertDecision("git tag", DECISION_SAFE)
+
+    def test_git_tag_dash_l_lists_safe(self):
+        self.assertDecision("git tag -l", DECISION_SAFE)
+
+    def test_git_tag_delete_unsafe(self):
+        self.assertDecision("git tag -d v1.2.3", DECISION_UNSAFE)
+
+    def test_git_tag_annotated_unsafe(self):
+        d, _ = self.clf.classify('git tag -a v1.2.3 -m "release"')
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    # --- docker.image / container / volume / network / system ---
+
+    def test_docker_image_ls_safe(self):
+        self.assertDecision("docker image ls", DECISION_SAFE)
+
+    def test_docker_image_prune_unsafe(self):
+        self.assertDecision("docker image prune", DECISION_UNSAFE)
+
+    def test_docker_container_ls_safe(self):
+        self.assertDecision("docker container ls", DECISION_SAFE)
+
+    def test_docker_container_rm_unsafe(self):
+        self.assertDecision("docker container rm myctr", DECISION_UNSAFE)
+
+    def test_docker_volume_create_unsafe(self):
+        self.assertDecision("docker volume create vol1", DECISION_UNSAFE)
+
+    def test_docker_volume_ls_safe(self):
+        self.assertDecision("docker volume ls", DECISION_SAFE)
+
+    def test_docker_network_connect_unsafe(self):
+        self.assertDecision(
+            "docker network connect bridge myctr", DECISION_UNSAFE,
+        )
+
+    def test_docker_system_prune_unsafe(self):
+        self.assertDecision("docker system prune", DECISION_UNSAFE)
+
+    def test_docker_system_df_safe(self):
+        self.assertDecision("docker system df", DECISION_SAFE)
+
+    def test_bare_docker_image_no_longer_silently_safe(self):
+        # Was safe pre-issue-17. Now a partially-modeled namespace without
+        # a sub-subcommand should not auto-allow.
+        d, _ = self.clf.classify("docker image")
+        self.assertNotEqual(d, DECISION_SAFE)
+
+    # --- kubectl.config ---
+
+    def test_kubectl_config_view_safe(self):
+        self.assertDecision("kubectl config view", DECISION_SAFE)
+
+    def test_kubectl_config_use_context_unsafe(self):
+        self.assertDecision(
+            "kubectl config use-context prod", DECISION_UNSAFE,
+        )
+
+    def test_kubectl_config_delete_context_unsafe(self):
+        self.assertDecision(
+            "kubectl config delete-context prod", DECISION_UNSAFE,
+        )
+
+    # --- helm.repo ---
+
+    def test_helm_repo_list_safe(self):
+        self.assertDecision("helm repo list", DECISION_SAFE)
+
+    def test_helm_repo_update_unsafe(self):
+        # `helm repo update` refreshes the local repo cache - mutation.
+        self.assertDecision("helm repo update", DECISION_UNSAFE)
+
+    def test_helm_repo_index_unsafe(self):
+        # `helm repo index ./charts` writes / merges an index.yaml.
+        self.assertDecision("helm repo index ./charts", DECISION_UNSAFE)
+
+    def test_helm_repo_remove_unsafe(self):
+        self.assertDecision("helm repo remove foo", DECISION_UNSAFE)
+
+
 class TestPythonHeredoc(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
