@@ -457,8 +457,9 @@
       ],
       "nested_subcommand": {
         "repo": {
-          "safe_subcommands": ["list", "ls", "index", "update"],
-          "unsafe_subcommands": ["add", "remove", "rm"]
+          "safe_subcommands": ["list", "ls"],
+          "unsafe_subcommands": ["add", "remove", "rm", "update", "index"],
+          "_note": "'update' refreshes the local repo cache; 'index' writes or merges an index.yaml. Both mutate state."
         }
       },
       "_note": "'repo' moved into nested_subcommand: helm repo list is safe, helm repo add is unsafe."

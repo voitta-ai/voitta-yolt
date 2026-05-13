@@ -505,8 +505,13 @@ class TestNestedSubcommandPaths(unittest.TestCase):
     def test_helm_repo_list_safe(self):
         self.assertDecision("helm repo list", DECISION_SAFE)
 
-    def test_helm_repo_update_safe(self):
-        self.assertDecision("helm repo update", DECISION_SAFE)
+    def test_helm_repo_update_unsafe(self):
+        # `helm repo update` refreshes the local repo cache - mutation.
+        self.assertDecision("helm repo update", DECISION_UNSAFE)
+
+    def test_helm_repo_index_unsafe(self):
+        # `helm repo index ./charts` writes / merges an index.yaml.
+        self.assertDecision("helm repo index ./charts", DECISION_UNSAFE)
 
     def test_helm_repo_remove_unsafe(self):
         self.assertDecision("helm repo remove foo", DECISION_UNSAFE)
