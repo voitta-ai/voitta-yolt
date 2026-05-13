@@ -293,6 +293,37 @@ class TestImportScopeAndOrder(unittest.TestCase):
         self.assertFalse(result["safe"], result)
         self.assertIn("os.system", result["reason"])
 
+    def test_function_local_shadow_suppresses_module_alias(self):
+        source = (
+            "from os import system\n"
+            "def f():\n"
+            "    system = print\n"
+            '    system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_function_local_alias_shadow_suppresses_module_alias(self):
+        source = (
+            "import os as x\n"
+            "def f():\n"
+            "    x = print\n"
+            '    x("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_outer_function_local_shadow_applies_to_inner_body(self):
+        source = (
+            "from os import system\n"
+            "def outer():\n"
+            "    system = print\n"
+            "    def inner():\n"
+            '        system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
     # --- Module-scope execution order: PR #20 review item 3 ---
 
     def test_call_before_top_level_rebind_still_flagged(self):
@@ -432,6 +463,61 @@ class TestImportScopeAndOrder(unittest.TestCase):
         result = self._analyze(source)
         # Final snapshot has system dropped, so the method body call
         # does not resolve to os.system.
+        self.assertTrue(result["safe"], result)
+
+    def test_class_body_assignment_shadows_import_binding(self):
+        source = (
+            "from os import system\n"
+            "class C:\n"
+            "    system = print\n"
+            '    system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_class_body_definition_shadows_import_binding(self):
+        source = (
+            "from os import system\n"
+            "class C:\n"
+            "    def system(self, msg):\n"
+            "        return msg\n"
+            '    system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_class_body_inside_function_sees_outer_shadow(self):
+        source = (
+            "from os import system\n"
+            "def outer():\n"
+            "    system = print\n"
+            "    class C:\n"
+            '        system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_nested_class_body_assignment_shadows_import_binding(self):
+        source = (
+            "from os import system\n"
+            "def outer():\n"
+            "    class C:\n"
+            "        system = print\n"
+            '        system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_nested_class_body_definition_shadows_import_binding(self):
+        source = (
+            "from os import system\n"
+            "def outer():\n"
+            "    class C:\n"
+            "        def system(self):\n"
+            "            pass\n"
+            '        system("hello")\n'
+        )
+        result = self._analyze(source)
         self.assertTrue(result["safe"], result)
 
     def test_async_function_default_arg_uses_position_snapshot(self):

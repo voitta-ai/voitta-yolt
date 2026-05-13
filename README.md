@@ -361,8 +361,11 @@ under control flow (`if cond: import x`, dead `if False:` branches,
 applied — we cannot statically prove they execute. Top-level
 reassignment of a bound name (`from os import system; system = print`,
 including assignments inside top-level `if`/`for` blocks) drops the
-binding; function-internal rebinds keep the module-level binding
-intact since they have their own scope.
+binding. Function / lambda-local rebinds shadow the imported binding
+within that deferred scope, but do not mutate the module-level
+snapshot. Class bodies execute immediately in their own local
+namespace, so class-local assignments likewise shadow imported names
+for later direct class-body calls.
 
 Module-scope calls resolve against the binding snapshot effective at
 their source line, so a call that appears *before* a later rebind /
