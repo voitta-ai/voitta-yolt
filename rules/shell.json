@@ -305,7 +305,7 @@
       ],
       "safe_subcommands": [
         "log", "status", "diff", "show", "blame",
-        "branch", "tag",
+        "branch",
         "rev-parse", "rev-list", "describe", "name-rev",
         "reflog",
         "ls-files", "ls-tree", "ls-remote",
@@ -325,7 +325,6 @@
         "merge", "rebase", "cherry-pick", "revert", "am",
         "reset", "restore", "checkout", "switch",
         "clean",
-        "tag",
         "apply", "format-patch",
         "clone",
         "init",
@@ -334,16 +333,31 @@
         "notes", "filter-branch", "filter-repo",
         "submodule"
       ],
-      "_note": "Some subcommands overlap (tag both lists). Safe list is checked first, so 'git tag' is safe (listing); 'git tag v1' still passes safe, which is slightly permissive. Acceptable trade-off."
+      "nested_subcommand": {
+        "tag": {
+          "empty_decision": "safe",
+          "unsafe_flag_any_value": [
+            "-d", "--delete",
+            "-a", "--annotate",
+            "-s", "--sign",
+            "-u", "--local-user",
+            "-f", "--force",
+            "-m", "--message",
+            "-F", "--file"
+          ],
+          "_note": "Bare 'git tag' lists. Any positional after flag-skipping (a tagname) or any mutating flag (-d, -a, -s, -f, -m, -F) classifies as not-safe. Falls back to unknown for positional + no unsafe flag."
+        }
+      },
+      "_note": "Removed 'tag' from flat safe/unsafe lists. It now lives under nested_subcommand.tag with positional-aware classification: bare 'git tag' lists safely; 'git tag v1' is unknown (not silently safe); mutating flags are explicit."
     },
 
     "docker": {
       "default": "subcommand",
       "safe_subcommands": [
-        "ps", "images", "image", "container",
+        "ps", "images",
         "inspect", "logs", "stats", "top", "port",
         "diff", "history", "info", "version", "events",
-        "system", "volume", "network", "context", "search"
+        "context", "search"
       ],
       "unsafe_subcommands": [
         "run", "exec", "kill", "stop", "start", "restart",
@@ -354,7 +368,41 @@
         "login", "logout",
         "compose", "swarm", "service", "stack"
       ],
-      "_note": "Some top-level names (image, container, volume, network, system) have destructive sub-subcommands (prune, rm). We list them as safe because their default 'ls'/'inspect' verbs dominate usage; we'd need nested-subcommand rules for full fidelity."
+      "nested_subcommand": {
+        "image": {
+          "safe_subcommands": ["ls", "inspect", "history"],
+          "unsafe_subcommands": [
+            "rm", "prune", "build", "pull", "push",
+            "load", "save", "tag", "import"
+          ]
+        },
+        "container": {
+          "safe_subcommands": [
+            "ls", "inspect", "top", "logs", "port",
+            "diff", "stats", "wait"
+          ],
+          "unsafe_subcommands": [
+            "rm", "prune", "run", "exec", "start", "stop",
+            "restart", "kill", "pause", "unpause",
+            "create", "commit", "cp", "rename", "update", "attach"
+          ]
+        },
+        "volume": {
+          "safe_subcommands": ["ls", "inspect"],
+          "unsafe_subcommands": ["create", "rm", "prune"]
+        },
+        "network": {
+          "safe_subcommands": ["ls", "inspect"],
+          "unsafe_subcommands": [
+            "create", "rm", "prune", "connect", "disconnect"
+          ]
+        },
+        "system": {
+          "safe_subcommands": ["info", "df", "events"],
+          "unsafe_subcommands": ["prune"]
+        }
+      },
+      "_note": "Top-level 'image', 'container', 'volume', 'network', 'system' moved into nested_subcommand with explicit safe/unsafe sub-subcommands. Bare 'docker image' (no further positional) now classifies as unknown instead of silently safe."
     },
 
     "kubectl": {
@@ -363,7 +411,6 @@
         "get", "describe", "logs", "explain",
         "top", "cluster-info", "version",
         "api-resources", "api-versions",
-        "config",
         "auth",
         "diff",
         "events",
@@ -377,7 +424,23 @@
         "label", "annotate",
         "cordon", "uncordon", "drain", "taint",
         "cp"
-      ]
+      ],
+      "nested_subcommand": {
+        "config": {
+          "safe_subcommands": [
+            "view", "current-context",
+            "get-contexts", "get-clusters", "get-users"
+          ],
+          "unsafe_subcommands": [
+            "set", "set-context", "set-cluster", "set-credentials",
+            "use-context",
+            "unset",
+            "delete-context", "delete-cluster", "delete-user",
+            "rename-context"
+          ]
+        }
+      },
+      "_note": "'config' moved into nested_subcommand: kubectl config view is safe, kubectl config set-context is unsafe. Bare 'kubectl config' (no further positional) is unknown."
     },
 
     "helm": {
@@ -385,13 +448,20 @@
       "safe_subcommands": [
         "get", "list", "ls", "status", "history",
         "show", "search", "inspect", "lint", "template",
-        "env", "version", "repo"
+        "env", "version"
       ],
       "unsafe_subcommands": [
         "install", "upgrade", "uninstall", "delete",
         "rollback", "test", "push", "pull", "package",
         "dependency", "plugin", "registry", "create"
-      ]
+      ],
+      "nested_subcommand": {
+        "repo": {
+          "safe_subcommands": ["list", "ls", "index", "update"],
+          "unsafe_subcommands": ["add", "remove", "rm"]
+        }
+      },
+      "_note": "'repo' moved into nested_subcommand: helm repo list is safe, helm repo add is unsafe."
     },
 
     "aws": {
