@@ -497,6 +497,29 @@ class TestImportScopeAndOrder(unittest.TestCase):
         result = self._analyze(source)
         self.assertTrue(result["safe"], result)
 
+    def test_nested_class_body_assignment_shadows_import_binding(self):
+        source = (
+            "from os import system\n"
+            "def outer():\n"
+            "    class C:\n"
+            "        system = print\n"
+            '        system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
+    def test_nested_class_body_definition_shadows_import_binding(self):
+        source = (
+            "from os import system\n"
+            "def outer():\n"
+            "    class C:\n"
+            "        def system(self):\n"
+            "            pass\n"
+            '        system("hello")\n'
+        )
+        result = self._analyze(source)
+        self.assertTrue(result["safe"], result)
+
     def test_async_function_default_arg_uses_position_snapshot(self):
         source = (
             "from os import system\n"

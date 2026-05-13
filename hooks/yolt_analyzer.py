@@ -171,6 +171,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
         class_scope = {
             "base": self._table_for_class_definition(node.lineno),
             "events": self._collect_class_scope_events(node.body),
+            "scope_depth_at_entry": self._scope_depth,
         }
         self._class_scope_stack.append(class_scope)
         try:
@@ -361,6 +362,17 @@ class SafetyAnalyzer(ast.NodeVisitor):
             )
         return self._snapshot_at_line(lineno)
 
+    def _direct_class_body_table(self, lineno):
+        """Return the innermost class-body snapshot when the current
+        position is in that class's direct body, not in a nested
+        deferred scope such as a method or lambda."""
+        if not self._class_scope_stack:
+            return None
+        scope = self._class_scope_stack[-1]
+        if scope["scope_depth_at_entry"] != self._scope_depth:
+            return None
+        return self._class_snapshot_at_line(scope, lineno)
+
     def _table_for_class_definition(self, lineno):
         """Resolve the surrounding snapshot that a class body starts
         from. Class bodies nested under deferred scopes still see the
@@ -508,9 +520,10 @@ class SafetyAnalyzer(ast.NodeVisitor):
         for shadowed in reversed(self._shadow_stack):
             if head in shadowed:
                 return name
-        if self._scope_depth == 0:
+        table = self._direct_class_body_table(node.lineno)
+        if table is None and self._scope_depth == 0:
             table = self._current_immediate_table(node.lineno)
-        else:
+        elif table is None:
             table = self.alias_table
         if head not in table:
             return name
