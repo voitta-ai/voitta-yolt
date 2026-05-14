@@ -284,15 +284,19 @@ class SafetyAnalyzer(ast.NodeVisitor):
                         local,
                         "{}.{}".format(stmt.module, alias.name),
                     ))
-            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                # Function / class definitions don't bind module-scope
-                # names other than their own; that name's "binding" is
-                # not something the resolver should rewrite, so skip.
-                continue
             else:
                 # Walk this top-level statement collecting module-scope
                 # reassignments as drop events keyed to their source
-                # position.
+                # position. For FunctionDef / AsyncFunctionDef / ClassDef
+                # the walker descends into decorator_list, args.defaults,
+                # args.kw_defaults, bases, and keyword values — every
+                # expression that executes at definition time in module
+                # scope. The function / class body itself is skipped by
+                # `_walk_module_scope`. The FunctionDef / ClassDef node
+                # itself yields no binding event because none of the
+                # branches below match an Import/Assign/etc on it; the
+                # statement's own name (`f` / `C`) is intentionally not
+                # treated as a rewriteable alias target.
                 for node in self._walk_module_scope(stmt):
                     node_pos = (
                         getattr(node, "lineno", stmt.lineno),

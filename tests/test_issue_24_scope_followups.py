@@ -202,6 +202,56 @@ class TestModuleScopeWalrusRebind(unittest.TestCase):
         self.assertFalse(result["safe"])
         self.assertEqual(result["findings"][0]["call"], "os.system")
 
+    def test_walrus_in_top_level_def_default_drops_module_binding(self):
+        """A top-level `def` whose parameter default contains a walrus
+        runs the walrus at definition time in module scope. Regression
+        from the third codex round: an `elif ... continue` for
+        FunctionDef/AsyncFunctionDef/ClassDef in
+        `_collect_top_level_bindings` short-circuited the walker
+        before it could descend into the def's defaults / decorators."""
+        source = (
+            "from os import system\n"
+            "def f(x=(system := print)):\n"
+            "    pass\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertTrue(
+            result["safe"],
+            "walrus in top-level def default executes at definition "
+            "time and rebinds `system`; line 4 should be safe. "
+            "Got findings={}".format(result["findings"]),
+        )
+
+    def test_walrus_in_top_level_class_base_drops_module_binding(self):
+        """Top-level `class C(<expr>)` evaluates the base expressions
+        at definition time in module scope. A walrus inside a base
+        rebinds the name in module scope before the subsequent call."""
+        source = (
+            "from os import system\n"
+            "class C((system := type('B', (), {}))):\n"
+            "    pass\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertTrue(result["safe"])
+
+    def test_walrus_in_top_level_decorator_drops_module_binding(self):
+        """Top-level decorators evaluate at definition time in module
+        scope. A walrus inside a decorator expression rebinds the
+        name in module scope."""
+        source = (
+            "from os import system\n"
+            "def _wrap(*a):\n"
+            "    return lambda fn: fn\n"
+            "@_wrap((system := print))\n"
+            "def g():\n"
+            "    pass\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertTrue(result["safe"])
+
     def test_call_before_walrus_still_resolves_to_import(self):
         """Position-aware: a call BEFORE the walrus rebind still
         resolves through the import. Drop applies only to later
