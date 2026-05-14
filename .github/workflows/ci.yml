@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    name: unittest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate bundled rules/shell.json
+        # Hard fail on schema drift. The hook's load-time guard
+        # would already log rules-validation-error and exit
+        # silently in production; CI must fail loudly.
+        run: |
+          python -c "
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'hooks')
+          from rule_classifier import load_shell_rules, validate_shell_rules
+          rules = load_shell_rules(Path('rules'), validate=False)
+          errors = validate_shell_rules(rules)
+          if errors:
+              for e in errors:
+                  print('rules/shell.json:', e)
+              sys.exit(1)
+          print('rules/shell.json: schema OK')
+          "
+
+      - name: Run unit + e2e suite
+        run: python -m unittest discover -v tests
