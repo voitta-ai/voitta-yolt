@@ -434,16 +434,39 @@ class SafetyAnalyzer(ast.NodeVisitor):
     def _walk_module_scope(stmt):
         """Yield every descendant of `stmt` that still lives in module
         scope. Walks past `if`/`for`/`while`/`try`/`with` since those
-        share the enclosing scope, but stops at function, class, and
-        lambda boundaries which introduce their own. Lambda bodies in
-        particular can contain walrus expressions (`lambda: (x := 1)`)
-        whose binding stays inside the lambda — descending into them
-        would let a lambda-local walrus erase a module-scope import."""
+        share the enclosing scope, and stops at function, class, and
+        lambda BODIES which introduce their own scope. The decorator,
+        default, and keyword expressions of a def / lambda / class
+        execute at definition time in the enclosing scope, so the
+        walker descends into them even when the enclosing definition
+        boundary is reached — otherwise a walrus inside a lambda
+        default like `lambda y=(x := 1): y` would be silently dropped
+        and a subsequent module-scope call to `x` would still resolve
+        through any earlier import binding."""
         yield stmt
-        if isinstance(
-            stmt,
-            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
-        ):
+        if isinstance(stmt, ast.Lambda):
+            for d in stmt.args.defaults:
+                yield from SafetyAnalyzer._walk_module_scope(d)
+            for d in stmt.args.kw_defaults:
+                if d is not None:
+                    yield from SafetyAnalyzer._walk_module_scope(d)
+            return
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in stmt.decorator_list:
+                yield from SafetyAnalyzer._walk_module_scope(d)
+            for d in stmt.args.defaults:
+                yield from SafetyAnalyzer._walk_module_scope(d)
+            for d in stmt.args.kw_defaults:
+                if d is not None:
+                    yield from SafetyAnalyzer._walk_module_scope(d)
+            return
+        if isinstance(stmt, ast.ClassDef):
+            for d in stmt.decorator_list:
+                yield from SafetyAnalyzer._walk_module_scope(d)
+            for b in stmt.bases:
+                yield from SafetyAnalyzer._walk_module_scope(b)
+            for kw in stmt.keywords:
+                yield from SafetyAnalyzer._walk_module_scope(kw.value)
             return
         for child in ast.iter_child_nodes(stmt):
             yield from SafetyAnalyzer._walk_module_scope(child)

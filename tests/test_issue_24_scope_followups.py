@@ -152,6 +152,43 @@ class TestModuleScopeWalrusRebind(unittest.TestCase):
         self.assertEqual(result["findings"][0]["call"], "os.system")
         self.assertEqual(result["findings"][0]["line"], 3)
 
+    def test_walrus_in_lambda_default_drops_module_binding(self):
+        """Walrus in a lambda parameter default runs at definition
+        time in the ENCLOSING scope (here module scope), so it must
+        emit a module-scope drop event. A subsequent module-scope call
+        to the rebound name should therefore not resolve through the
+        original import.
+
+        Regression-paired with
+        `test_walrus_inside_lambda_body_does_not_leak_to_module`: the
+        walker must descend into lambda defaults while still stopping
+        at the lambda body."""
+        source = (
+            "from os import system\n"
+            "f = lambda y=(system := print): y\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertTrue(
+            result["safe"],
+            "walrus in lambda default executes at definition time and "
+            "rebinds `system` in module scope; line 3 should be safe. "
+            "Got findings={}".format(result["findings"]),
+        )
+
+    def test_walrus_in_lambda_default_and_body_simultaneously(self):
+        """Mixed case: a walrus in the lambda's default DOES leak to
+        module scope, while a separate walrus in the lambda's body
+        does NOT. After the lambda definition the module's `system`
+        is `print`; calls to `system` are safe."""
+        source = (
+            "from os import system\n"
+            "f = lambda y=(system := print): (system := y)\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertTrue(result["safe"])
+
     def test_walrus_inside_nested_lambda_body_does_not_leak(self):
         """Even a walrus reached through several layers of nesting
         inside a lambda body — here wrapped in a list literal — must
