@@ -13,7 +13,6 @@ import json
 import os
 import sys
 import symtable
-from collections import defaultdict, deque
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -116,7 +115,8 @@ class SafetyAnalyzer(ast.NodeVisitor):
         # entry is the set of names that shadow outer bindings.
         self._shadow_stack = []
         # Symbol-table-derived shadow sets keyed by AST scope location.
-        self._scope_shadow_queues = {}
+        # Key shape: ("function", lineno, col_offset, name_or_"lambda").
+        self._scope_shadow_map = {}
         # Immediate class-body scopes layered on top of module scope.
         self._class_scope_stack = []
 
@@ -228,16 +228,21 @@ class SafetyAnalyzer(ast.NodeVisitor):
         lambda scope. If matching metadata is absent, fall back to an
         empty set rather than guessing."""
         key = self._scope_key_for_node(node)
-        queue = self._scope_shadow_queues.get(key)
-        if not queue:
+        shadow = self._scope_shadow_map.get(key)
+        if shadow is None:
             return set()
-        return set(queue.popleft())
+        return set(shadow)
 
     @staticmethod
     def _scope_key_for_node(node):
+        """Build a key that uniquely identifies a deferred function or
+        lambda scope. `col_offset` is required to disambiguate multiple
+        scopes that share a line and a name — e.g. two lambdas on the
+        same source line both have name "lambda" and the same lineno."""
+        col = getattr(node, "col_offset", 0)
         if isinstance(node, ast.Lambda):
-            return ("function", node.lineno, "lambda")
-        return ("function", node.lineno, node.name)
+            return ("function", node.lineno, col, "lambda")
+        return ("function", node.lineno, col, node.name)
 
     def _collect_top_level_bindings(self, tree):
         """Walk the module-level body (only) and build the source-order
@@ -314,6 +319,15 @@ class SafetyAnalyzer(ast.NodeVisitor):
                                     item.optional_vars
                                 ):
                                     events.append((node_pos, name, None))
+                    elif isinstance(node, ast.NamedExpr):
+                        # PEP 572: walrus `name := expr` binds at module
+                        # scope when written there directly or inside a
+                        # comprehension / generator expression that has
+                        # no enclosing function. Drop the previous
+                        # import binding so a later module-scope call to
+                        # `name` is not still rewritten through it.
+                        for name in self._names_in_target(node.target):
+                            events.append((node_pos, name, None))
 
         # Stable sort by (lineno, col_offset) preserves source order.
         events.sort(key=lambda e: e[0])
@@ -652,7 +666,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
             return retval
 
         self.source_lines = source.splitlines()
-        self._scope_shadow_queues = self._build_scope_shadow_queues(source)
+        self._scope_shadow_map = self._build_scope_shadow_map(source, tree)
         self._collect_top_level_bindings(tree)
         self.visit(tree)
 
@@ -677,35 +691,103 @@ class SafetyAnalyzer(ast.NodeVisitor):
 
         return retval
 
-    @staticmethod
-    def _build_scope_shadow_queues(source):
-        """Build per-scope local shadow-name sets using Python's own
-        symbol-table analysis. These sets suppress alias rewriting inside
-        deferred function / lambda scopes without trying to resolve the
-        local binding itself."""
-        queues = defaultdict(deque)
+    # Symtable function-type scopes that are NOT real function bodies for
+    # our alias-shadow lookup. Comprehensions either have their own scope
+    # (Python 3.10 / 3.11 for all four; Python 3.12+ only `genexpr`) or
+    # are inlined; either way the analyzer never pushes a deferred-function
+    # scope for them, so we skip the scope itself but still recurse to
+    # collect any function / lambda nested inside it.
+    _COMPREHENSION_SCOPE_NAMES = frozenset(
+        ("genexpr", "listcomp", "setcomp", "dictcomp")
+    )
 
-        def walk(table):
+    @staticmethod
+    def _build_scope_shadow_map(source, tree):
+        """Build a unique-keyed map of deferred-scope shadow sets.
+
+        For each function / lambda the analyzer might push as a
+        deferred scope, record the set of identifiers that shadow
+        outer aliases. The key is
+        `("function", lineno, col_offset, name_or_"lambda")` so
+        sibling scopes that share a line and a name (two lambdas on
+        the same source line, both keyed `"lambda"`) get distinct
+        entries.
+
+        `symtable` does not expose `col_offset`, so we pair its
+        entries with AST nodes by `(lineno, name)` group: within each
+        group symtable yields registrations in CPython's
+        AST-visit order, and AST `col_offset` order matches that
+        visit order for siblings parsed from the same source span
+        (the colliding case). We sort each AST group by `col_offset`
+        and zip with the matching symtable group. A length mismatch
+        within a group raises rather than silently mis-shadowing.
+
+        Comprehension scopes (`genexpr` / `listcomp` / `setcomp` /
+        `dictcomp`) are skipped on the symtable side because the
+        analyzer never pushes a deferred function scope for them.
+        Their inner functions / lambdas are still collected by
+        recursing into the comprehension's child table."""
+        from collections import defaultdict
+
+        sym_groups = defaultdict(list)
+
+        def sym_walk(table):
             for child in table.get_children():
                 if child.get_type() == "annotation":
                     continue
                 if child.get_type() == "function":
-                    shadowed = set()
-                    for ident in child.get_identifiers():
-                        sym = child.lookup(ident)
-                        if (
-                            sym.is_local()
-                            or sym.is_parameter()
-                            or sym.is_imported()
-                        ):
-                            shadowed.add(ident)
-                    queues[("function", child.get_lineno(), child.get_name())].append(
-                        shadowed
-                    )
-                walk(child)
+                    if (
+                        child.get_name()
+                        not in SafetyAnalyzer._COMPREHENSION_SCOPE_NAMES
+                    ):
+                        shadowed = set()
+                        for ident in child.get_identifiers():
+                            sym = child.lookup(ident)
+                            if (
+                                sym.is_local()
+                                or sym.is_parameter()
+                                or sym.is_imported()
+                            ):
+                                shadowed.add(ident)
+                        sym_groups[
+                            (child.get_lineno(), child.get_name())
+                        ].append(shadowed)
+                sym_walk(child)
 
-        walk(symtable.symtable(source, "<yolt>", "exec"))
-        return queues
+        sym_walk(symtable.symtable(source, "<yolt>", "exec"))
+
+        ast_groups = defaultdict(list)
+        for node in ast.walk(tree):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+            ):
+                name = (
+                    "lambda" if isinstance(node, ast.Lambda) else node.name
+                )
+                ast_groups[(node.lineno, name)].append(node)
+
+        result = {}
+        for group_key in set(sym_groups) | set(ast_groups):
+            sym_list = sym_groups.get(group_key, [])
+            ast_list = sorted(
+                ast_groups.get(group_key, []),
+                key=lambda n: getattr(n, "col_offset", 0),
+            )
+            if len(sym_list) != len(ast_list):
+                raise RuntimeError(
+                    "yolt: symtable / AST function-scope count mismatch"
+                    " for (lineno={}, name={!r}): symtable={}, AST={}"
+                    .format(
+                        group_key[0], group_key[1],
+                        len(sym_list), len(ast_list),
+                    )
+                )
+            for shadowed, node in zip(sym_list, ast_list):
+                col = getattr(node, "col_offset", 0)
+                result[
+                    ("function", node.lineno, col, group_key[1])
+                ] = shadowed
+        return result
 
 
 def make_hook_response(decision, reason=None):
