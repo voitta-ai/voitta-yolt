@@ -168,8 +168,9 @@ class SafetyAnalyzer(ast.NodeVisitor):
 
         # The class body itself executes immediately in its own local
         # namespace, with ordered shadowing over the surrounding scope.
+        class_pos = (node.lineno, getattr(node, "col_offset", 0))
         class_scope = {
-            "base": self._table_for_class_definition(node.lineno),
+            "base": self._table_for_class_definition(class_pos),
             "events": self._collect_class_scope_events(node.body),
             "scope_depth_at_entry": self._scope_depth,
         }
@@ -239,23 +240,30 @@ class SafetyAnalyzer(ast.NodeVisitor):
         return ("function", node.lineno, node.name)
 
     def _collect_top_level_bindings(self, tree):
-        """Walk the module-level body (only) and build the line-ordered
+        """Walk the module-level body (only) and build the source-order
         binding event list plus the final snapshot. See class docstring
-        for the scoping rationale."""
+        for the scoping rationale.
+
+        Events are keyed by `(lineno, col_offset)` so that same-line
+        events resolve in source order. The semicolon one-liner form
+        `import os as x; x.system(...)` puts both the binding and the
+        call on the same line; the binding has a smaller col_offset
+        and must be visible to the later call."""
         if not isinstance(tree, ast.Module):
             return
 
         events = []
 
         for stmt in tree.body:
+            pos = (stmt.lineno, getattr(stmt, "col_offset", 0))
             if isinstance(stmt, ast.Import):
                 for alias in stmt.names:
                     if alias.asname:
-                        events.append((stmt.lineno, alias.asname, alias.name))
+                        events.append((pos, alias.asname, alias.name))
                     else:
                         # `import os.path` binds the top-level name `os`.
                         top_level = alias.name.split(".")[0]
-                        events.append((stmt.lineno, top_level, top_level))
+                        events.append((pos, top_level, top_level))
             elif isinstance(stmt, ast.ImportFrom):
                 if not stmt.module:
                     # Relative imports: package context unavailable, skip.
@@ -267,7 +275,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
                         continue
                     local = alias.asname or alias.name
                     events.append((
-                        stmt.lineno,
+                        pos,
                         local,
                         "{}.{}".format(stmt.module, alias.name),
                     ))
@@ -278,32 +286,36 @@ class SafetyAnalyzer(ast.NodeVisitor):
                 continue
             else:
                 # Walk this top-level statement collecting module-scope
-                # reassignments as drop events keyed to their source line.
+                # reassignments as drop events keyed to their source
+                # position.
                 for node in self._walk_module_scope(stmt):
-                    line = getattr(node, "lineno", stmt.lineno)
+                    node_pos = (
+                        getattr(node, "lineno", stmt.lineno),
+                        getattr(node, "col_offset", 0),
+                    )
                     if isinstance(node, ast.Assign):
                         for tgt in node.targets:
                             for name in self._names_in_target(tgt):
-                                events.append((line, name, None))
+                                events.append((node_pos, name, None))
                     elif isinstance(node, ast.AugAssign):
                         for name in self._names_in_target(node.target):
-                            events.append((line, name, None))
+                            events.append((node_pos, name, None))
                     elif isinstance(node, ast.AnnAssign):
                         if node.value is not None:
                             for name in self._names_in_target(node.target):
-                                events.append((line, name, None))
+                                events.append((node_pos, name, None))
                     elif isinstance(node, ast.For):
                         for name in self._names_in_target(node.target):
-                            events.append((line, name, None))
+                            events.append((node_pos, name, None))
                     elif isinstance(node, ast.With):
                         for item in node.items:
                             if item.optional_vars is not None:
                                 for name in self._names_in_target(
                                     item.optional_vars
                                 ):
-                                    events.append((line, name, None))
+                                    events.append((node_pos, name, None))
 
-        # Stable sort by lineno preserves intra-line declaration order.
+        # Stable sort by (lineno, col_offset) preserves source order.
         events.sort(key=lambda e: e[0])
         self._module_events = events
 
@@ -326,14 +338,18 @@ class SafetyAnalyzer(ast.NodeVisitor):
         events.sort(key=lambda e: e[0])
         return events
 
-    def _snapshot_at_line(self, lineno):
-        """Replay binding events strictly before `lineno` and return the
+    def _snapshot_at_pos(self, pos):
+        """Replay binding events strictly before `pos` and return the
         resulting name -> target dict. Used for module-scope calls so
         they see the binding state effective at their position rather
-        than the final module state."""
+        than the final module state.
+
+        `pos` is a `(lineno, col_offset)` tuple so that a call later
+        on the same line as its binding (e.g. semicolon one-liner
+        `import os as x; x.system(...)`) still sees the binding."""
         snapshot = {}
-        for evt_line, name, target in self._module_events:
-            if evt_line >= lineno:
+        for evt_pos, name, target in self._module_events:
+            if evt_pos >= pos:
                 break
             if target is None:
                 snapshot.pop(name, None)
@@ -342,27 +358,29 @@ class SafetyAnalyzer(ast.NodeVisitor):
         return snapshot
 
     @staticmethod
-    def _class_snapshot_at_line(scope, lineno):
-        """Apply class-local shadowing events strictly before `lineno`
-        on top of the class scope's surrounding base snapshot."""
+    def _class_snapshot_at_pos(scope, pos):
+        """Apply class-local shadowing events strictly before `pos`
+        on top of the class scope's surrounding base snapshot.
+
+        `pos` is `(lineno, col_offset)` to match `_snapshot_at_pos`."""
         snapshot = dict(scope["base"])
-        for evt_line, name in scope["events"]:
-            if evt_line >= lineno:
+        for evt_pos, name in scope["events"]:
+            if evt_pos >= pos:
                 break
             snapshot.pop(name, None)
         return snapshot
 
-    def _current_immediate_table(self, lineno):
+    def _current_immediate_table(self, pos):
         """Return the surrounding immediate-execution binding snapshot
         for the current position: innermost class scope if present,
         otherwise module scope."""
         if self._class_scope_stack:
-            return self._class_snapshot_at_line(
-                self._class_scope_stack[-1], lineno
+            return self._class_snapshot_at_pos(
+                self._class_scope_stack[-1], pos
             )
-        return self._snapshot_at_line(lineno)
+        return self._snapshot_at_pos(pos)
 
-    def _direct_class_body_table(self, lineno):
+    def _direct_class_body_table(self, pos):
         """Return the innermost class-body snapshot when the current
         position is in that class's direct body, not in a nested
         deferred scope such as a method or lambda."""
@@ -371,16 +389,16 @@ class SafetyAnalyzer(ast.NodeVisitor):
         scope = self._class_scope_stack[-1]
         if scope["scope_depth_at_entry"] != self._scope_depth:
             return None
-        return self._class_snapshot_at_line(scope, lineno)
+        return self._class_snapshot_at_pos(scope, pos)
 
-    def _table_for_class_definition(self, lineno):
+    def _table_for_class_definition(self, pos):
         """Resolve the surrounding snapshot that a class body starts
         from. Class bodies nested under deferred scopes still see the
         final module alias table, with outer function shadowing handled
         separately via `_shadow_stack`."""
         if self._scope_depth > 0:
             return dict(self.alias_table)
-        return self._current_immediate_table(lineno)
+        return self._current_immediate_table(pos)
 
     @staticmethod
     def _names_in_target(target):
@@ -435,50 +453,56 @@ class SafetyAnalyzer(ast.NodeVisitor):
 
     def _binding_events_in_immediate_scope(self, stmt):
         """Collect ordered local-binding events produced by `stmt` in an
-        immediate-execution scope such as a class body."""
+        immediate-execution scope such as a class body. Each event is
+        `((lineno, col_offset), name)` so same-line bindings resolve
+        in source order."""
         events = []
+        stmt_pos = (stmt.lineno, getattr(stmt, "col_offset", 0))
         if isinstance(stmt, ast.Import):
             for alias in stmt.names:
                 local = alias.asname or alias.name.split(".")[0]
-                events.append((stmt.lineno, local))
+                events.append((stmt_pos, local))
             return events
         if isinstance(stmt, ast.ImportFrom):
             for alias in stmt.names:
                 if alias.name == "*":
                     continue
-                events.append((stmt.lineno, alias.asname or alias.name))
+                events.append((stmt_pos, alias.asname or alias.name))
             return events
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            events.append((stmt.lineno, stmt.name))
+            events.append((stmt_pos, stmt.name))
             return events
 
         for node in self._walk_immediate_scope(stmt):
-            line = getattr(node, "lineno", stmt.lineno)
+            node_pos = (
+                getattr(node, "lineno", stmt.lineno),
+                getattr(node, "col_offset", 0),
+            )
             if isinstance(node, ast.Assign):
                 for tgt in node.targets:
                     for name in self._names_in_target(tgt):
-                        events.append((line, name))
+                        events.append((node_pos, name))
             elif isinstance(node, ast.AugAssign):
                 for name in self._names_in_target(node.target):
-                    events.append((line, name))
+                    events.append((node_pos, name))
             elif isinstance(node, ast.AnnAssign):
                 if node.value is not None:
                     for name in self._names_in_target(node.target):
-                        events.append((line, name))
+                        events.append((node_pos, name))
             elif isinstance(node, (ast.For, ast.AsyncFor)):
                 for name in self._names_in_target(node.target):
-                    events.append((line, name))
+                    events.append((node_pos, name))
             elif isinstance(node, (ast.With, ast.AsyncWith)):
                 for item in node.items:
                     if item.optional_vars is not None:
                         for name in self._names_in_target(item.optional_vars):
-                            events.append((line, name))
+                            events.append((node_pos, name))
             elif isinstance(node, ast.ExceptHandler):
                 if node.name:
-                    events.append((line, node.name))
+                    events.append((node_pos, node.name))
             elif isinstance(node, ast.NamedExpr):
                 for name in self._names_in_target(node.target):
-                    events.append((line, name))
+                    events.append((node_pos, name))
         return events
 
     def visit_Call(self, node):
@@ -520,9 +544,10 @@ class SafetyAnalyzer(ast.NodeVisitor):
         for shadowed in reversed(self._shadow_stack):
             if head in shadowed:
                 return name
-        table = self._direct_class_body_table(node.lineno)
+        pos = (node.lineno, getattr(node, "col_offset", 0))
+        table = self._direct_class_body_table(pos)
         if table is None and self._scope_depth == 0:
-            table = self._current_immediate_table(node.lineno)
+            table = self._current_immediate_table(pos)
         elif table is None:
             table = self.alias_table
         if head not in table:

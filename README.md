@@ -27,6 +27,7 @@
 - [Debug / dogfood log](#debug--dogfood-log)
 - [CLI usage](#cli-usage)
 - [Tests and demo](#tests-and-demo)
+- [Analysis boundaries](#analysis-boundaries)
 - [Design principles](#design-principles)
 
 ## Introduction
@@ -533,6 +534,139 @@ asserted, just printed), run:
 
 This prints the decision (`safe` / `unsafe` / `unknown`) for each
 command, colorized when the terminal supports it.
+
+## Analysis boundaries
+
+YOLT is a conservative static checker. It chooses `unknown` over
+guessing, so the supported surfaces matter. This section pins what
+YOLT does and does not inspect.
+
+### Bash decomposition (in scope)
+
+The tree-sitter-bash grammar walker handles:
+
+- pipelines, lists (`;`, `&&`, `||`), negation, subshells, compound
+  statements;
+- `if` / `for` / `while` / `case` bodies (no manual keyword stripping);
+- command substitution (`$(...)`, `` `...` ``) and process
+  substitution (`<(...)`) — recursed and classified independently of
+  the outer command;
+- redirections — write targets matched against
+  `safe_write_targets`; non-matching writes fall to `unknown`;
+- heredocs — for the Python interpreters, the body is delegated;
+- pre-command env assignments (`FOO=bar baz`) — skipped, not folded
+  into argv.
+
+### Delegated language analysis (in scope)
+
+| Source | Routed to |
+| ------ | --------- |
+| `bash -c '<script>'`, `sh -c '<script>'` | Re-enters the grammar walker |
+| `python3 -c '<script>'` | `hooks/yolt_analyzer.py` (stdlib `ast`) |
+| `python3 file.py` | `hooks/yolt_analyzer.py` (stdlib `ast`) |
+| `python3 <<EOF ... EOF` | `hooks/yolt_analyzer.py` (stdlib `ast`) |
+| `python3 -m mod[.sub] ...` | `interpreters.python3.nested_modules` in `rules/shell.json` |
+
+### Delegated language analysis (out of scope)
+
+Other interpreters are NOT analyzed inline. Their invocations fall
+through to `unknown` and Claude Code default-prompts:
+
+- `node -e '...'`, `node file.js`
+- `ruby -e '...'`, `ruby file.rb`
+- `perl -e '...'`, `php -r '...'`
+- `osascript`, `awk -f`, `sed` script files
+- arbitrary user shebangs (`./my-script`)
+
+Adding one means writing an analyzer of the same shape as
+`yolt_analyzer.py` and registering it under `interpreters` in
+`rules/shell.json`.
+
+### SQL CLIs (in scope)
+
+`sqlite3`, `psql`, `mysql`, `mariadb`, `duckdb` — inline SQL string
+extracted from argv and scanned for destructive keywords; see
+[SQL CLIs](#sql-clis).
+
+### SQL CLIs (out of scope)
+
+- SQL fed via file (`psql -f q.sql`, `mysql < q.sql`) — opaque
+  statically, stays `unknown`.
+- Bare interactive invocations (`sqlite3 db.sqlite` with no SQL) —
+  stay `unknown`.
+- Other SQL clients (`cockroach sql`, `clickhouse-client`,
+  `snowsql`, ...) — not classified by the SQL path.
+
+### Python alias resolution (in scope)
+
+Pre-pass over the module body collects bindings before the call
+walk. Supported import forms:
+
+- `import mod`
+- `import mod as alias`
+- `import mod.sub` / `import mod.sub as alias`
+- `from mod import name`
+- `from mod import name as alias`
+
+Function / `lambda` body shadowing is honored via the stdlib
+`symtable` analysis. Class body shadowing is honored ordered with
+class-local assignments.
+
+### Python alias resolution (out of scope)
+
+- Nested-under-control-flow imports (`if cond: import x`,
+  `try: import x`).
+- `from mod import *`.
+- Relative imports (`from . import x`).
+- Variable rebinding through attribute access
+  (`obj.attr = os.system`).
+- Annotation expressions (parameter / return) — PEP 563 / 649
+  store them as strings.
+
+Anything the analyzer cannot resolve statically is left at its
+surface name rather than guessed.
+
+### Policy-driven CLIs
+
+Common CLIs (`gh`, `git`, `aws`, `curl`, `kubectl`, `helm`, `docker`,
+`terraform`, ...) are policy-driven via `rules/shell.json`. The
+walker pulls a command path from argv and matches against:
+
+- `safe_subcommands` / `unsafe_subcommands` at the top level;
+- `nested_subcommand` specs for namespaces with mutating verbs at
+  arbitrary depth (e.g. `docker image rm`, `kubectl config
+  set-context`, `helm repo add`);
+- `service_overrides` for AWS service-specific reads
+  (e.g. `aws logs start-query` is read-only despite the verb);
+- `unsafe_flags` / `unsafe_flag_values` /
+  `unsafe_flag_any_value` / `unsafe_flag_value_prefix` /
+  `unsafe_flags_without_value` for flag-driven mutation
+  (e.g. `find -exec`, `gh api --input`).
+
+For namespaces that are only partially modeled, bare and unmodeled
+verbs fall to `unknown` rather than silently classifying safe.
+
+### Conservative-unknown contract
+
+Every analysis surface follows the same fallback: if YOLT cannot
+prove a command is safe, it does not say so. Categories that hit
+this path:
+
+- tree-sitter parse error (`tree-sitter parse error`);
+- max recursion depth on nested decomposition;
+- unknown command name;
+- partially-modeled CLI namespace with a verb outside the policy;
+- write redirect to a path not on `safe_write_targets`;
+- SQL string the conservative scanner cannot classify as read-only;
+- Python source the AST delegate fails to parse;
+- `rules/shell.json` failing schema validation — the hook logs
+  `rules-validation-error` and exits silently so Claude Code's
+  default prompt fires.
+
+Schema validation runs at hook load time
+(`hooks/rule_classifier.py:validate_shell_rules`) on both the
+bundled rules and any user override, so a typo in a policy field
+becomes a hard fail at startup rather than a silent false-allow.
 
 ## Design principles
 
