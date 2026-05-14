@@ -118,39 +118,77 @@ class TestIssue16PythonImportAliases(unittest.TestCase):
 
     Before PR #20 the Python delegate matched call targets by surface
     name only, so `import os as x; x.system(...)` slipped past the
-    `os.system` rule.
+    `os.system` rule. Multi-line, heredoc, and semicolon-one-liner
+    forms are all covered here so the same alias-resolution gap
+    cannot reopen on any user-visible entry point.
     """
 
     @staticmethod
-    def _decision(snippet):
-        # Use a heredoc, not `python3 -c`, so the snippet keeps its
-        # real newlines. The Python AST delegate's alias resolution
-        # is shape-faithful — multi-line `import` then call — which
-        # is the form the closing PR #20 verified end-to-end.
+    def _decision_heredoc(snippet):
         cmd = "python3 <<'PYEOF'\n{}\nPYEOF\n".format(snippet)
         retval = _Hook.decision_for(cmd)
         return retval
 
-    def test_import_alias_os_system(self):
+    @staticmethod
+    def _decision_dash_c(snippet):
+        # Wrap the inline source in single quotes so the embedded
+        # double quotes survive the shell parse. The grammar walker
+        # hands the raw inline body to the Python AST delegate.
+        cmd = "python3 -c '{}'".format(snippet)
+        retval = _Hook.decision_for(cmd)
+        return retval
+
+    # Heredoc form (multi-line imports + call)
+
+    def test_import_alias_os_system_heredoc(self):
         snippet = (
             "import os as x\n"
             'x.system("rm -rf /tmp/x")'
         )
-        self.assertEqual(self._decision(snippet), "ask")
+        self.assertEqual(self._decision_heredoc(snippet), "ask")
 
-    def test_from_import_unaliased(self):
+    def test_from_import_unaliased_heredoc(self):
         snippet = (
             "from os import system\n"
             'system("rm -rf /tmp/x")'
         )
-        self.assertEqual(self._decision(snippet), "ask")
+        self.assertEqual(self._decision_heredoc(snippet), "ask")
 
-    def test_from_import_aliased(self):
+    def test_from_import_aliased_heredoc(self):
         snippet = (
             "from shutil import rmtree as wipe\n"
             'wipe("/tmp/x")'
         )
-        self.assertEqual(self._decision(snippet), "ask")
+        self.assertEqual(self._decision_heredoc(snippet), "ask")
+
+    # Semicolon one-liner via `python3 -c`. This is the exact
+    # repro shape from the #16 issue body and the #30 review:
+    # alias resolution must work when the binding and the call
+    # are on the same source line.
+
+    def test_import_alias_os_system_dash_c_semicolon(self):
+        self.assertEqual(
+            self._decision_dash_c(
+                'import os as x; x.system(\"rm -rf /tmp/x\")'
+            ),
+            "ask",
+        )
+
+    def test_from_import_unaliased_dash_c_semicolon(self):
+        self.assertEqual(
+            self._decision_dash_c(
+                'from os import system; system(\"rm -rf /tmp/x\")'
+            ),
+            "ask",
+        )
+
+    def test_from_import_aliased_dash_c_semicolon(self):
+        self.assertEqual(
+            self._decision_dash_c(
+                'from shutil import rmtree as wipe; wipe(\"/tmp/x\")'
+            ),
+            "ask",
+        )
 
 
 class TestIssue21PythonLocalShadowing(unittest.TestCase):
