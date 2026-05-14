@@ -126,6 +126,45 @@ class TestModuleScopeWalrusRebind(unittest.TestCase):
             "the os.system alias; found {}".format(result["findings"]),
         )
 
+    def test_walrus_inside_lambda_body_does_not_leak_to_module(self):
+        """Walrus inside a lambda body binds in the lambda's own scope,
+        not in the enclosing module scope (lambdas are their own scope
+        like functions). A subsequent module-scope call must still
+        resolve through the import.
+
+        Regression: an earlier fix recorded `ast.NamedExpr` drops by
+        descending through every node `_walk_module_scope` visited,
+        which traversed into `ast.Lambda` bodies and produced
+        spurious module-scope drops."""
+        source = (
+            "from os import system\n"
+            "x = lambda: (system := print)\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertFalse(
+            result["safe"],
+            "walrus inside lambda body must not leak to module scope; "
+            "module-level call to `system` should still resolve to "
+            "os.system. Got findings={}".format(result["findings"]),
+        )
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["findings"][0]["call"], "os.system")
+        self.assertEqual(result["findings"][0]["line"], 3)
+
+    def test_walrus_inside_nested_lambda_body_does_not_leak(self):
+        """Even a walrus reached through several layers of nesting
+        inside a lambda body — here wrapped in a list literal — must
+        not pollute the module-scope binding table."""
+        source = (
+            "from os import system\n"
+            "f = lambda: [(system := print), 1]\n"
+            "system('boom')\n"
+        )
+        result = _fresh_analyzer().analyze(source)
+        self.assertFalse(result["safe"])
+        self.assertEqual(result["findings"][0]["call"], "os.system")
+
     def test_call_before_walrus_still_resolves_to_import(self):
         """Position-aware: a call BEFORE the walrus rebind still
         resolves through the import. Drop applies only to later

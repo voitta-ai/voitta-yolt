@@ -434,10 +434,16 @@ class SafetyAnalyzer(ast.NodeVisitor):
     def _walk_module_scope(stmt):
         """Yield every descendant of `stmt` that still lives in module
         scope. Walks past `if`/`for`/`while`/`try`/`with` since those
-        share the enclosing scope, but stops at function and class
-        boundaries which introduce their own."""
+        share the enclosing scope, but stops at function, class, and
+        lambda boundaries which introduce their own. Lambda bodies in
+        particular can contain walrus expressions (`lambda: (x := 1)`)
+        whose binding stays inside the lambda — descending into them
+        would let a lambda-local walrus erase a module-scope import."""
         yield stmt
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(
+            stmt,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+        ):
             return
         for child in ast.iter_child_nodes(stmt):
             yield from SafetyAnalyzer._walk_module_scope(child)
