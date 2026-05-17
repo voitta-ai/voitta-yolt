@@ -186,10 +186,29 @@ class TestHookEndToEnd(unittest.TestCase):
         self.assertIn("L2", reason)
         self.assertIn("os.system", reason)
 
+    def test_git_push_reason_includes_allow_hint(self):
+        result = HookSubprocess.run_bash(
+            "git -C /tmp/wt-27 push -u origin feature/issue-27-find-write-flags"
+        )
+        resp = HookSubprocess.response_of(result)
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Bash(git -C * push -u origin feature/*)", reason)
+
+    def test_gh_issue_create_reason_includes_allow_hint(self):
+        result = HookSubprocess.run_bash(
+            'gh issue create --title "x" --body "y"'
+        )
+        resp = HookSubprocess.response_of(result)
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Bash(gh issue create:*)", reason)
+
 
 class TestHookAllowlistDiscovery(unittest.TestCase):
     """The hook reads the user's settings.json `permissions.allow` Bash()
-    entries and uses them as a secondary upgrade pass for unknown atoms.
+    entries and uses them as an explicit override for unknown and unsafe
+    atoms.
     Tests scope the lookup via the `cwd` field in the hook payload so
     they don't depend on the real test runner's home directory."""
 
@@ -227,9 +246,12 @@ class TestHookAllowlistDiscovery(unittest.TestCase):
         self._write_settings(["Bash(yolt_test_othertool *)"])
         self.assertIsNone(self._decision("yolt_test_mycli foo bar"))
 
-    def test_allowlist_does_not_override_unsafe(self):
-        self._write_settings(["Bash(rm *)"])
-        self.assertEqual(self._decision("rm -rf /tmp/foo"), "ask")
+    def test_allowlist_overrides_unsafe(self):
+        self._write_settings(["Bash(git push origin feature/*)"])
+        self.assertEqual(
+            self._decision("git push origin feature/issue-35"),
+            "allow",
+        )
 
 
 class TestBootstrapShell(unittest.TestCase):

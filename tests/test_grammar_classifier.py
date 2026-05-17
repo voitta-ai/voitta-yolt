@@ -707,7 +707,7 @@ class TestSafeWriteTargets(unittest.TestCase):
 
 
 class TestClassifierAllowPatterns(unittest.TestCase):
-    """Allowlist upgrades unknowns to safe but never weakens unsafe."""
+    """Allowlist upgrades unknown and unsafe matches to safe."""
 
     def test_unknown_command_upgraded_to_safe(self):
         clf = _make_classifier(allow_patterns=["mycli *"])
@@ -720,15 +720,15 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         d, _ = clf.classify("aws ec2 weird-op --flag")
         self.assertEqual(d, DECISION_SAFE)
 
-    def test_unsafe_not_weakened_by_allowlist(self):
+    def test_unsafe_overridden_by_allowlist(self):
         clf = _make_classifier(allow_patterns=["aws *"])
         d, _ = clf.classify("aws iam delete-user --user-name foo")
-        self.assertEqual(d, DECISION_UNSAFE)
+        self.assertEqual(d, DECISION_SAFE)
 
-    def test_unsafe_in_compound_not_weakened(self):
+    def test_unsafe_in_compound_overridden(self):
         clf = _make_classifier(allow_patterns=["aws *", "rm *"])
         d, _ = clf.classify("aws s3 ls && rm -rf /etc")
-        self.assertEqual(d, DECISION_UNSAFE)
+        self.assertEqual(d, DECISION_SAFE)
 
     def test_no_allowlist_match_stays_unknown(self):
         clf = _make_classifier(allow_patterns=["aws *"])

@@ -721,6 +721,17 @@ def make_hook_response(decision, reason=None):
     return output
 
 
+def format_unsafe_reason(reason, allow_hint=None):
+    message = "YOLT: Mutating command detected:\n  {}".format(reason)
+    if allow_hint:
+        message += (
+            "\n\nTo skip this prompt in future, add to "
+            "~/.claude/settings.json#permissions.allow:\n"
+            '  "{}"'.format(allow_hint)
+        )
+    return message
+
+
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
@@ -898,9 +909,8 @@ def run_hook():
         print(json.dumps(response))
         sys.exit(0)
     if decision == DECISION_UNSAFE:
-        response = make_hook_response(
-            "ask", "YOLT: Mutating command detected:\n  {}".format(reason)
-        )
+        allow_hint = classifier.suggest_allow_pattern(command)
+        response = make_hook_response("ask", format_unsafe_reason(reason, allow_hint))
         print(json.dumps(response))
         sys.exit(0)
     # decision == DECISION_UNKNOWN: let Claude Code handle it
