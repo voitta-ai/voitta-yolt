@@ -10,7 +10,7 @@ calls in production. Coverage targets:
   - Quoting: bash `'\\''` close-escape-open idiom, `$'...'` ANSI-C strings,
     concatenated strings.
   - Heredocs (with python body), redirects, process substitution.
-  - User allowlist upgrade (and never-weakens-unsafe invariant).
+  - User allowlist upgrade, including explicit overrides of unsafe atoms.
 
 Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 
@@ -751,6 +751,21 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         clf = _make_classifier(allow_patterns=[])
         d, _ = clf.classify("somecommand_unknown")
         self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_suggested_allow_hints_round_trip(self):
+        cases = [
+            ("git -C /tmp/wt add file.txt", "Bash(git -C * add*)"),
+            (
+                'gh issue create --title "x" --body "y"',
+                "Bash(gh issue create*)",
+            ),
+        ]
+        for command, expected_hint in cases:
+            hint = _make_classifier().suggest_allow_pattern(command)
+            self.assertEqual(hint, expected_hint)
+            inner = hint[len("Bash("):-1]
+            d, _ = _make_classifier(allow_patterns=[inner]).classify(command)
+            self.assertEqual(d, DECISION_SAFE, command)
 
 
 class TestSqlCli(unittest.TestCase):

@@ -202,7 +202,7 @@ class TestHookEndToEnd(unittest.TestCase):
         resp = HookSubprocess.response_of(result)
         self.assertIsNotNone(resp)
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("Bash(gh issue create:*)", reason)
+        self.assertIn("Bash(gh issue create*)", reason)
 
 
 class TestHookAllowlistDiscovery(unittest.TestCase):

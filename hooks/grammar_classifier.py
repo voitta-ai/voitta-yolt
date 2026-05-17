@@ -368,7 +368,7 @@ class GrammarClassifier:
 
         sub = argv[i]
         if sub in {"add", "commit"}:
-            return "Bash({} {}:*)".format(" ".join(prefix), sub)
+            return "Bash({} {}*)".format(" ".join(prefix), sub)
 
         if sub != "push":
             return None
@@ -402,7 +402,7 @@ class GrammarClassifier:
             "issue": {"create", "comment", "edit"},
         }
         if action in allowed.get(namespace, set()):
-            return "Bash(gh {} {}:*)".format(namespace, action)
+            return "Bash(gh {} {}*)".format(namespace, action)
         return None
 
     @staticmethod
