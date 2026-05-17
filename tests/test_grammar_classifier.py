@@ -10,7 +10,7 @@ calls in production. Coverage targets:
   - Quoting: bash `'\\''` close-escape-open idiom, `$'...'` ANSI-C strings,
     concatenated strings.
   - Heredocs (with python body), redirects, process substitution.
-  - User allowlist upgrade (and never-weakens-unsafe invariant).
+  - User allowlist upgrade, including explicit overrides of unsafe atoms.
 
 Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 
@@ -707,7 +707,7 @@ class TestSafeWriteTargets(unittest.TestCase):
 
 
 class TestClassifierAllowPatterns(unittest.TestCase):
-    """Allowlist upgrades unknowns to safe but never weakens unsafe."""
+    """Allowlist upgrades unknown and unsafe matches to safe."""
 
     def test_unknown_command_upgraded_to_safe(self):
         clf = _make_classifier(allow_patterns=["mycli *"])
@@ -720,15 +720,15 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         d, _ = clf.classify("aws ec2 weird-op --flag")
         self.assertEqual(d, DECISION_SAFE)
 
-    def test_unsafe_not_weakened_by_allowlist(self):
+    def test_unsafe_overridden_by_allowlist(self):
         clf = _make_classifier(allow_patterns=["aws *"])
         d, _ = clf.classify("aws iam delete-user --user-name foo")
-        self.assertEqual(d, DECISION_UNSAFE)
+        self.assertEqual(d, DECISION_SAFE)
 
-    def test_unsafe_in_compound_not_weakened(self):
+    def test_unsafe_in_compound_overridden(self):
         clf = _make_classifier(allow_patterns=["aws *", "rm *"])
         d, _ = clf.classify("aws s3 ls && rm -rf /etc")
-        self.assertEqual(d, DECISION_UNSAFE)
+        self.assertEqual(d, DECISION_SAFE)
 
     def test_no_allowlist_match_stays_unknown(self):
         clf = _make_classifier(allow_patterns=["aws *"])
@@ -751,6 +751,21 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         clf = _make_classifier(allow_patterns=[])
         d, _ = clf.classify("somecommand_unknown")
         self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_suggested_allow_hints_round_trip(self):
+        cases = [
+            ("git -C /tmp/wt add file.txt", "Bash(git -C * add*)"),
+            (
+                'gh issue create --title "x" --body "y"',
+                "Bash(gh issue create*)",
+            ),
+        ]
+        for command, expected_hint in cases:
+            hint = _make_classifier().suggest_allow_pattern(command)
+            self.assertEqual(hint, expected_hint)
+            inner = hint[len("Bash("):-1]
+            d, _ = _make_classifier(allow_patterns=[inner]).classify(command)
+            self.assertEqual(d, DECISION_SAFE, command)
 
 
 class TestSqlCli(unittest.TestCase):

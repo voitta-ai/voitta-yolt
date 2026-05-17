@@ -203,9 +203,9 @@ Add to `~/.claude/settings.json`:
 YOLT reads your `permissions.allow` Bash() entries from
 `~/.claude/settings.json`, the project's `.claude/settings.json`, and
 `.claude/settings.local.json`. After the rule classifier runs on each
-AST `command` node, any node that would otherwise be `unknown` is
-upgraded to `safe` if its reconstructed argv matches one of those
-patterns.
+AST `command` node, any node that would otherwise be `unknown` or
+`unsafe` is upgraded to `safe` if its reconstructed argv matches one
+of those patterns.
 
 This earns its keep on compound forms. The built-in matcher only sees
 the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
@@ -217,9 +217,15 @@ Two rules apply:
 - The match uses `fnmatch` glob semantics — the same semantics Claude
   Code's outer matcher uses. `Bash(env)` matches `env` exactly;
   `Bash(aws s3 ls*)` matches anything that starts with `aws s3 ls`.
-- A match **never weakens an `unsafe` decision**. If your rules say
-  `aws iam delete-user` is mutating, a permissive `Bash(aws *)` does
-  not turn it into safe — YOLT keeps flagging mutating calls.
+- A match is an explicit user override. Keep patterns narrow:
+  `Bash(aws ecs list-services*)` is fine; `Bash(git *)` or
+  `Bash(gh *)` will allow matching mutating commands anywhere YOLT
+  reconstructs the same argv, including inside compound forms.
+
+For common self-PR workflow writes (`git push`, `git commit`,
+`gh issue create`, `gh pr comment`, ...), YOLT's `ask` message now
+includes a paste-ready `Bash(...)` suggestion when no allow pattern
+matched yet.
 
 ## Dependencies
 

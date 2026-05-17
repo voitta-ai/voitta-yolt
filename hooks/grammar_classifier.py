@@ -84,6 +84,31 @@ class GrammarClassifier:
             return (DECISION_SAFE, "no commands")
         return aggregate_decisions(decisions)
 
+    def suggest_allow_pattern(self, command):
+        """Best-effort `Bash(...)` allow hint for a single primary command.
+
+        This is intentionally narrow and only covers the self-PR workflow
+        write shapes we document today. Compound shells with multiple
+        primary commands return `None` rather than guessing."""
+        if not command or not command.strip():
+            return None
+
+        src = command.encode("utf-8")
+        tree = self._parser.parse(src)
+        root = tree.root_node
+        if root.has_error:
+            return None
+
+        commands = []
+        self._collect_primary_command_nodes(root, commands)
+        if len(commands) != 1:
+            return None
+
+        argv = self._argv_from_command(commands[0], src)
+        if not argv:
+            return None
+        return self._suggest_allow_pattern_from_argv(argv)
+
     # --- AST walker ---
 
     def _walk(self, node, src, decisions, _depth):
@@ -186,6 +211,21 @@ class GrammarClassifier:
             return
         for c in node.children:
             self._collect_substitutions(c, src, decisions, _depth)
+
+    def _collect_primary_command_nodes(self, node, commands):
+        if node.type in ("command_substitution", "process_substitution",
+                         "function_definition"):
+            return
+        if node.type == "redirected_statement":
+            cmd = self._first_child(node, "command")
+            if cmd is not None:
+                commands.append(cmd)
+                return
+        if node.type == "command":
+            commands.append(node)
+            return
+        for c in node.children:
+            self._collect_primary_command_nodes(c, commands)
 
     # --- Argv reconstruction ---
 
@@ -299,12 +339,71 @@ class GrammarClassifier:
 
     def _maybe_allow(self, match_string, result):
         decision, reason = result
-        if decision != DECISION_UNKNOWN:
+        if decision == DECISION_SAFE:
             return result
         match = match_allow_patterns(match_string, self.allow_patterns)
         if match is None:
             return result
         return (DECISION_SAFE, "matches user allow pattern '{}'".format(match))
+
+    @staticmethod
+    def _suggest_allow_pattern_from_argv(argv):
+        cmd_name = os.path.basename(argv[0])
+        if cmd_name == "git":
+            return GrammarClassifier._suggest_git_allow_pattern(argv)
+        if cmd_name == "gh":
+            return GrammarClassifier._suggest_gh_allow_pattern(argv)
+        return None
+
+    @staticmethod
+    def _suggest_git_allow_pattern(argv):
+        prefix = ["git"]
+        i = 1
+        if i + 1 < len(argv) and argv[i] == "-C":
+            prefix.extend(["-C", "*"])
+            i += 2
+
+        if i >= len(argv) or argv[i].startswith("-"):
+            return None
+
+        sub = argv[i]
+        if sub in {"add", "commit"}:
+            return "Bash({} {}*)".format(" ".join(prefix), sub)
+
+        if sub != "push":
+            return None
+
+        hint = prefix + ["push"]
+        j = i + 1
+        if j < len(argv) and argv[j] == "-u":
+            hint.append("-u")
+            j += 1
+        if j + 1 >= len(argv):
+            return None
+
+        remote = argv[j]
+        branch = argv[j + 1]
+        if remote != "origin":
+            return None
+
+        branch_pat = "feature/*" if branch.startswith("feature/") else branch
+        hint.extend([remote, branch_pat])
+        return "Bash({})".format(" ".join(hint))
+
+    @staticmethod
+    def _suggest_gh_allow_pattern(argv):
+        if len(argv) < 3:
+            return None
+
+        namespace = argv[1]
+        action = argv[2]
+        allowed = {
+            "pr": {"create", "comment", "edit", "merge", "ready"},
+            "issue": {"create", "comment", "edit"},
+        }
+        if action in allowed.get(namespace, set()):
+            return "Bash(gh {} {}*)".format(namespace, action)
+        return None
 
     @staticmethod
     def _slice(node, src):
