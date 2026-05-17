@@ -111,6 +111,75 @@ class TestCheckUnsafeFlags(unittest.TestCase):
             check_unsafe_flags(["--input", "request.json"], spec)
         )
 
+    # write_flag_value_targets: flag value is a write-target path,
+    # decision routes through the top-level safe_write_targets allow list.
+    # Repros from issue #27 (find -fprint / -fprintf / -fls / -fls0).
+
+    def test_write_flag_value_targets_unsafe_outside_allow(self):
+        spec = {"write_flag_value_targets": ["-fprint"]}
+        result = check_unsafe_flags(
+            ["-fprint", "/etc/profile"], spec,
+            safe_write_targets=["/tmp/*", "/dev/null"],
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("-fprint", result)
+        self.assertIn("/etc/profile", result)
+
+    def test_write_flag_value_targets_safe_in_allow(self):
+        spec = {"write_flag_value_targets": ["-fprint"]}
+        self.assertIsNone(check_unsafe_flags(
+            ["-fprint", "/tmp/list.txt"], spec,
+            safe_write_targets=["/tmp/*", "/dev/null"],
+        ))
+
+    def test_write_flag_value_targets_fprintf_first_arg_is_path(self):
+        # -fprintf FILE FORMAT — only the FILE position is the write target.
+        spec = {"write_flag_value_targets": ["-fprintf"]}
+        self.assertIsNotNone(check_unsafe_flags(
+            ["-fprintf", "/etc/passwd", "%p\n"], spec,
+            safe_write_targets=["/tmp/*"],
+        ))
+        self.assertIsNone(check_unsafe_flags(
+            ["-fprintf", "/tmp/out.txt", "%p\n"], spec,
+            safe_write_targets=["/tmp/*"],
+        ))
+
+    def test_write_flag_value_targets_no_value(self):
+        # Flag at end of argv with no following value — no match.
+        spec = {"write_flag_value_targets": ["-fprint"]}
+        self.assertIsNone(check_unsafe_flags(
+            ["-fprint"], spec, safe_write_targets=["/tmp/*"],
+        ))
+
+    def test_write_flag_value_targets_empty_allow_list_blocks_everything(self):
+        # No safe_write_targets configured -> any value is unsafe.
+        spec = {"write_flag_value_targets": ["-fprint"]}
+        self.assertIsNotNone(check_unsafe_flags(
+            ["-fprint", "/tmp/list.txt"], spec, safe_write_targets=[],
+        ))
+        self.assertIsNotNone(check_unsafe_flags(
+            ["-fprint", "/tmp/list.txt"], spec, safe_write_targets=None,
+        ))
+
+    def test_write_flag_value_targets_home_expansion(self):
+        spec = {"write_flag_value_targets": ["-fprint"]}
+        # ~/.cache/* in allow list matches user-supplied ~/.cache/foo.
+        self.assertIsNone(check_unsafe_flags(
+            ["-fprint", "~/.cache/list.txt"], spec,
+            safe_write_targets=["~/.cache/*"],
+        ))
+
+    def test_write_flag_value_targets_inline_equals_form(self):
+        # find doesn't use --flag=value but the parser supports it
+        # uniformly; cover for consistency with other flag families.
+        spec = {"write_flag_value_targets": ["--out"]}
+        self.assertIsNotNone(check_unsafe_flags(
+            ["--out=/etc/profile"], spec, safe_write_targets=["/tmp/*"],
+        ))
+        self.assertIsNone(check_unsafe_flags(
+            ["--out=/tmp/out.txt"], spec, safe_write_targets=["/tmp/*"],
+        ))
+
 
 class TestParseAwsPositionals(unittest.TestCase):
     def test_simple(self):

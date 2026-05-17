@@ -333,7 +333,30 @@ def aggregate_decisions(decisions):
     return (DECISION_SAFE, "; ".join(safe_reasons) if safe_reasons else "no commands")
 
 
-def check_unsafe_flags(cmd_args, spec):
+def _expand_home(path):
+    home = os.environ.get("HOME")
+    if home and path.startswith("~/"):
+        return home + path[1:]
+    return path
+
+
+def _path_matches_safe_write_targets(target, safe_write_targets):
+    """Return True if `target` matches any of `safe_write_targets` under
+    fnmatch semantics. Mirrors the redirect-target check that
+    `grammar_classifier._target_is_safe_write` runs against `> file`
+    redirects, so flag-value writes (e.g. `find -fprint FILE`) and
+    redirect writes use the same allow list."""
+    if not safe_write_targets:
+        return False
+    expanded = _expand_home(target)
+    for pat in safe_write_targets:
+        pat_expanded = _expand_home(pat)
+        if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
+            return True
+    return False
+
+
+def check_unsafe_flags(cmd_args, spec, safe_write_targets=None):
     """Check whether cmd_args contains a flag combination the command spec
     declares unsafe. Returns a human-readable description, or None.
 
@@ -350,11 +373,17 @@ def check_unsafe_flags(cmd_args, spec):
       `--flag value`); the value is matched against the glob
       (`find -exec rm`, `gh api --input body.json`). `"*"` matches any
       value.
+    - `write_flag_value_targets`: list of flags whose immediately
+      following value is a file path the command will write to
+      (`find -fprint FILE`). The path is checked against the top-level
+      `safe_write_targets` allow list; a non-matching path makes the
+      call unsafe. Requires `safe_write_targets` to be passed in.
     """
     unsafe_flag_values = spec.get("unsafe_flag_values", {})
     unsafe_flag_any_value = set(spec.get("unsafe_flag_any_value", []))
     unsafe_flags_without_value = set(spec.get("unsafe_flags_without_value", []))
     unsafe_flag_value_prefix = spec.get("unsafe_flag_value_prefix", {})
+    write_flag_value_targets = set(spec.get("write_flag_value_targets", []))
 
     i = 0
     while i < len(cmd_args):
@@ -387,6 +416,15 @@ def check_unsafe_flags(cmd_args, spec):
                 if fnmatch(value, pat):
                     return "{} {}".format(flag, value)
 
+        if flag in write_flag_value_targets:
+            value = inline_value
+            if value is None and i + 1 < len(cmd_args):
+                value = cmd_args[i + 1]
+            if value is not None and not _path_matches_safe_write_targets(
+                value, safe_write_targets
+            ):
+                return "{} {}".format(flag, value)
+
         if flag in unsafe_flag_any_value:
             return flag
 
@@ -412,6 +450,7 @@ _ALLOWED_COMMAND_KEYS = frozenset({
     "default", "_note", "_skip_first_positional",
     "unsafe_flag_values", "unsafe_flag_any_value",
     "unsafe_flags_without_value", "unsafe_flag_value_prefix",
+    "write_flag_value_targets",
     "valueless_flags",
     "safe_subcommands", "unsafe_subcommands",
     "safe_subcommand_patterns", "unsafe_subcommand_patterns",
@@ -609,6 +648,7 @@ class RuleClassifier:
         self.commands = rules.get("commands", {})
         self.shell_builtins_safe = set(rules.get("shell_builtins_safe", []))
         self.interpreters = rules.get("interpreters", {})
+        self.safe_write_targets = list(rules.get("safe_write_targets", []))
         self.python_analyzer_factory = python_analyzer_factory
         # When a `bash -c '<script>'` interpreter call needs nested analysis,
         # the grammar walker injects itself here as a callable
@@ -759,7 +799,9 @@ class RuleClassifier:
         spec = self.commands[cmd_name]
         default = spec.get("default", "unknown")
 
-        unsafe_match = check_unsafe_flags(cmd_args, spec)
+        unsafe_match = check_unsafe_flags(
+            cmd_args, spec, safe_write_targets=self.safe_write_targets
+        )
         if unsafe_match:
             return (DECISION_UNSAFE, "{}: flag {}".format(cmd_name, unsafe_match))
 
@@ -797,7 +839,9 @@ class RuleClassifier:
         nested = spec.get("nested_subcommand", {})
         if sub in nested:
             nested_spec = nested[sub]
-            nested_unsafe = check_unsafe_flags(remaining_args, nested_spec)
+            nested_unsafe = check_unsafe_flags(
+                remaining_args, nested_spec, safe_write_targets=self.safe_write_targets
+            )
             if nested_unsafe:
                 return (DECISION_UNSAFE, "{} {}: flag {}".format(cmd_name, sub, nested_unsafe))
             if "default" in nested_spec:

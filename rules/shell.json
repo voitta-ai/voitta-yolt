@@ -216,7 +216,8 @@
       "unsafe_flag_any_value": ["-delete"],
       "unsafe_flags_without_value": ["-delete"],
       "unsafe_flag_value_prefix": {"-exec": "*", "-execdir": "*", "-ok": "*", "-okdir": "*"},
-      "_note": "find is read-only until you add -delete, -exec, -execdir, -ok, or -okdir."
+      "write_flag_value_targets": ["-fprint", "-fprintf", "-fls", "-fls0"],
+      "_note": "find is read-only until you add -delete, -exec, -execdir, -ok, -okdir, or a -fprint/-fprintf/-fls/-fls0 that writes outside safe_write_targets."
     },
     "xargs": {
       "default": "delegate_to_argument",

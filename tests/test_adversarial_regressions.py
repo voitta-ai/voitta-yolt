@@ -26,6 +26,10 @@ Catalogue layout:
   to classify safe under the shallow top-level subcommand rule
   (closes #17 via PR #25), and the bare-read counterparts that must
   stay safe.
+- `TestIssue27FindWriteFlags` -- `find -fprint / -fprintf / -fls /
+  -fls0 FILE` repros (closes #27). Path argument was unchecked, so
+  writes outside `safe_write_targets` classified safe. The fix
+  routes the path through the same allow list redirects use.
 
 Run with:
 
@@ -288,6 +292,51 @@ class TestIssue17NestedCliVerbs(unittest.TestCase):
 
     def test_helm_repo_list_safe(self):
         self.assertEqual(_Hook.decision_for("helm repo list"), "allow")
+
+
+class TestIssue27FindWriteFlags(unittest.TestCase):
+    """Repros from #27: `find` write-action flags that take a path
+    argument (`-fprint`, `-fprintf`, `-fls`, `-fls0`) classified `safe`
+    before this fix because their path argument bypassed the redirect-
+    based `safe_write_targets` check. After the fix the path argument
+    routes through the same allow list, so writes to `/tmp/...` stay
+    safe but writes to `/etc/profile` / `/var/log/...` ask."""
+
+    def test_fprint_to_etc_is_unsafe(self):
+        self.assertEqual(
+            _Hook.decision_for("find / -name '*' -fprint /etc/profile"),
+            "ask",
+        )
+
+    def test_fprint_to_tmp_is_safe(self):
+        self.assertEqual(
+            _Hook.decision_for("find / -fprint /tmp/list.txt"),
+            "allow",
+        )
+
+    def test_fprintf_to_etc_is_unsafe(self):
+        self.assertEqual(
+            _Hook.decision_for("find / -fprintf /etc/passwd '%p\\n'"),
+            "ask",
+        )
+
+    def test_fprintf_to_tmp_is_safe(self):
+        self.assertEqual(
+            _Hook.decision_for("find / -fprintf /tmp/list.txt '%p\\n'"),
+            "allow",
+        )
+
+    def test_fls_to_var_log_is_unsafe(self):
+        self.assertEqual(
+            _Hook.decision_for("find / -fls /var/log/x.log"),
+            "ask",
+        )
+
+    def test_fls0_to_tmp_is_safe(self):
+        self.assertEqual(
+            _Hook.decision_for("find / -fls0 /tmp/list.bin"),
+            "allow",
+        )
 
 
 if __name__ == "__main__":
