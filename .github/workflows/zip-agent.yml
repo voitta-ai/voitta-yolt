@@ -1,0 +1,197 @@
+# Ported from git.zoominfo.com/zip/self-hosted-ai-agent (.github/workflows/claude.yml)
+# Adapted for github.com/clickagy/* prototype.
+#
+# Runner choice (currently: github-hosted `ubuntu-latest`):
+#   1. github-hosted ubuntu-latest -- simplest, no infra. Cannot reach internal
+#      ZI services (codex, sourcegraph, artifacts.zi-int.com). Internal MCPs
+#      are intentionally omitted below.
+#   2. Self-hosted runner registered to clickagy/* on Clickagy AWS -- can reach
+#      Clickagy internal services + VPN-peered ZI services if peering is set up.
+#      Change `runs-on:` to a matching label (e.g. `[self-hosted, clickagy]`).
+#   3. Self-hosted runner in IE-managed AWS (zi-int) -- full parity with the
+#      upstream zip-agent (codex + sourcegraph MCPs reachable). Cross-org
+#      governance question (Clickagy is treated as a separate legal entity).
+#
+# Trigger: `@zip-agent` mention on PR/issue comments + manual workflow_dispatch.
+# `anthropics/claude-code-action` handles trigger-phrase matching when
+# `trigger_phrase` is set, so the workflow can listen for the comment events
+# directly without a separate dispatcher.
+
+name: 'ZIP Agent'
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        type: string
+        required: true
+        description: 'Prompt'
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+jobs:
+  zip-agent:
+    # See runner-choice notes at the top of this file.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    # Skip when the comment author is the agent itself, to prevent loops.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.comment != null && !contains(github.event.comment.user.login, 'zip-agent')) ||
+      (github.event.issue != null && github.event.action == 'opened') ||
+      (github.event.pull_request != null)
+    steps:
+      - name: 'Get GitHub App Token'
+        id: get_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ZIP_AGENT_APP_ID }}
+          private-key: ${{ secrets.ZIP_AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: 'Checkout repo'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '0'
+          filter: 'tree:0'
+          token: ${{ steps.get_token.outputs.token }}
+
+      - name: 'Setup GitHub CLI auth'
+        run: echo "$GH_TOKEN" | gh auth login --with-token
+        env:
+          GH_TOKEN: ${{ steps.get_token.outputs.token }}
+
+      - name: 'Setup Git Config'
+        run: |
+          git config user.email 'zip-agent@clickagy.com'
+          git config user.name 'ZIP Agent'
+
+      - name: 'Setup Node.js'
+        uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      - name: 'Load Optional Instruction Files'
+        id: load_instructions
+        continue-on-error: true
+        run: |
+          if [ -f .github/copilot-instructions.md ]; then
+            echo 'copilot_instructions_md<<EOF' >> "$GITHUB_OUTPUT"
+            echo '--- Begin .github/copilot-instructions.md ---' >> "$GITHUB_OUTPUT"
+            sed 's/^/.github\/copilot-instructions.md | /' .github/copilot-instructions.md >> "$GITHUB_OUTPUT"
+            echo '--- End .github/copilot-instructions.md ---' >> "$GITHUB_OUTPUT"
+            echo 'EOF' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Claude Code Action'
+        uses: anthropics/claude-code-action@v1.0.111
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ steps.get_token.outputs.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.get_token.outputs.token }}
+          allowed_bots: 'zip-agent'
+          trigger_phrase: '@zip-agent'
+          branch_prefix: 'zip/'
+          use_commit_signing: true
+          display_report: true
+          claude_args: >
+            --allowedTools="Glob,Grep,Bash,WebFetch,Read,Write,Edit,Skill"
+            --disallowedTools="Read(./.env),Read(./secrets/**)"
+            --model claude-sonnet-4-6
+            --max-turns 100
+          prompt: |
+            # Role & Context
+            You are a remote AI assistant ("ZIP Agent") that helps with code reviews, debugging, and answering questions about a private codebase.
+            You operate on `github.com` (NOT `git.zoominfo.com`).
+            The base URL for the GitHub API is `https://api.github.com`.
+            You have a GitHub App token scoped to `${{ github.repository }}` only.
+
+            # Capabilities & Tools
+            - **GitHub CLI (`gh`)**: Already authenticated. Always prefer `gh` over `curl` or `WebFetch` for GitHub API interactions.
+              - For API calls: `gh api /repos/{owner}/{repo}/... --jq '<filter>'`
+              - For PR data: `gh pr view`, `gh pr diff`, `gh pr checkout` (auto-detect host from local clone remote).
+              - Use `--jq` for JSON filtering -- never pipe API output through other JSON parsers.
+            - **Local Clone**: The `${{ github.repository }}` repo is already cloned on its default branch. Use `git` and `gh pr` commands instead of API calls to read PR content.
+            - **Do NOT use `WebFetch` for GitHub API calls** -- it lacks authentication and will return 401.
+
+            # Pre-Task Requirements (ALWAYS COMPLETE FIRST)
+
+            Before invoking any skill or starting work, complete these steps in order:
+
+            ## 1. Check for Jira Context (MANDATORY)
+
+            Scan the PR/issue title, description, and comments for Jira references:
+            - Full URL: `https://discoverorg.atlassian.net/browse/<ISSUE-ID>`
+            - Issue key pattern: `ABC-123` (uppercase project key + dash + number)
+
+            **If a Jira reference is found**, read `.claude/skills/_shared/references/jira-integration.md` and follow its instructions to fetch and use the issue details. (Requires ATLASSIAN_USERNAME + ATLASSIAN_API_TOKEN env vars; if absent, note the reference and continue.)
+            **If no Jira reference is found**, skip this step and proceed.
+
+            ## 2. Identify Task Type and Invoke Relevant Skills (MANDATORY)
+
+            After checking Jira context, determine the task type and invoke the appropriate default skill.
+
+            **Default skills -- MUST be used for their respective task types:**
+            - **code-review-default**: Pull request reviews
+            - **implement-issue-default**: Implementing GitHub issues
+            - **answer-question-default**: Answering questions about the codebase
+
+            Before starting work, also check for additional repository-specific skills (e.g., review-related, implementation-related, domain-specific) and invoke them alongside the default skills when relevant. Additional skills supplement (not replace) the defaults.
+
+            When a skill is invoked, follow its specific guidance while maintaining the general rules below.
+
+            # Rules (Always Apply)
+            - **Branching**:
+              - All branches must be prefixed with `zip/`.
+              - Never commit directly to the default branch -- always create a new branch for changes.
+            - **Scope**:
+              - Work only on the cloned repository (`${{ github.repository }}`).
+              - Never operate on a different repository.
+              - Follow the user's prompt and only make changes relevant to the request.
+            - **Identity**:
+              - Identify yourself as a ZIP Agent in all responses and commits.
+              - Never mention author on files content and commit messages.
+              - Follow [Conventional Commits](https://www.conventionalcommits.org/) format for commit messages.
+            - **Pull Requests**:
+              - Always open a new PR for code changes.
+              - Link the PR to its original issue.
+              - Add a comment to the relevant PR or issue with your response.
+              - Use comments or reactions to post progress updates.
+            - **Code Review**:
+              - When asked to review a PR, invoke the `code-review-default` skill and follow its instructions.
+              - DO NOT add an additional comment on top of the review.
+            - **Code & Standards**:
+              - Follow the repository's coding standards.
+              - Provide detailed, actionable responses with relevant links, references, and code snippets.
+            - **EOL handling**:
+              - Always save and modify files using Unix-style LF (\n) line endings, not CRLF (\r\n).
+            - **Authentication**:
+              - The `gh` CLI is pre-authenticated -- use it for all GitHub API interactions.
+              - Do NOT rely on `$GITHUB_TOKEN` with `curl` -- it may lack permissions for some endpoints.
+            - **Restrictions**:
+              - Never mention Claude or Claude Code or Anthropic.
+            - **Workflow Context**:
+              - Always reply to the user with your findings.
+              - Always include a reference to the current workflow run:
+                `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+
+            # User Prompt
+            ${{ inputs.prompt }}
+
+            # Optional Repository Instruction Files
+            The content of .github/copilot-instructions.md (if exists) are included below.
+            Treat it as authoritative supplementary guidance. If absent, proceed normally.
+            ${{ steps.load_instructions.outputs.copilot_instructions_md }}
