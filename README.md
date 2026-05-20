@@ -267,7 +267,9 @@ Example decisions (see `rules/shell.json` for the full rule set):
 | `aws logs start-query --log-group-name X --query-string ...` | allow (service override: `start-query` is read-only) |
 | `gh api /repos/x/y/issues`                                   | allow    |
 | `gh api -X POST /repos/x/y/issues`                           | ask      |
-| `gh pr list` / `gh pr merge`                                 | allow / ask |
+| `gh pr list` / `gh pr review`                                | allow / ask |
+| `gh pr create` / `gh pr comment` / `gh pr merge`             | allow (PR-author workflow; `gh pr review` stays ask) |
+| `gh issue create` / `gh issue comment` / `gh issue close`    | allow / allow / ask |
 | `curl https://api.example.com/users`                         | allow    |
 | `curl -X POST ... -d ...`                                    | ask      |
 | `kubectl get pods` / `kubectl exec -it pod -- bash`          | allow / ask |
