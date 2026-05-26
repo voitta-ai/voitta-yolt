@@ -90,11 +90,20 @@ the AST. Visitor dispatch:
 - `if_statement`, `for_statement`, `while_statement`, `case_statement`,
   `do_group` — recurse into bodies. No manual keyword stripping required;
   the grammar already separates control-flow tokens from commands.
-- `redirected_statement` — check redirect targets against the
-  `safe_write_targets` glob list in `rules/shell.json` (defaults
+- `redirected_statement` — check redirect targets against two glob
+  lists in `rules/shell.json`. The `unsafe_write_targets` deny list
+  (dotfiles / config / startup paths like `~/.bashrc`,
+  `~/.ssh/authorized_keys`, `/etc/*`) is checked first: a match
+  classifies `unsafe` (ask with a specific reason). It is checked
+  *before* `safe_write_targets`, so a deny entry overrides a broader
+  safe glob — `~/.claude/settings.json` is unsafe even though
+  `~/.claude/*` is a safe-write target, because settings.json can
+  disable this hook. The `safe_write_targets` white list (defaults
   include `/dev/null`, `/tmp/*`, `/var/folders/*`, `~/.cache/*`,
-  `~/.claude/*`, etc.). Anything not on the list falls through to
-  `unknown` so Claude Code default-prompts. For
+  `~/.claude/*`, etc.) makes a write benign. Anything on neither list
+  falls through to `unknown` so Claude Code default-prompts. The same
+  deny list also routes the write-target arguments of
+  `tee` / `cp` / `mv` / `install` / `dd` / `find -fprint*`. For
   `python3 << ... <<EOF` heredocs, the body goes to the Python
   analyzer.
 - `command_substitution` (`$(...)`, `` `...` ``) and `process_substitution`
@@ -287,7 +296,9 @@ Example decisions (see `rules/shell.json` for the full rule set):
 | `echo foo \| xargs rm` / `echo foo \| xargs cat`             | ask / allow |
 | `time aws ec2 describe-instances`                            | allow    |
 | `cat file > /tmp/out`                                        | allow (`/tmp/*` is on the safe-write list) |
-| `cat file > /etc/profile`                                    | unknown (writes to a system path) |
+| `echo x > /etc/profile` / `echo x > ~/.bashrc`               | ask (on the `unsafe_write_targets` deny list) |
+| `echo x > ~/.claude/settings.json`                           | ask (deny list overrides the `~/.claude/*` safe glob) |
+| `echo x > ~/.claude/cache.json`                              | allow (`~/.claude/*` safe-write; not on the deny list) |
 | `aws ec2 describe-instances > /dev/null`                     | allow    |
 | `sqlite3 db.sqlite "SELECT * FROM t"`                        | allow    |
 | `sqlite3 db.sqlite "DROP TABLE t"`                           | ask      |
@@ -446,6 +457,13 @@ name rather than guessed.
     "/scratch/*"
   ],
 
+  "unsafe_write_targets": [
+    "~/.bashrc",
+    "~/.ssh/authorized_keys",
+    "/etc/*",
+    "~/.claude/settings.json"
+  ],
+
   "interpreters": {
     "python3": {
       "inline_flag": "-c",
@@ -466,10 +484,11 @@ name rather than guessed.
 ```
 
 User overrides merge with (and override) defaults per top-level key, so
-overriding `safe_write_targets` replaces the entire list; if you want to
-add `/scratch/*` while keeping the defaults, copy the default list
-through. Examples: `examples/user-overrides.json`,
-`examples/shell-overrides.json`.
+overriding `safe_write_targets` or `unsafe_write_targets` replaces the
+entire list; if you want to add `/scratch/*` while keeping the defaults,
+copy the default list through. `unsafe_write_targets` is checked before
+`safe_write_targets`, so a deny entry wins over a broader safe glob.
+Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
 
 ## Debug / dogfood log
 
@@ -698,8 +717,10 @@ The tree-sitter-bash grammar walker handles:
 - command substitution (`$(...)`, `` `...` ``) and process
   substitution (`<(...)`) — recursed and classified independently of
   the outer command;
-- redirections — write targets matched against
-  `safe_write_targets`; non-matching writes fall to `unknown`;
+- redirections — write targets matched against the
+  `unsafe_write_targets` deny list (match -> `unsafe`) first, then the
+  `safe_write_targets` white list (match -> benign); a target on
+  neither falls to `unknown`;
 - heredocs — for the Python interpreters, the body is delegated;
 - pre-command env assignments (`FOO=bar baz`) — skipped, not folded
   into argv.
@@ -803,7 +824,8 @@ this path:
 - max recursion depth on nested decomposition;
 - unknown command name;
 - partially-modeled CLI namespace with a verb outside the policy;
-- write redirect to a path not on `safe_write_targets`;
+- write redirect to a path on neither `unsafe_write_targets` (which
+  classifies `unsafe`) nor `safe_write_targets` (which is benign);
 - SQL string the conservative scanner cannot classify as read-only;
 - Python source the AST delegate fails to parse;
 - `rules/shell.json` failing schema validation — the hook logs

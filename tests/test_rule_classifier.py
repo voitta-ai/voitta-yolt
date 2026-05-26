@@ -181,6 +181,94 @@ class TestCheckUnsafeFlags(unittest.TestCase):
         ))
 
 
+class TestUnsafeWriteTargetArgs(unittest.TestCase):
+    """Deny-list routing of write-target arguments (issue #28).
+
+    `unsafe_write_targets` upgrades the *reason* for a protected-path
+    write. The flag-value path is checked deny-first (before the safe
+    white list); positional and `value=` prefix targets consult only the
+    deny list, since the commands carrying them are already
+    `default: unsafe`."""
+
+    DENY = ["~/.bashrc", "~/.ssh/id_*", "/etc/*"]
+
+    def test_flag_value_deny_takes_priority_over_safe(self):
+        # A deny match wins even if the same path were on the safe list.
+        spec = {"write_flag_value_targets": ["-t"]}
+        result = check_unsafe_flags(
+            ["-t", "/etc/foo"], spec,
+            safe_write_targets=["/etc/*"],
+            unsafe_write_targets=self.DENY,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("/etc/foo", result)
+        self.assertIn("protected path", result)
+
+    def test_flag_value_non_deny_falls_through_to_safe_check(self):
+        # Not on the deny list and on the safe list -> not flagged here.
+        spec = {"write_flag_value_targets": ["-t"]}
+        self.assertIsNone(check_unsafe_flags(
+            ["-t", "/tmp/x"], spec,
+            safe_write_targets=["/tmp/*"],
+            unsafe_write_targets=self.DENY,
+        ))
+
+    def test_value_prefix_target_deny(self):
+        # dd of=PATH.
+        spec = {"write_value_prefix_targets": ["of="]}
+        result = check_unsafe_flags(
+            ["if=/dev/zero", "of=~/.ssh/id_rsa"], spec,
+            unsafe_write_targets=self.DENY,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("~/.ssh/id_rsa", result)
+
+    def test_value_prefix_read_source_not_flagged(self):
+        # if= is the read source; only of= is a write target.
+        spec = {"write_value_prefix_targets": ["of="]}
+        self.assertIsNone(check_unsafe_flags(
+            ["if=~/.bashrc", "of=/var/data"], spec,
+            unsafe_write_targets=self.DENY,
+        ))
+
+    def test_last_positional_deny(self):
+        # cp SRC DST -> DST is the last positional.
+        spec = {"write_target_last_positional": True}
+        result = check_unsafe_flags(
+            ["a", "/etc/cron.d/job"], spec,
+            unsafe_write_targets=self.DENY,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("/etc/cron.d/job", result)
+
+    def test_last_positional_source_not_flagged(self):
+        # Reading a deny path while writing a benign dest is not flagged
+        # by the deny scan (cp ~/.bashrc /tmp/x).
+        spec = {"write_target_last_positional": True}
+        self.assertIsNone(check_unsafe_flags(
+            ["~/.bashrc", "/tmp/x"], spec,
+            unsafe_write_targets=self.DENY,
+        ))
+
+    def test_all_positional_deny_any_match(self):
+        # tee FILE... -> every positional is a write target.
+        spec = {"write_target_all_positional": True}
+        result = check_unsafe_flags(
+            ["-a", "/tmp/log", "~/.bashrc"], spec,
+            unsafe_write_targets=self.DENY,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("~/.bashrc", result)
+
+    def test_no_deny_list_is_noop(self):
+        # Without a deny list the new scan does nothing (the command
+        # default still applies upstream).
+        spec = {"write_target_last_positional": True}
+        self.assertIsNone(check_unsafe_flags(
+            ["a", "/etc/cron.d/job"], spec, unsafe_write_targets=None,
+        ))
+
+
 class TestParseAwsPositionals(unittest.TestCase):
     def test_simple(self):
         svc, op, _ = parse_aws_positionals(["ec2", "describe-instances"])

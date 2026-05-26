@@ -39,6 +39,36 @@
     "~/.claude/*"
   ],
 
+  "_unsafe_write_targets_note": "Write targets dangerous enough to classify 'unsafe' (ask with a specific reason) rather than 'unknown' (contextless default prompt). Checked BEFORE safe_write_targets, so an entry here overrides a broader safe glob -- e.g. '~/.claude/settings.json' is unsafe even though '~/.claude/*' is a safe-write target, because settings.json can disable this hook. Applies to redirect targets and to the write-target arguments of tee/cp/mv/install/dd/find. Glob semantics are fnmatch; '~/' is expanded before matching.",
+  "unsafe_write_targets": [
+    "~/.bashrc",
+    "~/.zshrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "~/.bash_logout",
+    "~/.ssh/authorized_keys",
+    "~/.ssh/config",
+    "~/.ssh/id_*",
+    "~/.ssh/known_hosts",
+    "~/.aws/credentials",
+    "~/.aws/config",
+    "~/.gitconfig",
+    "~/.git-credentials",
+    "~/.npmrc",
+    "~/.pypirc",
+    "~/.netrc",
+    "~/Library/LaunchAgents/*",
+    "/Library/LaunchDaemons/*",
+    "~/.config/systemd/user/*",
+    "/etc/systemd/system/*",
+    "/etc/cron.*",
+    "/var/spool/cron/*",
+    "/etc/*",
+    "/usr/local/etc/*",
+    "~/.claude/settings.json",
+    "~/.claude/settings.local.json"
+  ],
+
   "interpreters": {
     "python3": {
       "inline_flag": "-c",
@@ -184,20 +214,21 @@
 
     "tee": {
       "default": "unsafe",
-      "_note": "tee writes to one or more files. Always mutating."
+      "write_target_all_positional": true,
+      "_note": "tee writes to one or more files. Always mutating. Every positional arg is a write target, routed through unsafe_write_targets for a specific reason."
     },
     "rm":     {"default": "unsafe"},
     "rmdir":  {"default": "unsafe"},
-    "mv":     {"default": "unsafe"},
-    "cp":     {"default": "unsafe"},
+    "mv":     {"default": "unsafe", "write_target_last_positional": true},
+    "cp":     {"default": "unsafe", "write_target_last_positional": true},
     "ln":     {"default": "unsafe"},
     "touch":  {"default": "unsafe"},
     "mkdir":  {"default": "unsafe"},
     "chmod":  {"default": "unsafe"},
     "chown":  {"default": "unsafe"},
     "chgrp":  {"default": "unsafe"},
-    "install":{"default": "unsafe"},
-    "dd":     {"default": "unsafe"},
+    "install":{"default": "unsafe", "write_flag_value_targets": ["-t", "--target-directory"]},
+    "dd":     {"default": "unsafe", "write_value_prefix_targets": ["of="]},
     "shred":  {"default": "unsafe"},
     "sudo":   {"default": "unsafe"},
     "su":     {"default": "unsafe"},

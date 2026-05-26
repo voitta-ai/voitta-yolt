@@ -30,6 +30,12 @@ Catalogue layout:
   -fls0 FILE` repros (closes #27). Path argument was unchecked, so
   writes outside `safe_write_targets` classified safe. The fix
   routes the path through the same white list redirects use.
+- `TestIssue28UnsafeWriteTargets` -- redirect / command writes to
+  dotfile / config / startup paths (closes #28). The headline repro
+  is `echo pwn > ~/.claude/settings.json`, which classified `allow`
+  before the fix because `~/.claude/*` is a safe-write target even
+  though settings.json can disable this hook. The deny list is
+  checked before the safe list, so it now asks.
 
 Run with:
 
@@ -335,6 +341,71 @@ class TestIssue27FindWriteFlags(unittest.TestCase):
     def test_fls0_to_tmp_is_safe(self):
         self.assertEqual(
             _Hook.decision_for("find / -fls0 /tmp/list.bin"),
+            "allow",
+        )
+
+
+class TestIssue28UnsafeWriteTargets(unittest.TestCase):
+    """Repros from #28: writes to dotfile / config / startup paths.
+
+    Before the fix a redirect to such a path classified `unknown` (the
+    hook stayed silent, deferring to the default prompt) and -- worse --
+    `~/.claude/settings.json` classified `allow`, because `~/.claude/*`
+    is a safe-write target even though settings.json can disable the
+    hook. After the fix the `unsafe_write_targets` deny list is consulted
+    before the safe list, so these ask with a specific reason."""
+
+    def test_settings_json_no_longer_auto_allowed(self):
+        # The headline hole: a safe-write glob auto-allowed a write that
+        # can neuter the hook. Must ask now.
+        self.assertEqual(
+            _Hook.decision_for("echo pwn > ~/.claude/settings.json"),
+            "ask",
+        )
+
+    def test_settings_local_json_no_longer_auto_allowed(self):
+        self.assertEqual(
+            _Hook.decision_for("echo pwn > ~/.claude/settings.local.json"),
+            "ask",
+        )
+
+    def test_other_claude_path_still_allowed(self):
+        # The carve-out is settings.json only; the rest of ~/.claude/*
+        # stays a safe-write target so legitimate cache writes don't ask.
+        self.assertEqual(
+            _Hook.decision_for("echo x > ~/.claude/cache.json"),
+            "allow",
+        )
+
+    def test_redirect_to_bashrc_asks(self):
+        # Was `unknown` (silent) before #28.
+        self.assertEqual(
+            _Hook.decision_for("echo x > ~/.bashrc"),
+            "ask",
+        )
+
+    def test_append_to_authorized_keys_asks(self):
+        self.assertEqual(
+            _Hook.decision_for("echo pubkey >> ~/.ssh/authorized_keys"),
+            "ask",
+        )
+
+    def test_cp_to_cron_dir_asks(self):
+        self.assertEqual(
+            _Hook.decision_for("cp payload /etc/cron.d/job"),
+            "ask",
+        )
+
+    def test_dd_of_ssh_key_asks(self):
+        self.assertEqual(
+            _Hook.decision_for("dd if=/dev/zero of=~/.ssh/id_rsa"),
+            "ask",
+        )
+
+    def test_redirect_to_tmp_still_allowed(self):
+        # Control: a benign temp write is unaffected.
+        self.assertEqual(
+            _Hook.decision_for("echo x > /tmp/scratch.txt"),
             "allow",
         )
 
