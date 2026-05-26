@@ -386,7 +386,20 @@ class GrammarClassifier:
         if remote != "origin":
             return None
 
-        branch_pat = "feature/*" if branch.startswith("feature/") else branch
+        # Mapped push (`git push origin <local>:<remote>`) carries the
+        # full `local:remote` refspec in `branch`. Generalize only the
+        # remote side to `feature/*` so the hint covers the branch family,
+        # not a single literal pair. See issue #37.
+        if ":" in branch:
+            local, remote_ref = branch.split(":", 1)
+            if remote_ref.startswith("feature/"):
+                branch_pat = "{}:feature/*".format(local)
+            else:
+                branch_pat = "{}:{}".format(local, remote_ref)
+        elif branch.startswith("feature/"):
+            branch_pat = "feature/*"
+        else:
+            branch_pat = branch
         hint.extend([remote, branch_pat])
         return "Bash({})".format(" ".join(hint))
 
@@ -398,8 +411,9 @@ class GrammarClassifier:
         namespace = argv[1]
         action = argv[2]
         allowed = {
-            "pr": {"create", "comment", "edit", "merge", "ready"},
-            "issue": {"create", "comment", "edit"},
+            "pr": {"create", "comment", "edit", "merge", "ready",
+                   "review", "update-branch"},
+            "issue": {"create", "comment", "edit", "close", "reopen"},
         }
         if action in allowed.get(namespace, set()):
             return "Bash(gh {} {}*)".format(namespace, action)

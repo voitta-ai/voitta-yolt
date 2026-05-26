@@ -35,6 +35,17 @@ DECISION_UNKNOWN = "unknown"
 
 SUBSTITUTION_PLACEHOLDER = "__YOLT_SUB__"
 
+# Reason marker for an inline `python3 -c` script the static analyzer could
+# not parse. A parse bail is not evidence of a destructive call, so
+# format_unsafe_reason() (yolt_analyzer) keys on this prefix to render a
+# dedicated message instead of the standard "mutating command" envelope.
+# Only the `-c` path uses it; `python3 file.py` parse errors keep the
+# SyntaxError reason because there the broken file is the real problem.
+# See issue #37.
+UNANALYZABLE_INLINE_PYTHON_PREFIX = (
+    "could not statically analyze inline python3 -c script"
+)
+
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASH_PATTERN_RE = re.compile(r"^Bash\((.*)\)$")
 
@@ -695,7 +706,8 @@ class RuleClassifier:
         if inline_code is not None:
             if delegate == "python":
                 return self.classify_python_source(
-                    inline_code, "{} {} ...".format(name, inline_flag)
+                    inline_code, "{} {} ...".format(name, inline_flag),
+                    inline=True,
                 )
             if delegate == "bash":
                 if self.bash_analyzer is None:
@@ -784,13 +796,19 @@ class RuleClassifier:
 
         return (DECISION_UNKNOWN, "{} {}: no rule".format(label, sub))
 
-    def classify_python_source(self, source, description):
+    def classify_python_source(self, source, description, inline=False):
         if self.python_analyzer_factory is None:
             return (DECISION_UNKNOWN, "python analyzer unavailable")
         analyzer = self.python_analyzer_factory()
         result = analyzer.analyze(source)
         if result.get("safe"):
             return (DECISION_SAFE, "python: {}".format(description))
+        if inline and result.get("parse_error"):
+            reason = "{} (parser bailed at line {})".format(
+                UNANALYZABLE_INLINE_PYTHON_PREFIX,
+                result.get("parse_error_lineno", "?"),
+            )
+            return (DECISION_UNSAFE, reason)
         return (DECISION_UNSAFE, "python {}: {}".format(
             description, result.get("reason", "destructive call")
         ))

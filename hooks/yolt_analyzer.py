@@ -691,9 +691,15 @@ class SafetyAnalyzer(ast.NodeVisitor):
         try:
             tree = ast.parse(source)
         except SyntaxError as e:
+            # `parse_error` lets inline `python3 -c` callers tell a parse
+            # bail apart from a real destructive finding (issue #37). The
+            # SyntaxError reason is kept for the `python3 file.py` path,
+            # where a genuine syntax error in the file is the real problem.
             retval = {
                 "safe": False,
                 "reason": "SyntaxError: {}".format(e),
+                "parse_error": True,
+                "parse_error_lineno": e.lineno,
                 "findings": [],
             }
             return retval
@@ -837,7 +843,24 @@ def make_hook_response(decision, reason=None):
 
 
 def format_unsafe_reason(reason, allow_hint=None):
-    message = "YOLT: Mutating command detected:\n  {}".format(reason)
+    from rule_classifier import UNANALYZABLE_INLINE_PYTHON_PREFIX
+
+    # `"; " not in reason` keeps this to single-command reasons. A compound
+    # (aggregate_decisions joins siblings with "; ") falls back to the full
+    # envelope so a destructive sibling's reason is never swallowed.
+    if "; " not in reason and reason.startswith(UNANALYZABLE_INLINE_PYTHON_PREFIX):
+        # Inline `python3 -c` script the analyzer could not parse. Don't
+        # call it "mutating" — it may be valid; YOLT just can't inspect a
+        # one-line multi-statement string. Point the user at a file-based
+        # form the analyzer can read. See issue #37.
+        detail = reason[len(UNANALYZABLE_INLINE_PYTHON_PREFIX):].strip()
+        message = (
+            "YOLT: Could not statically analyze inline python3 -c script\n"
+            "  {}. Write the script to a file under /tmp/\n"
+            "  and run `python3 /tmp/<name>.py` instead.".format(detail)
+        )
+    else:
+        message = "YOLT: Mutating command detected:\n  {}".format(reason)
     if allow_hint:
         message += (
             "\n\nTo skip this prompt in future, add to "
