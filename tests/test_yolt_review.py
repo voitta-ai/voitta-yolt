@@ -37,6 +37,7 @@ from yolt_review import (  # noqa: E402
     annotate_glob_collisions,
     build_groups,
     build_ran_index,
+    correlate_approvals,
     group_key,
     is_compound,
     load_state,
@@ -44,7 +45,6 @@ from yolt_review import (  # noqa: E402
     redact_command,
     split_tokens,
     suggestion_id,
-    was_approved,
 )
 
 
@@ -166,6 +166,22 @@ class TestGlobCollisionGate(unittest.TestCase):
         annotate_glob_collisions(suggestion, set())
         self.assertEqual(suggestion["glob_collisions"], [])
 
+    def test_own_group_commands_do_not_self_collide(self):
+        # A friction suggestion's own examples are in the nonsafe set; the
+        # glob trivially matches them. They must not count as collisions.
+        suggestion = {"prefix": "kubectl get pods"}
+        annotate_glob_collisions(suggestion, {"kubectl get pods foo"},
+                                 own_commands={"kubectl get pods foo"})
+        self.assertEqual(suggestion["glob_collisions"], [])
+
+    def test_distinct_command_still_collides_despite_own(self):
+        # Excluding own commands must not hide a genuinely different
+        # non-safe command the glob would sweep in.
+        suggestion = {"prefix": "foo"}
+        annotate_glob_collisions(suggestion, {"foo", "foo bar baz"},
+                                 own_commands={"foo"})
+        self.assertEqual(suggestion["glob_collisions"], ["foo bar baz"])
+
     def test_collisions_are_capped(self):
         suggestion = {"prefix": "gh api"}
         nonsafe = {"gh api -X POST /{}".format(i) for i in range(10)}
@@ -193,21 +209,51 @@ class TestApprovalCorrelation(unittest.TestCase):
         index = build_ran_index(records)
         self.assertEqual(list(index.keys()), ["ok"])
 
-    def test_ran_after_decision_counts_as_approved(self):
-        index = {"git push": [_ts(11)]}
-        self.assertTrue(was_approved(_ts(10), "git push", index))
+    def test_one_ran_record_approves_only_one_prompt(self):
+        # Regression (PR #47 review): two prompts for the same command, a
+        # single later ran-record. Exactly one prompt is approved, not
+        # both -- a lone PostToolUse event cannot credit every prior ask.
+        records = [_rec("unsafe", "git push", _ts(10)),
+                   _rec("unsafe", "git push", _ts(20))]
+        ran_index = build_ran_index(
+            [{"command": "git push", "ts": _ts(21).isoformat()}])
+        approved = correlate_approvals(records, ran_index)
+        self.assertEqual(len(approved), 1)
 
-    def test_ran_within_skew_before_decision_counts_as_approved(self):
-        # cutoff = decision - 5s; a ran 3s earlier still correlates.
-        index = {"git push": [_ts(7)]}
-        self.assertTrue(was_approved(_ts(10), "git push", index))
+    def test_a_ran_per_prompt_approves_each(self):
+        records = [_rec("unsafe", "git push", _ts(10)),
+                   _rec("unsafe", "git push", _ts(20))]
+        ran_index = build_ran_index([
+            {"command": "git push", "ts": _ts(11).isoformat()},
+            {"command": "git push", "ts": _ts(21).isoformat()},
+        ])
+        approved = correlate_approvals(records, ran_index)
+        self.assertEqual(approved, {0, 1})
 
-    def test_ran_well_before_decision_is_not_approved(self):
-        index = {"git push": [_ts(1)]}
-        self.assertFalse(was_approved(_ts(10), "git push", index))
+    def test_ran_within_skew_before_prompt_counts(self):
+        # cutoff = prompt - 5s; a ran 3s earlier still correlates.
+        records = [_rec("unknown", "git push", _ts(10))]
+        ran_index = build_ran_index(
+            [{"command": "git push", "ts": _ts(7).isoformat()}])
+        self.assertEqual(correlate_approvals(records, ran_index), {0})
+
+    def test_ran_well_before_prompt_is_not_approved(self):
+        records = [_rec("unsafe", "git push", _ts(10))]
+        ran_index = build_ran_index(
+            [{"command": "git push", "ts": _ts(1).isoformat()}])
+        self.assertEqual(correlate_approvals(records, ran_index), set())
 
     def test_no_ran_record_is_not_approved(self):
-        self.assertFalse(was_approved(_ts(10), "git push", {}))
+        records = [_rec("unsafe", "git push", _ts(10))]
+        self.assertEqual(correlate_approvals(records, {}), set())
+
+    def test_safe_records_are_never_approval_candidates(self):
+        # `safe` is auto-allowed (no prompt); its ran-record must not be
+        # mistaken for prompt approval.
+        records = [_rec("safe", "ls here", _ts(10))]
+        ran_index = build_ran_index(
+            [{"command": "ls here", "ts": _ts(11).isoformat()}])
+        self.assertEqual(correlate_approvals(records, ran_index), set())
 
 
 class TestBuildGroups(unittest.TestCase):
@@ -274,6 +320,17 @@ class TestBuildGroups(unittest.TestCase):
         self.assertEqual(fastpath[0]["prefix"], "gh api")
         self.assertIn("gh api -X POST /repos/x",
                       fastpath[0]["glob_collisions"])
+
+    def test_friction_unknown_readonly_does_not_self_collide(self):
+        # Regression (PR #47 review): a repeated read-only `unknown`
+        # command must keep its settings.json route. Its examples are in
+        # the nonsafe set, but they are this group's own commands, so the
+        # glob must not veto itself.
+        records = [_rec("unknown", "kubectl get pods foo", _ts(i))
+                   for i in range(3)]
+        suggestions, _ = self._build(records)
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["glob_collisions"], [])
 
     def test_compound_friction_is_counted_not_suggested(self):
         records = [_rec("unsafe", "cat x | grep y", _ts(i)) for i in range(3)]

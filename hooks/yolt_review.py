@@ -285,28 +285,59 @@ def build_ran_index(ran_records):
     return retval
 
 
-def was_approved(record_ts, command, ran_index):
-    """A ran-record at/after the decision timestamp means the user said
-    yes at the prompt (a denied command never reaches PostToolUse)."""
-    retval = False
-    timestamps = ran_index.get(command)
-    if timestamps and record_ts is not None:
-        skew = datetime.timedelta(seconds=RAN_MATCH_SKEW_SECONDS)
-        cutoff = record_ts - skew
-        for ts in timestamps:
-            # Compare only tz-aware with tz-aware; log writers always
-            # stamp UTC, but guard against hand-edited lines.
-            if (ts.tzinfo is None) != (cutoff.tzinfo is None):
-                continue
-            if ts >= cutoff:
-                retval = True
-                break
-    return retval
+def correlate_approvals(records, ran_index):
+    """Match friction prompt-records to ran-records one-to-one, per command.
+
+    A command YOLT returned `ask`/`unknown` on only reaches PostToolUse
+    (and thus the ran log) if the user approved it at the prompt. But a
+    single ran-record must not credit more than one prompt: with prompts
+    at t10 and t20 and a lone ran at t21, only one prompt was actually
+    approved. So for each command we walk its prompts in time order and
+    consume the earliest still-unclaimed ran-record at/after
+    (prompt_ts - skew); each ran-record satisfies at most one prompt.
+
+    Returns the set of record indices (into `records`) that were
+    approved."""
+    by_command = {}
+    for index, record in enumerate(records):
+        if record.get("decision") not in ("unsafe", "unknown"):
+            continue
+        command = (record.get("command") or "").strip()
+        ts = parse_ts(record.get("ts"))
+        if not command or ts is None:
+            continue
+        by_command.setdefault(command, []).append((ts, index))
+
+    skew = datetime.timedelta(seconds=RAN_MATCH_SKEW_SECONDS)
+    approved = set()
+    for command, prompts in by_command.items():
+        rans = ran_index.get(command)
+        if not rans:
+            continue
+        prompts.sort(key=lambda p: p[0])
+        ran_pos = 0
+        count = len(rans)
+        for prompt_ts, index in prompts:
+            cutoff = prompt_ts - skew
+            # Advance past ran-records that cannot satisfy this prompt:
+            # already too early, or tz-incomparable (hand-edited lines).
+            # The tz check short-circuits before the order comparison so
+            # aware/naive values are never compared.
+            while ran_pos < count and (
+                (rans[ran_pos].tzinfo is None) != (cutoff.tzinfo is None)
+                or rans[ran_pos] < cutoff
+            ):
+                ran_pos += 1
+            if ran_pos < count:
+                approved.add(index)
+                ran_pos += 1
+    return approved
 
 
-def annotate_glob_collisions(suggestion, nonsafe_commands):
+def annotate_glob_collisions(suggestion, nonsafe_commands, own_commands=None):
     """Record any known-unsafe/unknown command that the suggestion's
-    `Bash(prefix*)` glob would ALSO match.
+    `Bash(prefix*)` glob would ALSO match -- excluding the suggestion's
+    own group commands.
 
     This is the safety gate for fast-path suggestions: `gh api` is
     read-only but `gh api -X POST` is not, and both match `gh api*`.
@@ -315,10 +346,21 @@ def annotate_glob_collisions(suggestion, nonsafe_commands):
     Matching uses fnmatch against the real glob, so the warning reflects
     exactly what Claude Code's matcher would allow. `gh pr view*` does
     NOT collide with `gh pr merge`, so partially-overlapping namespaces
-    stay suggestable."""
+    stay suggestable.
+
+    `own_commands` are the (stripped) commands that formed THIS group; a
+    friction suggestion's own examples live in `nonsafe_commands`, and a
+    glob trivially matches the very commands it was derived from. Counting
+    those as collisions would veto every `friction-unsafe` /
+    `friction-unknown` suggestion against itself, so they are excluded:
+    only a genuinely different non-safe command swept in by the glob is a
+    collision."""
+    own = own_commands or set()
     pattern = suggestion["prefix"] + "*"
     collisions = []
     for command in nonsafe_commands:
+        if command in own:
+            continue
         if fnmatch(command, pattern):
             collisions.append(command[:MAX_EXAMPLE_CHARS])
             if len(collisions) >= MAX_EXAMPLES:
@@ -348,7 +390,8 @@ def build_groups(records, ran_index, min_fires, min_fires_safe):
         "first_ts": None,
         "last_ts": None,
     }
-    for record in records:
+    approved_indices = correlate_approvals(records, ran_index)
+    for index, record in enumerate(records):
         decision = record.get("decision")
         command = record.get("command") or ""
         ts = parse_ts(record.get("ts"))
@@ -382,9 +425,11 @@ def build_groups(records, ran_index, min_fires, min_fires_safe):
                 "last_ts": None,
                 "examples": [],
                 "reasons": {},
+                "commands": set(),
             }
             groups[key] = group
         group["fires"] += 1
+        group["commands"].add(command.strip())
         if ts is not None:
             if group["first_ts"] is None or ts < group["first_ts"]:
                 group["first_ts"] = ts
@@ -393,9 +438,8 @@ def build_groups(records, ran_index, min_fires, min_fires_safe):
         reason = record.get("reason") or ""
         if reason:
             group["reasons"][reason] = group["reasons"].get(reason, 0) + 1
-        if kind in (KIND_UNSAFE, KIND_UNKNOWN):
-            if was_approved(ts, command, ran_index):
-                group["approved"] += 1
+        if index in approved_indices:
+            group["approved"] += 1
         example = command[:MAX_EXAMPLE_CHARS]
         if example not in group["examples"] and len(group["examples"]) < MAX_EXAMPLES:
             group["examples"].append(example)
@@ -426,7 +470,8 @@ def build_groups(records, ran_index, min_fires, min_fires_safe):
             "glob_collisions": [],
             "status": "pending",
         }
-        annotate_glob_collisions(suggestion, nonsafe_commands)
+        annotate_glob_collisions(suggestion, nonsafe_commands,
+                                 own_commands=group["commands"])
         suggestions.append(suggestion)
 
     suggestions.sort(key=lambda s: (KINDS.index(s["kind"]), -s["fires"], s["prefix"]))
