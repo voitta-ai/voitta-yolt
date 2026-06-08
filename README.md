@@ -25,6 +25,7 @@
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
   - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
 - [Debug / dogfood log](#debug--dogfood-log)
+- [Self-improvement loop](#self-improvement-loop)
 - [CLI usage](#cli-usage)
 - [Tests and demo](#tests-and-demo)
 - [Analysis boundaries](#analysis-boundaries)
@@ -502,6 +503,105 @@ YOLT rotates the log when it grows past 5 MB by renaming it to
 `<log>.old`, clobbering any previous `.old`. One generation is
 preserved. `YOLT_LOG_MAX_BYTES` overrides the threshold; set
 `YOLT_LOG_MAX_BYTES=0` to disable rotation.
+
+## Self-improvement loop
+
+The dogfood log is also a record of where YOLT got in your way. The
+reviewer (`hooks/yolt_review.py`, issue
+[#44](https://github.com/voitta-ai/voitta-yolt/issues/44)) mines that log
+for recurring friction and distills it into a human-reviewable doc plus a
+suggestion state file under `~/.claude/yolt/`:
+
+- `~/.claude/yolt/review.md` — the doc you read.
+- `~/.claude/yolt/suggestions.json` — suggestion ids with
+  pending / applied / dismissed status that survives regeneration.
+
+Repeated commands are grouped to a conservative prefix (argv head plus
+subcommand tokens — no flags, no values, no paths) and sorted into three
+buckets:
+
+- **`friction-unsafe`** — YOLT returned `ask` on this prefix repeatedly.
+- **`friction-unknown`** — the command fell through to Claude Code's
+  default prompt repeatedly (a rules gap, or a personal/internal CLI).
+- **`fastpath`** — YOLT auto-allowed this prefix at high frequency; a
+  static `permissions.allow` glob would skip the hook startup entirely
+  (a static allow rule
+  [bypasses PreToolUse hooks](#install) natively).
+
+Grouping is stdlib-only and deliberately does not depend on tree-sitter,
+so the reviewer still works when the grammar deps failed to bootstrap.
+Compound commands (pipes, substitutions, loops) are counted but never
+turned into suggestions — a prefix glob cannot express them; rules and
+user overrides handle those (issue
+[#45](https://github.com/voitta-ai/voitta-yolt/issues/45)).
+
+### Did you approve, or did YOLT?
+
+A second log, `~/.claude/yolt-ran.log`, is written by a PostToolUse hook:
+one record per Bash command that actually ran. A command that YOLT said
+`ask` on only reaches PostToolUse if you approved it at the prompt (a
+denied command never runs). The reviewer correlates the two logs by
+timestamp, so each `friction-unsafe` suggestion carries an `approved`
+count — high `approved` is real friction worth acting on; `approved` 0
+means YOLT is very likely doing its job. Override with `YOLT_RAN_LOG_FILE`
+(absolute path) or opt out with `YOLT_RAN_LOG_FILE=""`.
+
+### Routing — and the collision veto
+
+Each suggestion routes to exactly one of three remediations:
+
+- **`settings.json` allow** — for a prefix that is read-only regardless
+  of flags. Fastest, but a static allow rule bypasses YOLT's hook
+  entirely (including its redirect and command-substitution checks).
+- **Local override** — a `~/.claude/yolt/shell.json` rule for anything
+  flag-conditional or verb-class, keeping the AST walk in the loop
+  (generating these directly is issue
+  [#45](https://github.com/voitta-ai/voitta-yolt/issues/45)).
+- **Upstream issue** — a common CLI repeatedly hitting `unknown` is
+  likely a rules gap worth reporting on voitta-ai/voitta-yolt.
+
+The safety-critical part is the **glob-collision veto**: a `fastpath`
+prefix like `gh api` is read-only, but `gh api -X POST` is not, and both
+match `Bash(gh api*)`. Promoting that glob to `permissions.allow` would
+silently bypass YOLT for the POST too. Before recommending any
+`settings.json` glob, the reviewer fnmatches it against every command
+YOLT did *not* classify safe; any hit is recorded as a collision and the
+suggestion is re-routed to a `shell.json` rule instead, never the
+allowlist. Partially-overlapping namespaces stay suggestable —
+`gh pr view*` does not collide with `gh pr merge`.
+
+Only the redacted `shape` field (argv head plus flag names, every value
+stripped to `<...>`) may leave the machine in an upstream issue. The
+`examples` lines are raw log data and stay local.
+
+### Surfacing and applying
+
+- **`/yolt:review`** — the slash command that walks you through pending
+  suggestions, honors the routing above, edits `settings.json` /
+  `shell.json` with your confirmation, and records each as applied or
+  dismissed.
+- **SessionStart** prints a one-line nudge toward `/yolt:review` when
+  there are pending suggestions, throttled to once per 24h. It reads only
+  the small state file — it never parses the decision log.
+- **SessionEnd** regenerates the doc with `--generate --if-stale`: a
+  no-op (just an mtime check) when the log has not changed since the last
+  run, so quiet sessions cost almost nothing.
+
+Run it by hand the same way the hooks do:
+
+```bash
+python3 hooks/yolt_review.py --generate   # parse logs, write doc + state
+python3 hooks/yolt_review.py --status     # {"pending": N, ...}
+python3 hooks/yolt_review.py --list       # full suggestion JSON
+python3 hooks/yolt_review.py --applied <id> [<id> ...]
+python3 hooks/yolt_review.py --dismiss <id> [<id> ...]
+```
+
+Override the state directory with `YOLT_STATE_DIR`. The reviewer is
+read-mostly: it only ever writes its own files under `~/.claude/yolt/`;
+all edits to `settings.json` and override files go through you. A Codex
+CLI parity loop is tracked in issue
+[#46](https://github.com/voitta-ai/voitta-yolt/issues/46).
 
 ## CLI usage
 

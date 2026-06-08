@@ -848,6 +848,7 @@ def format_unsafe_reason(reason, allow_hint=None):
 
 
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
+DEFAULT_RAN_LOG_PATH = Path.home() / ".claude" / "yolt-ran.log"
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
@@ -935,6 +936,74 @@ def _log_hook_decision(command, decision, reason):
             f.write(json.dumps(record) + "\n")
     except OSError:
         pass
+
+
+def _resolve_ran_log_path():
+    """Resolve the ran-record log destination.
+
+    - `YOLT_RAN_LOG_FILE` unset -> default to ~/.claude/yolt-ran.log.
+    - `YOLT_RAN_LOG_FILE` set to an empty string -> opt out, no logging.
+    - Otherwise -> the path the user specified.
+
+    The ran log is written by the PostToolUse hook and records which
+    commands actually executed. A ran-record for a command YOLT decided
+    `ask`/`unknown` on means the user approved it at the prompt (a denied
+    command never reaches PostToolUse), which is the signal the
+    self-improvement reviewer (yolt_review.py, issue #44) uses to rank
+    friction.
+    """
+    env_value = os.environ.get("YOLT_RAN_LOG_FILE")
+    if env_value is None:
+        return DEFAULT_RAN_LOG_PATH
+    if env_value == "":
+        return None
+    return Path(env_value)
+
+
+def _log_ran_command(command):
+    """Append a JSON-line ran-record to the resolved ran-log path. Shares
+    the size-based rotation and failure-swallowing conventions of
+    `_log_hook_decision`. The command is truncated to 500 chars.
+    """
+    log_path = _resolve_ran_log_path()
+    if log_path is None:
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _maybe_rotate_log(log_path, _resolve_log_max_bytes())
+        record = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "command": command[:500] if command else "",
+        }
+        with open(log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
+def run_ran_hook():
+    """Run as a Claude Code PostToolUse hook.
+
+    Records that a Bash command actually executed. Combined with the
+    PreToolUse decision log, this lets yolt_review.py tell "YOLT prompted
+    and the user approved anyway" (a friction candidate) apart from "YOLT
+    prompted and the user declined" (working as intended). Needs no
+    grammar deps, so the PostToolUse wrapper skips the bootstrap.
+
+    Exits silently on any malformed input; PostToolUse must never break
+    the session.
+    """
+    try:
+        hook_input = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError):
+        sys.exit(0)
+    if hook_input.get("tool_name", "") != "Bash":
+        sys.exit(0)
+    command = hook_input.get("tool_input", {}).get("command", "")
+    if not command.strip():
+        sys.exit(0)
+    _log_ran_command(command)
+    sys.exit(0)
 
 
 def run_hook():
@@ -1035,11 +1104,16 @@ def run_hook():
 def run_cli():
     """Run as a CLI tool for direct analysis."""
     if len(sys.argv) < 2:
-        print("Usage: yolt_analyzer.py [--hook | <script.py>]", file=sys.stderr)
+        print("Usage: yolt_analyzer.py [--hook | --ran-hook | <script.py>]",
+              file=sys.stderr)
         sys.exit(1)
 
     if sys.argv[1] == "--hook":
         run_hook()
+        return
+
+    if sys.argv[1] == "--ran-hook":
+        run_ran_hook()
         return
 
     script_path = sys.argv[1]
