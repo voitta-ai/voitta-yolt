@@ -345,7 +345,7 @@ def _path_matches_safe_write_targets(target, safe_write_targets):
     fnmatch semantics. Mirrors the redirect-target check that
     `grammar_classifier._target_is_safe_write` runs against `> file`
     redirects, so flag-value writes (e.g. `find -fprint FILE`) and
-    redirect writes use the same allow list."""
+    redirect writes use the same white list."""
     if not safe_write_targets:
         return False
     expanded = _expand_home(target)
@@ -376,7 +376,7 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None):
     - `write_flag_value_targets`: list of flags whose immediately
       following value is a file path the command will write to
       (`find -fprint FILE`). The path is checked against the top-level
-      `safe_write_targets` allow list; a non-matching path makes the
+      `safe_write_targets` white list; a non-matching path makes the
       call unsafe. Requires `safe_write_targets` to be passed in.
     """
     unsafe_flag_values = spec.get("unsafe_flag_values", {})

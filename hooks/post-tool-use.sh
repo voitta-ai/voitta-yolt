@@ -5,7 +5,7 @@
 # Paired with the PreToolUse decision log (~/.claude/yolt.log), this lets
 # the self-improvement reviewer (hooks/yolt_review.py, issue #44) tell
 # "YOLT prompted and the user approved anyway" (friction worth an
-# allowlist/rule) apart from "YOLT prompted and the user declined"
+# whitelist/rule) apart from "YOLT prompted and the user declined"
 # (working as intended): a command that was denied at the prompt never
 # reaches PostToolUse, so its absence here is the signal.
 #

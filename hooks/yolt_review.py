@@ -622,7 +622,7 @@ def render_doc(state, log_path, ran_log_path):
             if kind == KIND_FASTPATH:
                 if collisions:
                     lines.append(
-                        "- DO NOT allowlist `\"{}\"` — that glob would also"
+                        "- DO NOT whitelist `\"{}\"` — that glob would also"
                         " match these known non-safe commands, silently"
                         " bypassing YOLT for them:".format(
                             suggestion["settings_pattern"]))
@@ -641,7 +641,7 @@ def render_doc(state, log_path, ran_log_path):
             else:
                 if collisions:
                     lines.append(
-                        "- DO NOT allowlist `\"{}\"` — that glob would also"
+                        "- DO NOT whitelist `\"{}\"` — that glob would also"
                         " match known non-safe commands (e.g. `{}`); use a"
                         " `~/.claude/yolt/shell.json` rule (issue #45).".format(
                             suggestion["settings_pattern"], collisions[0]))
@@ -795,7 +795,7 @@ def cmd_nudge(args):
         if age < datetime.timedelta(hours=NUDGE_INTERVAL_HOURS):
             return 0
     message = (
-        "YOLT has {} pending allowlist/rule suggestion(s) distilled from"
+        "YOLT has {} pending whitelist/rule suggestion(s) distilled from"
         " your recent Bash friction - run /yolt:review to triage them"
         " (doc: {})."
     ).format(pending, state_dir / DOC_NAME)

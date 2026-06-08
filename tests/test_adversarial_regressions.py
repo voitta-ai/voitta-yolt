@@ -29,7 +29,7 @@ Catalogue layout:
 - `TestIssue27FindWriteFlags` -- `find -fprint / -fprintf / -fls /
   -fls0 FILE` repros (closes #27). Path argument was unchecked, so
   writes outside `safe_write_targets` classified safe. The fix
-  routes the path through the same allow list redirects use.
+  routes the path through the same white list redirects use.
 
 Run with:
 
@@ -299,7 +299,7 @@ class TestIssue27FindWriteFlags(unittest.TestCase):
     argument (`-fprint`, `-fprintf`, `-fls`, `-fls0`) classified `safe`
     before this fix because their path argument bypassed the redirect-
     based `safe_write_targets` check. After the fix the path argument
-    routes through the same allow list, so writes to `/tmp/...` stay
+    routes through the same white list, so writes to `/tmp/...` stay
     safe but writes to `/etc/profile` / `/var/log/...` ask."""
 
     def test_fprint_to_etc_is_unsafe(self):

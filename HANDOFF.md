@@ -119,7 +119,7 @@ In a fresh Claude Code session (after `/plugin install yolt@voitta-yolt`):
 ## Known limitations
 
 - **Plugin install does not auto-install Python deps.** Until the bootstrap PR lands, users must manually `pip install -r requirements.txt` after `/plugin install yolt@voitta-yolt`. Without it, the hook silently no-ops (visible only in the log as `import-error`).
-- **`python3 -m <mod>` is not first-class.** Falls through to `unknown` unless allowlisted. `python3 -m json.tool` is benign but YOLT can't tell.
+- **`python3 -m <mod>` is not first-class.** Falls through to `unknown` unless whitelisted. `python3 -m json.tool` is benign but YOLT can't tell.
 - **Argv reconstruction for deeply-nested `bash -c` keeps literal escape sequences.** E.g. `bash -c "ls; bash -c \"rm\""` may not classify the deepest `rm` correctly because `\"` survives in argv. Real-world `bash -c` rarely nests this deep.
 - **Log grows unbounded.** No rotation. Truncate manually if it gets uncomfortable.
 - **Tree-sitter parse errors → unknown.** Conservative; some malformed-but-clearly-safe commands (e.g. unterminated quotes) won't auto-allow. Acceptable bias.

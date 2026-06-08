@@ -10,7 +10,7 @@ calls in production. Coverage targets:
   - Quoting: bash `'\\''` close-escape-open idiom, `$'...'` ANSI-C strings,
     concatenated strings.
   - Heredocs (with python body), redirects, process substitution.
-  - User allowlist upgrade, including explicit overrides of unsafe atoms.
+  - User whitelist upgrade, including explicit overrides of unsafe atoms.
 
 Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 
@@ -707,7 +707,7 @@ class TestSafeWriteTargets(unittest.TestCase):
 
 
 class TestClassifierAllowPatterns(unittest.TestCase):
-    """Allowlist upgrades unknown and unsafe matches to safe."""
+    """Whitelist upgrades unknown and unsafe matches to safe."""
 
     def test_unknown_command_upgraded_to_safe(self):
         clf = _make_classifier(allow_patterns=["mycli *"])
@@ -720,7 +720,7 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         d, _ = clf.classify("aws ec2 weird-op --flag")
         self.assertEqual(d, DECISION_SAFE)
 
-    def test_unsafe_overridden_by_allowlist(self):
+    def test_unsafe_overridden_by_whitelist(self):
         clf = _make_classifier(allow_patterns=["aws *"])
         d, _ = clf.classify("aws iam delete-user --user-name foo")
         self.assertEqual(d, DECISION_SAFE)
@@ -730,19 +730,19 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         d, _ = clf.classify("aws s3 ls && rm -rf /etc")
         self.assertEqual(d, DECISION_SAFE)
 
-    def test_no_allowlist_match_stays_unknown(self):
+    def test_no_whitelist_match_stays_unknown(self):
         clf = _make_classifier(allow_patterns=["aws *"])
         d, _ = clf.classify("somecommand_unknown")
         self.assertEqual(d, DECISION_UNKNOWN)
 
-    def test_decomposed_atoms_match_allowlist(self):
+    def test_decomposed_atoms_match_whitelist(self):
         # The outer `for` wrapper would not match `Bash(aws s3 ls*)`, but
         # the grammar walker classifies each iteration body separately.
         clf = _make_classifier(allow_patterns=["aws s3 ls*"])
         d, _ = clf.classify("for b in foo bar; do aws s3 ls s3://$b/; done")
         self.assertEqual(d, DECISION_SAFE)
 
-    def test_writes_to_file_upgraded_when_allowlisted(self):
+    def test_writes_to_file_upgraded_when_whitelisted(self):
         clf = _make_classifier(allow_patterns=["echo *"])
         d, _ = clf.classify("echo x > /etc/profile")
         self.assertEqual(d, DECISION_SAFE)
