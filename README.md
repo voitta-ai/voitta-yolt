@@ -16,7 +16,7 @@
   - [Updating](#updating)
   - [Migrating from manual to plugin install](#migrating-from-manual-to-plugin-install)
   - [Manual install (without the plugin system)](#manual-install-without-the-plugin-system)
-- [User allowlist as a secondary upgrade pass](#user-allowlist-as-a-secondary-upgrade-pass)
+- [User whitelist as a secondary upgrade pass](#user-whitelist-as-a-secondary-upgrade-pass)
 - [Dependencies](#dependencies)
 - [What the grammar classifier handles](#what-the-grammar-classifier-handles)
 - [SQL CLIs](#sql-clis)
@@ -37,16 +37,16 @@ A Claude Code hook that statically analyzes script invocations before
 execution, auto-allowing read-only ones and flagging mutating ones for
 review.
 
-YOLT closes two gaps in Claude Code's built-in allowlist matcher:
+YOLT closes two gaps in Claude Code's built-in whitelist matcher:
 
 1. **Arbitrary-execution wrappers.** Interpreters (`bash`, `python3`,
    `node`, ...) and dual-use CLIs (`gh api`, `curl`, `kubectl`, ...) can't
-   be allowlisted with a wildcard without granting arbitrary execution,
+   be whitelisted with a wildcard without granting arbitrary execution,
    so a long tail of clearly read-only invocations prompt every time.
 2. **Compound shell commands.** The built-in matcher sees the outer wrapper
    (`for`, `while`, `bash -c "..."`, `$(...)`), not the inner commands it
    runs, so loops and command substitutions prompt even when every inner
-   command would be allowlisted on its own.
+   command would be whitelisted on its own.
 
 The hook entry is one piece, with two specialized followers:
 
@@ -192,14 +192,14 @@ Add to `~/.claude/settings.json`:
 ```
 
 > **Important:** A static allow rule in `settings.json` / `settings.local.json`
-> bypasses `PreToolUse` hooks. Do not allowlist `Bash(python3:*)`,
+> bypasses `PreToolUse` hooks. Do not whitelist `Bash(python3:*)`,
 > `Bash(aws:*)`, `Bash(gh:*)`, etc. with wildcards - YOLT's classifier
 > will never fire and mutating invocations will run without review. Narrow
-> allowlist patterns that don't cover mutating operations (e.g.
+> whitelist patterns that don't cover mutating operations (e.g.
 > `Bash(aws ecs list-services*)`) are fine; they just short-circuit YOLT
 > for the matching subset.
 
-## User allowlist as a secondary upgrade pass
+## User whitelist as a secondary upgrade pass
 
 YOLT reads your `permissions.allow` Bash() entries from
 `~/.claude/settings.json`, the project's `.claude/settings.json`, and
@@ -210,8 +210,8 @@ of those patterns.
 
 This earns its keep on compound forms. The built-in matcher only sees
 the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
-already allowlisted (`Bash(mycli list*)`) still prompts. YOLT walks
-into the loop body and matches each command against the allowlist.
+already whitelisted (`Bash(mycli list*)`) still prompts. YOLT walks
+into the loop body and matches each command against the whitelist.
 
 Two rules apply:
 
@@ -567,7 +567,7 @@ silently bypass YOLT for the POST too. Before recommending any
 `settings.json` glob, the reviewer fnmatches it against every command
 YOLT did *not* classify safe; any hit is recorded as a collision and the
 suggestion is re-routed to a `shell.json` rule instead, never the
-allowlist. Partially-overlapping namespaces stay suggestable —
+whitelist. Partially-overlapping namespaces stay suggestable —
 `gh pr view*` does not collide with `gh pr merge`.
 
 Only the redacted `shape` field (argv head plus flag names, every value

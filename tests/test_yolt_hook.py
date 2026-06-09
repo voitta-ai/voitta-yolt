@@ -205,7 +205,7 @@ class TestHookEndToEnd(unittest.TestCase):
         self.assertIn("Bash(gh issue create*)", reason)
 
 
-class TestHookAllowlistDiscovery(unittest.TestCase):
+class TestHookWhitelistDiscovery(unittest.TestCase):
     """The hook reads the user's settings.json `permissions.allow` Bash()
     entries and uses them as an explicit override for unknown and unsafe
     atoms.
@@ -246,7 +246,7 @@ class TestHookAllowlistDiscovery(unittest.TestCase):
         self._write_settings(["Bash(yolt_test_othertool *)"])
         self.assertIsNone(self._decision("yolt_test_mycli foo bar"))
 
-    def test_allowlist_overrides_unsafe(self):
+    def test_whitelist_overrides_unsafe(self):
         self._write_settings(["Bash(git push origin feature/*)"])
         self.assertEqual(
             self._decision("git push origin feature/issue-35"),

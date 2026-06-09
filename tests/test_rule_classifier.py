@@ -112,7 +112,7 @@ class TestCheckUnsafeFlags(unittest.TestCase):
         )
 
     # write_flag_value_targets: flag value is a write-target path,
-    # decision routes through the top-level safe_write_targets allow list.
+    # decision routes through the top-level safe_write_targets white list.
     # Repros from issue #27 (find -fprint / -fprintf / -fls / -fls0).
 
     def test_write_flag_value_targets_unsafe_outside_allow(self):
@@ -151,7 +151,7 @@ class TestCheckUnsafeFlags(unittest.TestCase):
             ["-fprint"], spec, safe_write_targets=["/tmp/*"],
         ))
 
-    def test_write_flag_value_targets_empty_allow_list_blocks_everything(self):
+    def test_write_flag_value_targets_empty_white_list_blocks_everything(self):
         # No safe_write_targets configured -> any value is unsafe.
         spec = {"write_flag_value_targets": ["-fprint"]}
         self.assertIsNotNone(check_unsafe_flags(
@@ -163,7 +163,7 @@ class TestCheckUnsafeFlags(unittest.TestCase):
 
     def test_write_flag_value_targets_home_expansion(self):
         spec = {"write_flag_value_targets": ["-fprint"]}
-        # ~/.cache/* in allow list matches user-supplied ~/.cache/foo.
+        # ~/.cache/* in white list matches user-supplied ~/.cache/foo.
         self.assertIsNone(check_unsafe_flags(
             ["-fprint", "~/.cache/list.txt"], spec,
             safe_write_targets=["~/.cache/*"],

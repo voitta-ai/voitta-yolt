@@ -1,5 +1,5 @@
 ---
-description: Triage YOLT friction into settings.json allowlist entries, local rule overrides, or upstream issues
+description: Triage YOLT friction into settings.json whitelist entries, local rule overrides, or upstream issues
 ---
 
 # /yolt:review
@@ -27,7 +27,7 @@ them. Do NOT re-derive suggestions by reading the raw log yourself.
    stop.
 
 2. **Present pending suggestions, grouped by bucket**, in this order:
-   - `fastpath` — already auto-allowed; an allowlist entry only saves
+   - `fastpath` — already auto-allowed; an whitelist entry only saves
      hook startup.
    - `friction-unsafe` — YOLT prompted (`ask`). Sort the user's attention
      by `approved` (how many times they approved at the prompt anyway):
