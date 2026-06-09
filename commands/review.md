@@ -49,8 +49,14 @@ them. Do NOT re-derive suggestions by reading the raw log yourself.
      `~/.claude/settings.json`.
    - A friction suggestion with no collisions that the user confirms is
      read-only regardless of flags → same settings.json route.
-   - A friction suggestion that is flag-conditional or verb-class → a
-     `~/.claude/yolt/shell.json` / `rules.json` override (issue #45).
+   - A `friction-unknown` suggestion whose `override.writable` is `true`
+     (a personal CLI with no bundled rule) → the generator can write the
+     `safe_subcommands` override itself; use `--write-override <id>`
+     (step 4). The suggestion's `override.label` / `override.fragment`
+     show exactly what will be added.
+   - A friction suggestion that is flag-conditional or verb-class (or
+     `override.writable` is `false` for any other reason) → a hand-written
+     `~/.claude/yolt/shell.json` / `rules.json` override.
    - `upstream_candidate: true` → offer to file an issue on
      voitta-ai/voitta-yolt.
 
@@ -58,10 +64,25 @@ them. Do NOT re-derive suggestions by reading the raw log yourself.
    - settings.json: read `~/.claude/settings.json`, add the pattern to
      `permissions.allow` (create the array if absent), write it back.
      Confirm the exact diff with the user before writing.
-   - Local override: edit `~/.claude/yolt/shell.json` per the README's
-     "Shell rules" schema. (Direct generation of these is tracked in
-     issue #45; for now, hand-write the minimal fragment.)
-   - After each accepted suggestion is applied, record it:
+   - Local override (writable): for a `friction-unknown` suggestion with
+     `override.writable: true`, let the generator write it. This
+     read-modify-writes `~/.claude/yolt/shell.json`, validates the merged
+     result against the bundled rules with `validate_shell_rules` (it
+     refuses to write anything that would fail), and marks the suggestion
+     applied — so you do NOT also run `--applied` for these:
+
+     ```bash
+     python3 "${CLAUDE_PLUGIN_ROOT}/hooks/yolt_review.py" --write-override <id> [<id> ...]
+     ```
+
+     Show the user `override.fragment` and confirm before running it.
+   - Local override (hand-written): for flag-conditional / verb-class
+     rules (anything `override.writable` is `false`), edit
+     `~/.claude/yolt/shell.json` by hand per the README's "Shell rules"
+     schema, then record it with `--applied` below.
+   - After each accepted suggestion is applied *by hand* (settings.json or
+     a hand-written override), record it (`--write-override` already does
+     this for the suggestions it writes):
 
      ```bash
      python3 "${CLAUDE_PLUGIN_ROOT}/hooks/yolt_review.py" --applied <id> [<id> ...]
@@ -93,6 +114,9 @@ them. Do NOT re-derive suggestions by reading the raw log yourself.
 - A static allow rule in `settings.json` bypasses YOLT's PreToolUse hook
   entirely (including its redirect and command-substitution checks), so
   keep every pattern narrow. This is exactly why collisions are vetoed.
-- The reviewer is read-mostly: it only writes its own state files under
-  `~/.claude/yolt/`. All edits to `settings.json` and override files go
-  through you, with the user's confirmation.
+- The reviewer only ever writes under `~/.claude/yolt/`: its own state
+  files, and — via `--write-override` — the `shell.json` override the
+  hook reads. That write is validated before it lands, so it can never
+  leave a malformed override that downgrades the hook to
+  `rules-validation-error`. Edits to `settings.json` still go through
+  you. Every write happens only on the user's confirmation.

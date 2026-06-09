@@ -17,32 +17,44 @@ Runs with stdlib unittest only - no tree-sitter dependency:
     python3 -m unittest discover -v tests
 """
 
+import contextlib
 import datetime
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_DIR = REPO_ROOT / "hooks"
+RULES_DIR = REPO_ROOT / "rules"
 sys.path.insert(0, str(HOOKS_DIR))
 
 from yolt_review import (  # noqa: E402
     KIND_FASTPATH,
+    KIND_UNKNOWN,
     KIND_UNSAFE,
     MAX_EXAMPLES,
     MAX_PER_BUCKET,
+    STATE_NAME,
     STATE_VERSION,
     annotate_glob_collisions,
     build_groups,
+    build_override_fragment,
     build_ran_index,
+    cmd_write_override,
+    compute_override,
     correlate_approvals,
     group_key,
     is_compound,
+    load_known_clis,
     load_state,
+    merge_command_fragment,
     merge_state,
     redact_command,
+    save_state,
     split_tokens,
     suggestion_id,
 )
@@ -429,6 +441,312 @@ class TestStateMerge(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             state = load_state(path)
         self.assertEqual(state["suggestions"][0]["id"], "x")
+
+
+class TestOverrideFragment(unittest.TestCase):
+    """The minimal `commands.<cli>` spec the writer derives (issue #45)."""
+
+    def test_single_subcommand_is_top_level_safe(self):
+        self.assertEqual(
+            build_override_fragment(["status"]),
+            {"default": "subcommand", "safe_subcommands": ["status"]})
+
+    def test_two_subcommands_nest_under_the_group(self):
+        self.assertEqual(
+            build_override_fragment(["db", "status"]),
+            {"default": "subcommand",
+             "nested_subcommand": {"db": {"safe_subcommands": ["status"]}}})
+
+
+class TestComputeOverride(unittest.TestCase):
+    """Eligibility: only a personal CLI with a subcommand is writable."""
+
+    KNOWN = {"git", "kubectl", "aws"}
+
+    def test_personal_cli_with_subcommand_is_writable(self):
+        override = compute_override("mycli status", self.KNOWN)
+        self.assertTrue(override["writable"])
+        self.assertEqual(override["cli"], "mycli")
+        self.assertEqual(override["label"], "commands.mycli")
+        self.assertEqual(override["fragment"],
+                         {"default": "subcommand", "safe_subcommands": ["status"]})
+
+    def test_personal_cli_nested_label_and_fragment(self):
+        override = compute_override("mytool db status", self.KNOWN)
+        self.assertTrue(override["writable"])
+        self.assertEqual(override["label"],
+                         "commands.mytool.nested_subcommand.db")
+        self.assertEqual(
+            override["fragment"],
+            {"default": "subcommand",
+             "nested_subcommand": {"db": {"safe_subcommands": ["status"]}}})
+
+    def test_known_cli_is_not_writable_and_says_why(self):
+        override = compute_override("git frobnicate", self.KNOWN)
+        self.assertFalse(override["writable"])
+        self.assertIn("bundled rules", override["reason"])
+
+    def test_bare_command_without_subcommand_is_not_writable(self):
+        override = compute_override("mycli", self.KNOWN)
+        self.assertFalse(override["writable"])
+        self.assertIn("no subcommand", override["reason"])
+
+    def test_none_known_clis_disables_writability(self):
+        # Rules unavailable: cannot confirm personal-ness, so never offer to
+        # write (a bundled CLI must not be mistaken for a personal one).
+        override = compute_override("mycli status", None)
+        self.assertFalse(override["writable"])
+
+    def test_load_known_clis_includes_bundled_commands(self):
+        known = load_known_clis(RULES_DIR)
+        self.assertIsNotNone(known)
+        for name in ("git", "gh", "aws", "python3"):
+            self.assertIn(name, known)
+
+
+class TestMergeCommandFragment(unittest.TestCase):
+
+    def test_into_empty_spec(self):
+        merged = merge_command_fragment(
+            {}, {"default": "subcommand", "safe_subcommands": ["status"]})
+        self.assertEqual(
+            merged, {"default": "subcommand", "safe_subcommands": ["status"]})
+
+    def test_unions_without_dropping_existing_subcommands(self):
+        merged = merge_command_fragment(
+            {"default": "subcommand", "safe_subcommands": ["show"]},
+            {"default": "subcommand", "safe_subcommands": ["status"]})
+        self.assertEqual(merged["safe_subcommands"], ["show", "status"])
+
+    def test_is_idempotent(self):
+        existing = {"default": "subcommand", "safe_subcommands": ["status"]}
+        merged = merge_command_fragment(
+            existing, {"default": "subcommand", "safe_subcommands": ["status"]})
+        self.assertEqual(merged["safe_subcommands"], ["status"])
+
+    def test_preserves_unrelated_keys(self):
+        merged = merge_command_fragment(
+            {"default": "subcommand", "unsafe_subcommands": ["apply"]},
+            {"default": "subcommand", "safe_subcommands": ["status"]})
+        self.assertEqual(merged["unsafe_subcommands"], ["apply"])
+        self.assertEqual(merged["safe_subcommands"], ["status"])
+
+    def test_nested_union_preserves_other_groups(self):
+        existing = {
+            "default": "subcommand",
+            "nested_subcommand": {"vol": {"safe_subcommands": ["ls"]}}}
+        merged = merge_command_fragment(
+            existing,
+            {"default": "subcommand",
+             "nested_subcommand": {"db": {"safe_subcommands": ["status"]}}})
+        self.assertEqual(merged["nested_subcommand"]["vol"]["safe_subcommands"],
+                         ["ls"])
+        self.assertEqual(merged["nested_subcommand"]["db"]["safe_subcommands"],
+                         ["status"])
+
+    def test_does_not_mutate_caller(self):
+        existing = {"default": "subcommand", "safe_subcommands": ["show"]}
+        merge_command_fragment(
+            existing, {"default": "subcommand", "safe_subcommands": ["status"]})
+        self.assertEqual(existing["safe_subcommands"], ["show"])
+
+
+class TestBuildGroupsOverride(unittest.TestCase):
+    """friction-unknown suggestions carry the override-routing decision."""
+
+    def test_personal_cli_unknown_is_override_writable(self):
+        records = [_rec("unknown", "mycli status now", _ts(i)) for i in range(3)]
+        suggestions, _ = build_groups(records, {}, 3, 10, known_clis={"git"})
+        unknown = [s for s in suggestions if s["kind"] == KIND_UNKNOWN]
+        self.assertEqual(len(unknown), 1)
+        self.assertTrue(unknown[0]["override"]["writable"])
+        self.assertEqual(unknown[0]["override"]["cli"], "mycli")
+
+    def test_known_cli_unknown_is_not_override_writable(self):
+        records = [_rec("unknown", "kubectl rollout status x", _ts(i))
+                   for i in range(3)]
+        suggestions, _ = build_groups(records, {}, 3, 10,
+                                      known_clis={"kubectl"})
+        unknown = [s for s in suggestions if s["kind"] == KIND_UNKNOWN]
+        self.assertFalse(unknown[0]["override"]["writable"])
+
+    def test_non_unknown_buckets_have_no_override(self):
+        records = [_rec("unsafe", "rm thing", _ts(i)) for i in range(3)]
+        suggestions, _ = build_groups(records, {}, 3, 10, known_clis=set())
+        self.assertNotIn("override", suggestions[0])
+
+
+def _seed_state(state_dir, suggestions):
+    state = {
+        "version": STATE_VERSION, "generated": None, "last_nudged": None,
+        "stats": {}, "suggestions": suggestions,
+    }
+    save_state(Path(state_dir) / STATE_NAME, state)
+
+
+def _write_args(ids, tmp, state_dir, shell_override):
+    return SimpleNamespace(
+        ids=list(ids), state_dir=str(state_dir),
+        shell_override=str(shell_override), rules_dir=str(RULES_DIR),
+        log=str(Path(tmp) / "yolt.log"), ran_log=str(Path(tmp) / "ran.log"))
+
+
+def _run_write(args):
+    """Call cmd_write_override capturing its stdout/stderr so the test log
+    stays clean. Returns (rc, stderr_text)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = cmd_write_override(args)
+    return rc, err.getvalue()
+
+
+def _writable_suggestion(prefix, known):
+    sid = suggestion_id(KIND_UNKNOWN, prefix)
+    return {
+        "id": sid, "kind": KIND_UNKNOWN, "prefix": prefix, "fires": 4,
+        "approved": 0, "status": "pending",
+        "settings_pattern": "Bash({}*)".format(prefix),
+        "glob_collisions": [], "examples": ["{} --json".format(prefix)],
+        "override": compute_override(prefix, known),
+    }
+
+
+class TestWriteOverride(unittest.TestCase):
+    """End-to-end `--write-override`: read-modify-write + validate-before-write
+    against the real bundled rules (issue #45)."""
+
+    def test_writes_fragment_and_marks_applied(self):
+        known = load_known_clis(RULES_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            sug = _writable_suggestion("mycli status", known)
+            _seed_state(state_dir, [sug])
+
+            rc, _ = _run_write(
+                _write_args([sug["id"]], tmp, state_dir, shell_override))
+
+            self.assertEqual(rc, 0)
+            written = json.loads(shell_override.read_text())
+            self.assertEqual(
+                written["commands"]["mycli"],
+                {"default": "subcommand", "safe_subcommands": ["status"]})
+            state = load_state(state_dir / STATE_NAME)
+            self.assertEqual(state["suggestions"][0]["status"], "applied")
+
+    def test_written_override_loads_and_classifies_via_hook(self):
+        # The whole point: the written file must validate and take effect when
+        # the classifier loads default rules ∪ this override.
+        from grammar_classifier import classify_command  # noqa: E402
+        from rule_classifier import load_shell_rules  # noqa: E402
+        known = load_known_clis(RULES_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            sug = _writable_suggestion("mycli status", known)
+            _seed_state(state_dir, [sug])
+            _run_write(
+                _write_args([sug["id"]], tmp, state_dir, shell_override))
+
+            rules = load_shell_rules(RULES_DIR,
+                                     user_overrides_path=shell_override,
+                                     validate=True)
+            decision, _ = classify_command("mycli status", rules)
+            self.assertEqual(decision, "safe")
+            other, _ = classify_command("mycli apply", rules)
+            self.assertEqual(other, "unknown")  # additive: apply still prompts
+
+    def test_preserves_existing_unrelated_commands(self):
+        known = load_known_clis(RULES_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            shell_override.write_text(json.dumps(
+                {"commands": {"othertool": {"default": "safe"}}}))
+            sug = _writable_suggestion("mycli status", known)
+            _seed_state(state_dir, [sug])
+
+            _run_write(
+                _write_args([sug["id"]], tmp, state_dir, shell_override))
+
+            written = json.loads(shell_override.read_text())
+            self.assertEqual(written["commands"]["othertool"],
+                             {"default": "safe"})
+            self.assertIn("mycli", written["commands"])
+
+    def test_invalid_preexisting_override_is_refused_untouched(self):
+        known = load_known_clis(RULES_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            payload = {"totally_bogus_key": 1}
+            shell_override.write_text(json.dumps(payload))
+            sug = _writable_suggestion("mycli status", known)
+            _seed_state(state_dir, [sug])
+
+            rc, err = _run_write(
+                _write_args([sug["id"]], tmp, state_dir, shell_override))
+
+            self.assertEqual(rc, 1)
+            self.assertIn("fail validation", err)
+            # File untouched and suggestion not marked applied.
+            self.assertEqual(json.loads(shell_override.read_text()), payload)
+            state = load_state(state_dir / STATE_NAME)
+            self.assertEqual(state["suggestions"][0]["status"], "pending")
+
+    def test_not_writable_id_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            sug = _writable_suggestion("git frobnicate", {"git"})
+            self.assertFalse(sug["override"]["writable"])
+            _seed_state(state_dir, [sug])
+
+            rc, err = _run_write(
+                _write_args([sug["id"]], tmp, state_dir, shell_override))
+
+            self.assertEqual(rc, 1)
+            self.assertIn("not override-writable", err)
+            self.assertFalse(shell_override.exists())
+
+    def test_unknown_id_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            _seed_state(state_dir, [])
+
+            rc, err = _run_write(
+                _write_args(["deadbeef"], tmp, state_dir, shell_override))
+
+            self.assertEqual(rc, 1)
+            self.assertIn("unknown id", err)
+            self.assertFalse(shell_override.exists())
+
+    def test_two_ids_same_cli_union_into_one_spec(self):
+        known = load_known_clis(RULES_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            s1 = _writable_suggestion("mycli status", known)
+            s2 = _writable_suggestion("mycli show", known)
+            _seed_state(state_dir, [s1, s2])
+
+            rc, _ = _run_write(
+                _write_args([s1["id"], s2["id"]], tmp, state_dir,
+                            shell_override))
+
+            self.assertEqual(rc, 0)
+            written = json.loads(shell_override.read_text())
+            self.assertEqual(
+                sorted(written["commands"]["mycli"]["safe_subcommands"]),
+                ["show", "status"])
 
 
 if __name__ == "__main__":
