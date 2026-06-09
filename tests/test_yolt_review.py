@@ -55,6 +55,13 @@ def _ts(second):
     return retval
 
 
+def _ts_at(minute=0, second=0):
+    """A fixed tz-aware UTC timestamp at an offset minute/second."""
+    retval = datetime.datetime(
+        2024, 1, 1, 12, minute, second, tzinfo=datetime.timezone.utc)
+    return retval
+
+
 def _rec(decision, command, ts=None, reason=None):
     """Build a decision-log record dict the way yolt_analyzer writes it."""
     retval = {"decision": decision, "command": command}
@@ -246,6 +253,23 @@ class TestApprovalCorrelation(unittest.TestCase):
     def test_no_ran_record_is_not_approved(self):
         records = [_rec("unsafe", "git push", _ts(10))]
         self.assertEqual(correlate_approvals(records, {}), set())
+
+    def test_far_future_ran_does_not_backcredit_old_prompt(self):
+        # Regression (PR #47 re-review): a denied prompt at t=0 and a run
+        # 30 min later (command became statically allowed, bypassing the
+        # prompt) must NOT mark the old prompt approved -- the match is
+        # bounded above by RAN_MATCH_WINDOW_SECONDS.
+        records = [_rec("unsafe", "git push", _ts_at(0, 0))]
+        ran_index = build_ran_index(
+            [{"command": "git push", "ts": _ts_at(30, 0).isoformat()}])
+        self.assertEqual(correlate_approvals(records, ran_index), set())
+
+    def test_ran_inside_window_approves(self):
+        # A run a few seconds after the prompt is within the window.
+        records = [_rec("unsafe", "git push", _ts_at(0, 0))]
+        ran_index = build_ran_index(
+            [{"command": "git push", "ts": _ts_at(0, 30).isoformat()}])
+        self.assertEqual(correlate_approvals(records, ran_index), {0})
 
     def test_safe_records_are_never_approval_candidates(self):
         # `safe` is auto-allowed (no prompt); its ran-record must not be

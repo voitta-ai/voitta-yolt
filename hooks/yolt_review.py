@@ -65,6 +65,14 @@ MAX_EXAMPLE_CHARS = 200
 MAX_PER_BUCKET = 20
 NUDGE_INTERVAL_HOURS = 24
 RAN_MATCH_SKEW_SECONDS = 5
+# Upper bound on how long after a prompt a ran-record may still count as
+# that prompt's approval. PostToolUse stamps completion time, so this
+# must cover think-time plus command runtime, but stay well below "a
+# separate later invocation": without it, a run an hour later (e.g. once
+# the command became statically allowed) would back-credit an old denied
+# prompt. Undercounting a genuinely-approved slow command is the safe
+# direction -- better than fabricating an approval.
+RAN_MATCH_WINDOW_SECONDS = 600
 
 KIND_UNSAFE = "friction-unsafe"
 KIND_UNKNOWN = "friction-unknown"
@@ -289,12 +297,20 @@ def correlate_approvals(records, ran_index):
     """Match friction prompt-records to ran-records one-to-one, per command.
 
     A command YOLT returned `ask`/`unknown` on only reaches PostToolUse
-    (and thus the ran log) if the user approved it at the prompt. But a
-    single ran-record must not credit more than one prompt: with prompts
-    at t10 and t20 and a lone ran at t21, only one prompt was actually
-    approved. So for each command we walk its prompts in time order and
-    consume the earliest still-unclaimed ran-record at/after
-    (prompt_ts - skew); each ran-record satisfies at most one prompt.
+    (and thus the ran log) if the user approved it at the prompt. Two
+    constraints keep the correlation honest:
+
+    - One-to-one: a single ran-record must not credit more than one
+      prompt. With prompts at t10 and t20 and a lone ran at t21, only one
+      prompt was actually approved.
+    - Bounded: a ran-record only counts for a prompt if it lands in
+      `[prompt_ts - skew, prompt_ts + window]`. Without the upper bound a
+      run long after the prompt (e.g. once the command became statically
+      allowed) would back-credit an old denied prompt.
+
+    For each command we walk prompts in time order and consume the
+    earliest still-unclaimed ran-record inside that window; a ran-record
+    beyond a prompt's window is left for a later prompt.
 
     Returns the set of record indices (into `records`) that were
     approved."""
@@ -309,6 +325,7 @@ def correlate_approvals(records, ran_index):
         by_command.setdefault(command, []).append((ts, index))
 
     skew = datetime.timedelta(seconds=RAN_MATCH_SKEW_SECONDS)
+    window = datetime.timedelta(seconds=RAN_MATCH_WINDOW_SECONDS)
     approved = set()
     for command, prompts in by_command.items():
         rans = ran_index.get(command)
@@ -318,17 +335,23 @@ def correlate_approvals(records, ran_index):
         ran_pos = 0
         count = len(rans)
         for prompt_ts, index in prompts:
-            cutoff = prompt_ts - skew
-            # Advance past ran-records that cannot satisfy this prompt:
-            # already too early, or tz-incomparable (hand-edited lines).
-            # The tz check short-circuits before the order comparison so
+            low = prompt_ts - skew
+            high = prompt_ts + window
+            # Advance past ran-records that can help neither this prompt
+            # nor any later one: those before `low` (later prompts have a
+            # larger low), or tz-incomparable (hand-edited lines). The tz
+            # check short-circuits before the order comparison so
             # aware/naive values are never compared.
             while ran_pos < count and (
-                (rans[ran_pos].tzinfo is None) != (cutoff.tzinfo is None)
-                or rans[ran_pos] < cutoff
+                (rans[ran_pos].tzinfo is None) != (low.tzinfo is None)
+                or rans[ran_pos] < low
             ):
                 ran_pos += 1
-            if ran_pos < count:
+            # The earliest in-range ran approves this prompt and is
+            # consumed. If it sits beyond `high`, leave it for a later
+            # prompt (whose window extends further) -- this prompt is
+            # unapproved.
+            if ran_pos < count and rans[ran_pos] <= high:
                 approved.add(index)
                 ran_pos += 1
     return approved
