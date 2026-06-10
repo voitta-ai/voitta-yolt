@@ -554,9 +554,11 @@ Each suggestion routes to exactly one of three remediations:
   of flags. Fastest, but a static allow rule bypasses YOLT's hook
   entirely (including its redirect and command-substitution checks).
 - **Local override** — a `~/.claude/yolt/shell.json` rule for anything
-  flag-conditional or verb-class, keeping the AST walk in the loop
-  (generating these directly is issue
-  [#45](https://github.com/voitta-ai/voitta-yolt/issues/45)).
+  flag-conditional or verb-class, keeping the AST walk in the loop. For
+  the narrow, additive case of a personal CLI hitting `unknown` on a
+  subcommand, the reviewer writes the `safe_subcommands` override itself
+  (`--write-override <id>`); deeper rules stay hand-written. See
+  [Writing overrides](#writing-overrides-issue-45).
 - **Upstream issue** — a common CLI repeatedly hitting `unknown` is
   likely a rules gap worth reporting on voitta-ai/voitta-yolt.
 
@@ -595,13 +597,52 @@ python3 hooks/yolt_review.py --status     # {"pending": N, ...}
 python3 hooks/yolt_review.py --list       # full suggestion JSON
 python3 hooks/yolt_review.py --applied <id> [<id> ...]
 python3 hooks/yolt_review.py --dismiss <id> [<id> ...]
+python3 hooks/yolt_review.py --write-override <id> [<id> ...]  # see below
 ```
 
-Override the state directory with `YOLT_STATE_DIR`. The reviewer is
-read-mostly: it only ever writes its own files under `~/.claude/yolt/`;
-all edits to `settings.json` and override files go through you. A Codex
-CLI parity loop is tracked in issue
-[#46](https://github.com/voitta-ai/voitta-yolt/issues/46).
+Override the state directory with `YOLT_STATE_DIR`. The reviewer only
+ever writes under `~/.claude/yolt/`: its own state files, and — via
+`--write-override` — the `shell.json` override the hook reads. Edits to
+`settings.json` go through you. A Codex CLI parity loop is tracked in
+issue [#46](https://github.com/voitta-ai/voitta-yolt/issues/46).
+
+### Writing overrides (issue [#45](https://github.com/voitta-ai/voitta-yolt/issues/45))
+
+`--write-override <id>` turns a `friction-unknown` suggestion into a
+`~/.claude/yolt/shell.json` rule, for the one case the reviewer can infer
+safely: a **personal CLI** (no bundled rule) that fell through to
+`unknown` on a subcommand. It writes a `safe_subcommands` fragment
+asserting that one observed subcommand is read-only —
+
+```json
+{"commands": {"mycli": {"default": "subcommand", "safe_subcommands": ["status"]}}}
+```
+
+— so `mycli status` auto-allows while every other `mycli` subcommand
+still prompts (the assertion is strictly additive; it never marks the
+whole CLI safe, and never flips an existing `unsafe` verdict). A
+`cli group sub` prefix nests under
+`nested_subcommand.<group>.safe_subcommands` instead. Each suggestion's
+`override` field carries `writable`, the `label`, and the exact
+`fragment`.
+
+Three properties make the write safe:
+
+- **Read-modify-write** — overrides merge per top-level key (a `commands`
+  override replaces individual command specs), so the writer reads the
+  existing file and unions the new subcommand in, never clobbering
+  entries you already have.
+- **Validate before write** — the merged result (bundled rules ∪ the
+  override) is checked with `validate_shell_rules`; the writer refuses to
+  write anything that would fail, since a malformed override downgrades
+  the whole hook to `rules-validation-error`.
+- **Personal-CLI only** — a `friction-unknown` on a *bundled* CLI is a
+  rules gap worth an upstream issue, not a local shadow that would freeze
+  a stale copy of the bundled spec. Flag-conditional, verb-class, and
+  `friction-unsafe` overrides stay hand-written.
+
+Override the paths the writer reads/writes with `YOLT_RULES_DIR` (bundled
+rules) and `YOLT_SHELL_OVERRIDE` (the user override file).
 
 ## CLI usage
 

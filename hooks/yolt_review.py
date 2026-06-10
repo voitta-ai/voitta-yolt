@@ -49,9 +49,33 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
+# Override writing (issue #45) needs the classifier's merge + validation so a
+# fragment is checked against the same merge the hook performs. The import is
+# guarded: the rest of the reviewer (parse / status / nudge) is stdlib-only and
+# must keep working even if rule_classifier cannot be imported, so a failure
+# here only disables `--write-override`, not the whole tool.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from rule_classifier import (
+        load_shell_rules,
+        merge_shell_overrides,
+        validate_shell_rules,
+    )
+    _RULES_AVAILABLE = True
+except ImportError:
+    load_shell_rules = None
+    merge_shell_overrides = None
+    validate_shell_rules = None
+    _RULES_AVAILABLE = False
+
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
 DEFAULT_RAN_LOG_PATH = Path.home() / ".claude" / "yolt-ran.log"
 DEFAULT_STATE_DIR = Path.home() / ".claude" / "yolt"
+DEFAULT_RULES_DIR = Path(__file__).resolve().parent.parent / "rules"
+# The shell-override file the classifier loads (grammar_classifier hard-codes
+# this path) and that `--write-override` writes. Kept independent of the state
+# dir so the reviewer writes exactly the file the hook reads.
+DEFAULT_SHELL_OVERRIDE_PATH = Path.home() / ".claude" / "yolt" / "shell.json"
 
 DOC_NAME = "review.md"
 STATE_NAME = "suggestions.json"
@@ -149,6 +173,146 @@ def resolve_state_dir(cli_value):
         else:
             retval = DEFAULT_STATE_DIR
     return retval
+
+
+def resolve_rules_dir(cli_value):
+    """Bundled rules dir: --rules-dir flag > YOLT_RULES_DIR > <plugin>/rules."""
+    retval = None
+    if cli_value:
+        retval = Path(cli_value)
+    else:
+        env_value = os.environ.get("YOLT_RULES_DIR")
+        if env_value:
+            retval = Path(env_value)
+        else:
+            retval = DEFAULT_RULES_DIR
+    return retval
+
+
+def resolve_shell_override_path(cli_value):
+    """User shell-override file the hook reads and `--write-override` writes:
+    --shell-override flag > YOLT_SHELL_OVERRIDE > ~/.claude/yolt/shell.json."""
+    retval = None
+    if cli_value:
+        retval = Path(cli_value)
+    else:
+        env_value = os.environ.get("YOLT_SHELL_OVERRIDE")
+        if env_value:
+            retval = Path(env_value)
+        else:
+            retval = DEFAULT_SHELL_OVERRIDE_PATH
+    return retval
+
+
+def load_known_clis(rules_dir):
+    """Names the bundled shell rules already classify (commands +
+    interpreters + safe builtins, plus the common-CLI backstop). A
+    friction-unknown on one of these is a rules gap worth an upstream issue,
+    not a personal CLI to shadow with a frozen local copy of the bundled
+    spec. Returns None when the rules cannot be loaded (override writing then
+    stays disabled rather than mistaking a bundled CLI for a personal one)."""
+    if not _RULES_AVAILABLE:
+        return None
+    try:
+        rules = load_shell_rules(rules_dir, user_overrides_path=None,
+                                 validate=False)
+    except (OSError, ValueError):
+        return None
+    names = set()
+    names.update(rules.get("commands", {}).keys())
+    names.update(rules.get("interpreters", {}).keys())
+    names.update(rules.get("shell_builtins_safe", []))
+    names.update(UPSTREAM_CLIS)
+    return names
+
+
+def build_override_fragment(subs):
+    """The minimal per-command spec (the value of `commands.<cli>`) asserting
+    the observed subcommand is read-only. One subcommand token -> top-level
+    `safe_subcommands`; two -> `nested_subcommand.<group>.safe_subcommands`
+    (matching the depth-3 grouping a `cli group sub` prefix produces).
+    `default: subcommand` keeps every other subcommand at `unknown` (still
+    prompted), so the assertion is strictly additive — it never marks the
+    whole CLI safe."""
+    if len(subs) == 1:
+        retval = {"default": "subcommand", "safe_subcommands": [subs[0]]}
+    else:
+        group, sub = subs[0], subs[1]
+        retval = {
+            "default": "subcommand",
+            "nested_subcommand": {group: {"safe_subcommands": [sub]}},
+        }
+    return retval
+
+
+def compute_override(prefix, known_clis):
+    """Decide whether the reviewer may write a `safe_subcommands` override for
+    a friction-unknown `prefix`, and with what fragment. Writable only for a
+    personal CLI (no bundled rule) with at least one subcommand token; the
+    fragment asserts that one observed subcommand is read-only. Returns a dict
+    the doc renders and `--write-override` consumes."""
+    parts = prefix.split(" ")
+    cli = parts[0]
+    subs = parts[1:]
+    if not subs:
+        retval = {
+            "writable": False,
+            "reason": "no subcommand to scope safe; only mark the whole "
+                      "command safe by hand if it is read-only regardless of "
+                      "arguments",
+        }
+        return retval
+    if known_clis is None:
+        retval = {
+            "writable": False,
+            "reason": "default rules unavailable; cannot confirm this is a "
+                      "personal CLI",
+        }
+        return retval
+    if cli in known_clis:
+        retval = {
+            "writable": False,
+            "reason": "{} has bundled rules; a gap here is upstream-worthy (a "
+                      "local override would freeze a copy of the bundled "
+                      "spec)".format(cli),
+        }
+        return retval
+    fragment = build_override_fragment(subs)
+    label = "commands.{}".format(cli)
+    if len(subs) > 1:
+        label = "commands.{}.nested_subcommand.{}".format(cli, subs[0])
+    retval = {"writable": True, "cli": cli, "fragment": fragment, "label": label}
+    return retval
+
+
+def merge_command_fragment(existing_spec, fragment):
+    """Union our minimal fragment shape (default + safe_subcommands and/or
+    nested_subcommand.<group>.safe_subcommands) into an existing per-command
+    spec, preserving everything already there. Never removes a subcommand; it
+    only adds the observed read-only one, so re-running is idempotent and an
+    existing user spec is never clobbered."""
+    spec = json.loads(json.dumps(existing_spec))  # deep copy; don't mutate caller
+    spec.setdefault("default", fragment.get("default", "subcommand"))
+    for sub in fragment.get("safe_subcommands", []):
+        bucket = spec.setdefault("safe_subcommands", [])
+        if sub not in bucket:
+            bucket.append(sub)
+    nested = fragment.get("nested_subcommand")
+    if nested:
+        dst_nested = spec.setdefault("nested_subcommand", {})
+        if not isinstance(dst_nested, dict):
+            dst_nested = {}
+            spec["nested_subcommand"] = dst_nested
+        for group, group_spec in nested.items():
+            dst_group = dst_nested.setdefault(group, {})
+            if not isinstance(dst_group, dict):
+                dst_group = {}
+                dst_nested[group] = dst_group
+            bucket = dst_group.setdefault("safe_subcommands", [])
+            for sub in group_spec.get("safe_subcommands", []):
+                if sub not in bucket:
+                    bucket.append(sub)
+    return spec
 
 
 def read_jsonl(path):
@@ -392,9 +556,12 @@ def annotate_glob_collisions(suggestion, nonsafe_commands, own_commands=None):
     return suggestion
 
 
-def build_groups(records, ran_index, min_fires, min_fires_safe):
+def build_groups(records, ran_index, min_fires, min_fires_safe, known_clis=None):
     """Aggregate log records into suggestion groups. Returns
-    (suggestions, stats)."""
+    (suggestions, stats). `known_clis` is the set of CLIs the bundled rules
+    already classify (None when unavailable); it gates whether a
+    friction-unknown suggestion can carry a writable `safe_subcommands`
+    override (issue #45)."""
     decision_to_kind = {
         "unsafe": KIND_UNSAFE,
         "unknown": KIND_UNKNOWN,
@@ -495,6 +662,8 @@ def build_groups(records, ran_index, min_fires, min_fires_safe):
         }
         annotate_glob_collisions(suggestion, nonsafe_commands,
                                  own_commands=group["commands"])
+        if kind == KIND_UNKNOWN:
+            suggestion["override"] = compute_override(prefix, known_clis)
         suggestions.append(suggestion)
 
     suggestions.sort(key=lambda s: (KINDS.index(s["kind"]), -s["fires"], s["prefix"]))
@@ -639,6 +808,7 @@ def render_doc(state, log_path, ran_log_path):
                         " (static allows bypass PreToolUse hooks).".format(
                             suggestion["settings_pattern"]))
             else:
+                override = suggestion.get("override") or {}
                 if collisions:
                     lines.append(
                         "- DO NOT whitelist `\"{}\"` — that glob would also"
@@ -651,6 +821,21 @@ def render_doc(state, log_path, ran_log_path):
                         " is read-only regardless of flags; a static allow"
                         " bypasses YOLT's redirect/substitution checks.".format(
                             suggestion["settings_pattern"]))
+                if override.get("writable"):
+                    lines.append(
+                        "- Override route (recommended): `python3"
+                        " hooks/yolt_review.py --write-override {}` writes `{}`"
+                        " to `~/.claude/yolt/shell.json` (validated before"
+                        " write; keeps the AST walk in the loop).".format(
+                            suggestion["id"], override["label"]))
+                    fragment = {"commands": {override["cli"]: override["fragment"]}}
+                    lines.append("  - Fragment: `{}`".format(json.dumps(fragment)))
+                elif override.get("reason"):
+                    lines.append(
+                        "- Override route: {} — hand-write a"
+                        " `~/.claude/yolt/shell.json` rule (issue #45).".format(
+                            override["reason"]))
+                else:
                     lines.append(
                         "- Override route: `~/.claude/yolt/shell.json` /"
                         " `rules.json` for flag-conditional or verb-class rules"
@@ -747,8 +932,10 @@ def cmd_generate(args):
             print("yolt-review: no log records at {}".format(log_path))
         return 0
     ran_index = build_ran_index(read_jsonl(ran_log_path))
+    known_clis = load_known_clis(resolve_rules_dir(args.rules_dir))
     suggestions, stats = build_groups(
-        records, ran_index, args.min_fires, args.min_fires_safe)
+        records, ran_index, args.min_fires, args.min_fires_safe,
+        known_clis=known_clis)
     state_path = state_dir / STATE_NAME
     state = merge_state(load_state(state_path), suggestions, stats)
     save_state(state_path, state)
@@ -847,12 +1034,151 @@ def cmd_mark(args, status):
     return 0
 
 
+def _load_json_obj(path):
+    """Load a JSON object from `path`; {} when missing. Raises ValueError on
+    corrupt content or a non-object so the writer refuses rather than
+    clobbering a file it cannot parse."""
+    retval = {}
+    if path.exists():
+        with open(path, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("{} is not a JSON object".format(path))
+        retval = data
+    return retval
+
+
+def _atomic_write_json(path, obj):
+    """Write `obj` as pretty JSON to `path` via a temp file + os.replace, so a
+    crash mid-write cannot leave a half-written shell.json that bricks the
+    classifier."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def cmd_write_override(args):
+    """Write `safe_subcommands` overrides for the given suggestion ids to the
+    user shell-override file (issue #45). Reads the existing file, merges each
+    writable fragment in (read-modify-write, never clobbering existing
+    entries), validates the result against the bundled rules with
+    `validate_shell_rules`, and only then writes — a malformed override would
+    downgrade the whole hook to `rules-validation-error`. Marks the written
+    suggestions applied and regenerates the doc."""
+    if not _RULES_AVAILABLE:
+        print("yolt-review: rule_classifier unavailable; cannot validate or "
+              "write overrides", file=sys.stderr)
+        return 1
+
+    state_dir = resolve_state_dir(args.state_dir)
+    state_path = state_dir / STATE_NAME
+    state = load_state(state_path)
+    by_id = {s.get("id"): s for s in state.get("suggestions", [])}
+
+    missing = []
+    not_writable = []
+    targets = []  # (cli, fragment, suggestion)
+    for sid in args.ids:
+        suggestion = by_id.get(sid)
+        if suggestion is None:
+            missing.append(sid)
+            continue
+        override = suggestion.get("override") or {}
+        if not override.get("writable"):
+            not_writable.append(
+                (sid, override.get("reason", "not an override-writable suggestion")))
+            continue
+        targets.append((override["cli"], override["fragment"], suggestion))
+
+    for sid in missing:
+        print("yolt-review: unknown id: {}".format(sid), file=sys.stderr)
+    for sid, reason in not_writable:
+        print("yolt-review: {} is not override-writable: {}".format(sid, reason),
+              file=sys.stderr)
+    if not targets:
+        print("yolt-review: nothing to write", file=sys.stderr)
+        return 1
+
+    override_path = resolve_shell_override_path(args.shell_override)
+    try:
+        user_override = _load_json_obj(override_path)
+    except (OSError, ValueError) as e:
+        print("yolt-review: cannot read existing override {}: {}".format(
+            override_path, e), file=sys.stderr)
+        return 1
+
+    commands = user_override.setdefault("commands", {})
+    if not isinstance(commands, dict):
+        print("yolt-review: existing {} has a non-dict 'commands'; refusing to "
+              "edit".format(override_path), file=sys.stderr)
+        return 1
+    # Refuse before mutating if any target CLI already has a non-dict spec:
+    # silently replacing it with {} would clobber a (malformed) user entry and
+    # hide it from the post-merge validation, violating the contract that a
+    # malformed preexisting override is refused and left untouched. The user
+    # must fix the file by hand first.
+    clobbered = sorted({cli for cli, _, _ in targets
+                        if cli in commands and not isinstance(commands[cli], dict)})
+    if clobbered:
+        print("yolt-review: refusing to edit {} — existing non-dict command "
+              "spec(s): {} (fix the file by hand first)".format(
+                  override_path, ", ".join(clobbered)), file=sys.stderr)
+        return 1
+    for cli, fragment, _ in targets:
+        existing_spec = commands.get(cli)
+        if not isinstance(existing_spec, dict):
+            existing_spec = {}
+        commands[cli] = merge_command_fragment(existing_spec, fragment)
+
+    # Validate the merged-with-defaults result before writing: the hook loads
+    # default rules ∪ this override and a single bad key downgrades it all to
+    # rules-validation-error. Reuse merge_shell_overrides so this check runs
+    # the exact merge the hook performs.
+    rules_dir = resolve_rules_dir(args.rules_dir)
+    try:
+        default_rules = load_shell_rules(rules_dir, user_overrides_path=None,
+                                         validate=False)
+    except (OSError, ValueError) as e:
+        print("yolt-review: cannot load default rules from {}: {}".format(
+            rules_dir, e), file=sys.stderr)
+        return 1
+    merged = json.loads(json.dumps(default_rules))  # deep copy
+    merge_shell_overrides(merged, user_override)
+    errors = validate_shell_rules(merged)
+    if errors:
+        print("yolt-review: refusing to write {} — merged rules fail "
+              "validation:".format(override_path), file=sys.stderr)
+        for err in errors:
+            print("  - {}".format(err), file=sys.stderr)
+        return 1
+
+    _atomic_write_json(override_path, user_override)
+
+    for _, _, suggestion in targets:
+        suggestion["status"] = "applied"
+    save_state(state_path, state)
+    doc = render_doc(state, resolve_log_path(args.log),
+                     resolve_ran_log_path(args.ran_log))
+    with open(state_dir / DOC_NAME, "w") as f:
+        f.write(doc)
+
+    print("yolt-review: wrote {} override(s) to {}; marked {} applied".format(
+        len(targets), override_path, len(targets)))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="YOLT self-improvement reviewer (issue #44)")
     parser.add_argument("--log", help="decision log path override")
     parser.add_argument("--ran-log", help="ran log path override")
     parser.add_argument("--state-dir", help="state dir override")
+    parser.add_argument("--rules-dir", help="bundled rules dir override")
+    parser.add_argument("--shell-override",
+                        help="user shell-override file path override")
     parser.add_argument("--min-fires", type=int, default=MIN_FIRES_FRICTION)
     parser.add_argument("--min-fires-safe", type=int, default=MIN_FIRES_FASTPATH)
     parser.add_argument(
@@ -867,6 +1193,10 @@ def main():
     group.add_argument("--list", action="store_true")
     group.add_argument("--applied", nargs="+", metavar="ID", dest="applied_ids")
     group.add_argument("--dismiss", nargs="+", metavar="ID", dest="dismiss_ids")
+    group.add_argument("--write-override", nargs="+", metavar="ID",
+                       dest="write_override_ids",
+                       help="write safe_subcommands override(s) for the given "
+                            "suggestion id(s) to ~/.claude/yolt/shell.json")
     args = parser.parse_args()
 
     retval = 0
@@ -884,6 +1214,9 @@ def main():
     elif args.dismiss_ids:
         args.ids = args.dismiss_ids
         retval = cmd_mark(args, "dismissed")
+    elif args.write_override_ids:
+        args.ids = args.write_override_ids
+        retval = cmd_write_override(args)
     return retval
 
 

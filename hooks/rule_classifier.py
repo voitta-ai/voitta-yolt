@@ -242,17 +242,33 @@ def load_shell_rules(rules_dir, user_overrides_path=None, validate=True):
     if user_overrides_path and Path(user_overrides_path).exists():
         with open(user_overrides_path, "r") as f:
             overrides = json.load(f)
-        for key, value in overrides.items():
-            if key in rules and isinstance(rules[key], dict) and isinstance(value, dict):
-                rules[key].update(value)
-            else:
-                rules[key] = value
+        merge_shell_overrides(rules, overrides)
 
     if validate:
         errors = validate_shell_rules(rules)
         if errors:
             raise ShellRulesValidationError(default_path, user_overrides_path, errors)
 
+    return rules
+
+
+def merge_shell_overrides(rules, overrides):
+    """Merge a user-override dict into loaded shell rules, one level deep per
+    top-level key — the exact semantics `load_shell_rules` applies to
+    `~/.claude/yolt/shell.json`. A dict value is shallow-`update`d into the
+    existing top-level dict (so a `commands` override adds or replaces
+    individual command specs); any other value replaces wholesale (so an
+    override of `safe_write_targets` replaces the whole list rather than
+    extending it). Mutates and returns `rules`.
+
+    Extracted so the reviewer (`yolt_review.py`) can validate a candidate
+    override against the same merge the hook performs, with no second copy
+    of the merge rule to drift from this one (issue #45)."""
+    for key, value in overrides.items():
+        if key in rules and isinstance(rules[key], dict) and isinstance(value, dict):
+            rules[key].update(value)
+        else:
+            rules[key] = value
     return rules
 
 
