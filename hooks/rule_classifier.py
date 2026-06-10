@@ -92,6 +92,7 @@ _SQL_STRIP_RE = re.compile(
     | '(?:[^']|'')*'       # 'single' quoted string ('' is escape)
     | \"(?:[^\"]|\"\")*\"  # "double" quoted ident/string
     | `[^`]*`              # `backtick` ident (MySQL)
+    | \$(\w*)\$.*?\$\1\$   # $$...$$ / $tag$...$tag$ dollar-quoted string (Postgres)
     """,
     re.DOTALL | re.VERBOSE,
 )
@@ -148,12 +149,10 @@ SQL_SIDE_EFFECT_FUNCTIONS = {
     "duckdb": frozenset(),
 }
 
-# Non-function tokens that still mutate/exfil, scanned per dialect. MySQL
-# `SELECT ... INTO OUTFILE/DUMPFILE '...'` writes a file with no function
-# call and no mutating keyword.
-SQL_DIALECT_DENY_TOKENS = {
-    "mysql": frozenset({"OUTFILE", "DUMPFILE"}),
-}
+# MySQL `SELECT ... INTO OUTFILE/DUMPFILE '...'` writes a file with no
+# function call and no mutating keyword. Require the `INTO` context so a
+# plain read of a column/table named `outfile`/`dumpfile` is not flagged.
+_MYSQL_INTO_OUTFILE_RE = re.compile(r"\bINTO\s+(?:OUTFILE|DUMPFILE)\b")
 
 # Postgres `pg_*` system functions are a mostly-side-effecting set, so any
 # pg_-prefixed call is denied unless it is a known read-only one (exact name
@@ -220,11 +219,6 @@ def classify_sql_text(cmd_name, sql):
 
     stripped = _SQL_STRIP_RE.sub(" ", sql).upper()
     dialect = SQL_DIALECT_BY_CLI.get(cmd_name)
-    deny_tokens = (
-        SQL_DIALECT_DENY_TOKENS.get(dialect, frozenset())
-        if dialect is not None
-        else frozenset()
-    )
 
     first_word = None
     for m in _SQL_WORD_RE.finditer(stripped):
@@ -235,10 +229,11 @@ def classify_sql_text(cmd_name, sql):
             retval = (DECISION_UNSAFE,
                       "{}: SQL contains mutating keyword {}".format(cmd_name, word))
             return retval
-        if word in deny_tokens:
-            retval = (DECISION_UNSAFE,
-                      "{}: SQL writes file via {}".format(cmd_name, word))
-            return retval
+
+    if dialect == "mysql" and _MYSQL_INTO_OUTFILE_RE.search(stripped):
+        retval = (DECISION_UNSAFE,
+                  "{}: SQL writes file via INTO OUTFILE/DUMPFILE".format(cmd_name))
+        return retval
 
     func_decision = _classify_sql_functions(cmd_name, dialect, stripped)
     if func_decision is not None:

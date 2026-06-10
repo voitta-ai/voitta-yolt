@@ -664,6 +664,28 @@ class TestSqlFunctionSideEffects(unittest.TestCase):
             "psql", "SELECT name FROM users WHERE note = 'pg_sleep(9)'")
         self.assertEqual(d, DECISION_SAFE)
 
+    def test_function_name_in_dollar_quote_stays_safe(self):
+        # Postgres dollar-quoted string literal is stripped before scanning.
+        d, _ = classify_sql_text("psql", "SELECT $$pg_sleep(9)$$")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_function_name_in_tagged_dollar_quote_stays_safe(self):
+        d, _ = classify_sql_text("psql", "SELECT $tag$pg_sleep(9)$tag$")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_outfile_column_name_safe(self):
+        # Bare OUTFILE/DUMPFILE without INTO context is a plain identifier.
+        d, _ = classify_sql_text("mysql", "SELECT outfile FROM t")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_dumpfile_column_name_safe(self):
+        d, _ = classify_sql_text("mysql", "SELECT dumpfile FROM t")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_from_outfile_table_name_safe(self):
+        d, _ = classify_sql_text("mysql", "SELECT * FROM outfile")
+        self.assertEqual(d, DECISION_SAFE)
+
     def test_plain_select_still_safe(self):
         d, _ = classify_sql_text("psql", "SELECT * FROM users WHERE id = 1")
         self.assertEqual(d, DECISION_SAFE)
