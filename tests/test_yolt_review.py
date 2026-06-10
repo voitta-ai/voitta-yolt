@@ -698,6 +698,30 @@ class TestWriteOverride(unittest.TestCase):
             state = load_state(state_dir / STATE_NAME)
             self.assertEqual(state["suggestions"][0]["status"], "pending")
 
+    def test_non_dict_existing_command_spec_is_refused_untouched(self):
+        # Regression (PR #49 [codex] review): a non-dict existing
+        # commands.<cli> must NOT be silently overwritten with {} before
+        # validation. The whole write is refused and the file is untouched,
+        # honoring the never-clobber contract.
+        known = load_known_clis(RULES_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            shell_override = Path(tmp) / "shell.json"
+            payload = {"commands": {"mycli": "not-a-dict"}}
+            shell_override.write_text(json.dumps(payload))
+            sug = _writable_suggestion("mycli status", known)
+            _seed_state(state_dir, [sug])
+
+            rc, err = _run_write(
+                _write_args([sug["id"]], tmp, state_dir, shell_override))
+
+            self.assertEqual(rc, 1)
+            self.assertIn("non-dict command spec", err)
+            self.assertEqual(json.loads(shell_override.read_text()), payload)
+            state = load_state(state_dir / STATE_NAME)
+            self.assertEqual(state["suggestions"][0]["status"], "pending")
+
     def test_not_writable_id_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"

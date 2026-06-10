@@ -1115,6 +1115,18 @@ def cmd_write_override(args):
         print("yolt-review: existing {} has a non-dict 'commands'; refusing to "
               "edit".format(override_path), file=sys.stderr)
         return 1
+    # Refuse before mutating if any target CLI already has a non-dict spec:
+    # silently replacing it with {} would clobber a (malformed) user entry and
+    # hide it from the post-merge validation, violating the contract that a
+    # malformed preexisting override is refused and left untouched. The user
+    # must fix the file by hand first.
+    clobbered = sorted({cli for cli, _, _ in targets
+                        if cli in commands and not isinstance(commands[cli], dict)})
+    if clobbered:
+        print("yolt-review: refusing to edit {} — existing non-dict command "
+              "spec(s): {} (fix the file by hand first)".format(
+                  override_path, ", ".join(clobbered)), file=sys.stderr)
+        return 1
     for cli, fragment, _ in targets:
         existing_spec = commands.get(cli)
         if not isinstance(existing_spec, dict):
