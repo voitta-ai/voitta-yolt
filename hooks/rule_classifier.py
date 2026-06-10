@@ -367,23 +367,31 @@ def _expand_home(path):
     return path
 
 
-def _path_matches_safe_write_targets(target, safe_write_targets):
-    """Return True if `target` matches any of `safe_write_targets` under
-    fnmatch semantics. Mirrors the redirect-target check that
-    `grammar_classifier._target_is_safe_write` runs against `> file`
-    redirects, so flag-value writes (e.g. `find -fprint FILE`) and
-    redirect writes use the same white list."""
-    if not safe_write_targets:
+def _path_matches_target_list(target, patterns):
+    """Return True if `target` matches any glob in `patterns` under fnmatch
+    semantics, comparing both the raw token and its `~/`-expanded form.
+    Shared by the safe-write and unsafe-write target checks so redirect
+    writes and command write-args match identically."""
+    if not patterns:
         return False
     expanded = _expand_home(target)
-    for pat in safe_write_targets:
+    for pat in patterns:
         pat_expanded = _expand_home(pat)
         if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
             return True
     return False
 
 
-def check_unsafe_flags(cmd_args, spec, safe_write_targets=None):
+def _path_matches_safe_write_targets(target, safe_write_targets):
+    """Return True if `target` matches any of `safe_write_targets`. Mirrors
+    `grammar_classifier._target_is_safe_write` so flag-value writes
+    (e.g. `find -fprint FILE`) and `> file` redirects use the same white
+    list."""
+    return _path_matches_target_list(target, safe_write_targets)
+
+
+def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
+                       unsafe_write_targets=None):
     """Check whether cmd_args contains a flag combination the command spec
     declares unsafe. Returns a human-readable description, or None.
 
@@ -402,9 +410,23 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None):
       value.
     - `write_flag_value_targets`: list of flags whose immediately
       following value is a file path the command will write to
-      (`find -fprint FILE`). The path is checked against the top-level
-      `safe_write_targets` white list; a non-matching path makes the
-      call unsafe. Requires `safe_write_targets` to be passed in.
+      (`find -fprint FILE`, `install -t DIR`). The value is checked
+      against the top-level `unsafe_write_targets` deny list first
+      (a match flags a protected-path write) and then the
+      `safe_write_targets` white list (a non-matching path makes the
+      call unsafe). Requires those lists to be passed in.
+    - `write_value_prefix_targets`: list of token prefixes whose suffix
+      is a write-target path (`dd of=PATH`). The suffix is checked
+      against `unsafe_write_targets`.
+    - `write_target_last_positional` / `write_target_all_positional`:
+      the last / every non-flag positional argument is a write-target
+      path (`cp SRC DST`, `tee FILE...`). Checked against
+      `unsafe_write_targets`.
+
+    The last three only consult the deny list. The commands that use
+    them are already `default: unsafe`, so a deny match upgrades the
+    reason from a generic prompt to a specific protected-path one; a
+    non-match falls through to the command default.
     """
     unsafe_flag_values = spec.get("unsafe_flag_values", {})
     unsafe_flag_any_value = set(spec.get("unsafe_flag_any_value", []))
@@ -447,15 +469,40 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None):
             value = inline_value
             if value is None and i + 1 < len(cmd_args):
                 value = cmd_args[i + 1]
-            if value is not None and not _path_matches_safe_write_targets(
-                value, safe_write_targets
-            ):
-                return "{} {}".format(flag, value)
+            if value is not None:
+                if _path_matches_target_list(value, unsafe_write_targets):
+                    return "{} {} (protected path)".format(flag, value)
+                if not _path_matches_safe_write_targets(value, safe_write_targets):
+                    return "{} {}".format(flag, value)
 
         if flag in unsafe_flag_any_value:
             return flag
 
         i += 1
+
+    # Write-target arguments routed through the unsafe_write_targets deny
+    # list. The commands carrying these fields are already
+    # `default: unsafe`, so a match upgrades the reason to a specific
+    # protected-path one; a non-match falls through to the default.
+    if unsafe_write_targets:
+        for pref in spec.get("write_value_prefix_targets", []):
+            for tok in cmd_args:
+                if tok.startswith(pref):
+                    value = tok[len(pref):]
+                    if value and _path_matches_target_list(
+                        value, unsafe_write_targets
+                    ):
+                        return "{}{} (protected path)".format(pref, value)
+
+        positionals = [a for a in cmd_args if not a.startswith("-")]
+        targets = []
+        if spec.get("write_target_all_positional"):
+            targets = positionals
+        elif spec.get("write_target_last_positional") and positionals:
+            targets = [positionals[-1]]
+        for value in targets:
+            if _path_matches_target_list(value, unsafe_write_targets):
+                return "{} (protected path)".format(value)
 
     return None
 
@@ -467,9 +514,9 @@ _ALLOWED_DEFAULTS = frozenset({
 })
 
 _ALLOWED_TOP_LEVEL_KEYS = frozenset({
-    "_meta", "_safe_write_targets_note",
+    "_meta", "_safe_write_targets_note", "_unsafe_write_targets_note",
     "shell_builtins_safe", "shell_keywords",
-    "safe_write_targets",
+    "safe_write_targets", "unsafe_write_targets",
     "commands", "interpreters",
 })
 
@@ -478,6 +525,8 @@ _ALLOWED_COMMAND_KEYS = frozenset({
     "unsafe_flag_values", "unsafe_flag_any_value",
     "unsafe_flags_without_value", "unsafe_flag_value_prefix",
     "write_flag_value_targets",
+    "write_value_prefix_targets",
+    "write_target_last_positional", "write_target_all_positional",
     "valueless_flags",
     "safe_subcommands", "unsafe_subcommands",
     "safe_subcommand_patterns", "unsafe_subcommand_patterns",
@@ -676,6 +725,7 @@ class RuleClassifier:
         self.shell_builtins_safe = set(rules.get("shell_builtins_safe", []))
         self.interpreters = rules.get("interpreters", {})
         self.safe_write_targets = list(rules.get("safe_write_targets", []))
+        self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
         self.python_analyzer_factory = python_analyzer_factory
         # When a `bash -c '<script>'` interpreter call needs nested analysis,
         # the grammar walker injects itself here as a callable
@@ -834,7 +884,9 @@ class RuleClassifier:
         default = spec.get("default", "unknown")
 
         unsafe_match = check_unsafe_flags(
-            cmd_args, spec, safe_write_targets=self.safe_write_targets
+            cmd_args, spec,
+            safe_write_targets=self.safe_write_targets,
+            unsafe_write_targets=self.unsafe_write_targets,
         )
         if unsafe_match:
             return (DECISION_UNSAFE, "{}: flag {}".format(cmd_name, unsafe_match))
@@ -874,7 +926,9 @@ class RuleClassifier:
         if sub in nested:
             nested_spec = nested[sub]
             nested_unsafe = check_unsafe_flags(
-                remaining_args, nested_spec, safe_write_targets=self.safe_write_targets
+                remaining_args, nested_spec,
+                safe_write_targets=self.safe_write_targets,
+                unsafe_write_targets=self.unsafe_write_targets,
             )
             if nested_unsafe:
                 return (DECISION_UNSAFE, "{} {}: flag {}".format(cmd_name, sub, nested_unsafe))

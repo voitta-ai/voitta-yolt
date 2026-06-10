@@ -87,8 +87,12 @@ class TestHookEndToEnd(unittest.TestCase):
         # its default (prompt the user).
         self.assertIsNone(self._decision("somecommand_unknown --flag"))
 
-    def test_redirect_to_system_file_exits_silently(self):
-        self.assertIsNone(self._decision("echo x > /etc/profile"))
+    def test_redirect_to_system_file_returns_ask(self):
+        # /etc/* is on the unsafe_write_targets deny list (issue #28): the
+        # hook now classifies it unsafe and emits `ask` with a specific
+        # reason, instead of staying silent and deferring to the default
+        # prompt.
+        self.assertEqual(self._decision("echo x > /etc/profile"), "ask")
 
     def test_compound_aws_loop_returns_allow(self):
         cmd = (

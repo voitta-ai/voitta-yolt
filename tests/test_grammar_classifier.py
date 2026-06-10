@@ -310,8 +310,11 @@ class TestClassifyScenarios(unittest.TestCase):
             "aws ec2 describe-instances > out.json", DECISION_UNKNOWN,
         )
 
-    def test_echo_to_system_file_is_unknown(self):
-        self.assertDecision("echo x > /etc/profile", DECISION_UNKNOWN)
+    def test_echo_to_system_file_is_unsafe(self):
+        # /etc/* is on the unsafe_write_targets deny list (issue #28), so a
+        # redirect there classifies unsafe (ask with a specific reason)
+        # rather than unknown (contextless default prompt).
+        self.assertDecision("echo x > /etc/profile", DECISION_UNSAFE)
 
     def test_redirect_to_tmp_is_safe(self):
         # /tmp/* is on the default safe-write list — benign in practice
@@ -704,6 +707,98 @@ class TestSafeWriteTargets(unittest.TestCase):
         clf = self._make_classifier_with_targets(["/dev/null"])
         d, _ = clf.classify("echo x >> /tmp/foo")
         self.assertEqual(d, DECISION_UNKNOWN)
+
+
+class TestUnsafeWriteTargets(unittest.TestCase):
+    """Redirect targets on `rules.unsafe_write_targets` (issue #28).
+
+    A write redirect to a dotfile / config / startup path classifies
+    `unsafe` (ask with a specific reason) instead of `unknown`
+    (contextless default prompt). The deny list is consulted before the
+    safe list, so an entry on it overrides a broader safe glob -- this is
+    what closes the `~/.claude/settings.json` hole, where `~/.claude/*`
+    is a safe-write target but settings.json can disable the hook."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, command, expected):
+        decision, reason = self.clf.classify(command)
+        self.assertEqual(
+            decision, expected,
+            "{!r}: got {}, reason={}".format(command, decision, reason),
+        )
+
+    def test_redirect_to_bashrc_is_unsafe(self):
+        self.assertDecision("echo x > ~/.bashrc", DECISION_UNSAFE)
+
+    def test_redirect_to_etc_is_unsafe(self):
+        self.assertDecision("echo x > /etc/profile", DECISION_UNSAFE)
+
+    def test_append_redirect_to_authorized_keys_is_unsafe(self):
+        # `>>` (append) is a write too -- the common authorized_keys attack.
+        self.assertDecision(
+            "echo pubkey >> ~/.ssh/authorized_keys", DECISION_UNSAFE
+        )
+
+    def test_glob_entry_matches_id_files(self):
+        # `~/.ssh/id_*` glob.
+        self.assertDecision("echo x > ~/.ssh/id_ed25519", DECISION_UNSAFE)
+
+    def test_settings_json_overrides_safe_claude_glob(self):
+        # ~/.claude/* is a safe-write target, but settings.json is on the
+        # deny list and the deny list wins.
+        self.assertDecision(
+            "echo pwn > ~/.claude/settings.json", DECISION_UNSAFE
+        )
+        self.assertDecision(
+            "echo pwn > ~/.claude/settings.local.json", DECISION_UNSAFE
+        )
+
+    def test_other_claude_paths_stay_safe(self):
+        # The carve-out is settings.json only; the rest of ~/.claude/*
+        # remains a safe-write target.
+        self.assertDecision("echo x > ~/.claude/cache.json", DECISION_SAFE)
+
+    def test_non_protected_target_still_unknown(self):
+        # A non-deny, non-safe target is unchanged: still unknown.
+        self.assertDecision("echo x > out.json", DECISION_UNKNOWN)
+
+    def test_reason_names_the_protected_path(self):
+        _, reason = self.clf.classify("echo x > ~/.bashrc")
+        self.assertIn("~/.bashrc", reason)
+        self.assertIn("protected", reason)
+
+    def test_whitelist_still_overrides_unsafe_redirect(self):
+        # Consistent with every other unsafe atom: an explicit user allow
+        # pattern upgrades the deny-path write to safe.
+        clf = _make_classifier(allow_patterns=["echo *"])
+        d, _ = clf.classify("echo x > /etc/profile")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_safe_first_redirect_does_not_mask_unsafe_second(self):
+        # Every write redirect is evaluated, not just the first: a safe
+        # leading target must not mask a later protected one.
+        self.assertDecision("echo x > /tmp/safe > ~/.bashrc", DECISION_UNSAFE)
+
+    def test_safe_stdout_redirect_does_not_mask_unsafe_stderr(self):
+        # The masked redirect can be a different fd (`2>`), still a write.
+        self.assertDecision("echo x > /tmp/safe 2> ~/.bashrc", DECISION_UNSAFE)
+
+    def test_masked_unsafe_reason_names_the_protected_path(self):
+        _, reason = self.clf.classify("echo x > /tmp/safe > ~/.bashrc")
+        self.assertIn("~/.bashrc", reason)
+        self.assertIn("protected", reason)
+
+    def test_safe_first_redirect_does_not_mask_unknown_second(self):
+        # unsafe > unknown > safe precedence: a non-deny non-safe later
+        # target downgrades the whole statement to unknown.
+        self.assertDecision("echo x > /tmp/safe > out.json", DECISION_UNKNOWN)
+
+    def test_all_safe_redirects_fall_through_to_command(self):
+        # Multiple redirects that are all safe still classify the command.
+        self.assertDecision("echo x > /tmp/a > /tmp/b", DECISION_SAFE)
 
 
 class TestClassifierAllowPatterns(unittest.TestCase):

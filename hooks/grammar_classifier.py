@@ -56,6 +56,7 @@ class GrammarClassifier:
         self.python_analyzer_factory = python_analyzer_factory
         self.allow_patterns = list(allow_patterns) if allow_patterns else []
         self.safe_write_targets = list(rules.get("safe_write_targets", ["/dev/null"]))
+        self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
         self._rules = RuleClassifier(
             rules,
             python_analyzer_factory=python_analyzer_factory,
@@ -141,17 +142,39 @@ class GrammarClassifier:
             self._walk(c, src, decisions, _depth)
 
     def _walk_redirected(self, node, src, decisions, _depth):
-        writes = False
+        write_targets = []
         for c in node.children:
-            if c.type == "file_redirect" and self._redirect_writes_to_file(c, src):
-                writes = True
-                break
-        if writes:
+            if c.type == "file_redirect":
+                t = self._redirect_write_target(c, src)
+                if t is not None:
+                    write_targets.append(t)
+        # Evaluate EVERY write redirect with unsafe > unknown > safe
+        # precedence. A safe first redirect must not mask a later unsafe or
+        # unknown target -- e.g. `echo x > /tmp/ok > ~/.bashrc` and
+        # `echo x > /tmp/ok 2> ~/.bashrc` both still write ~/.bashrc.
+        # Deny list is checked before the safe list, so a protected path
+        # (e.g. ~/.claude/settings.json) overrides a broader safe glob
+        # (~/.claude/*) and classifies unsafe.
+        unsafe_target = next(
+            (t for t in write_targets if self._target_is_unsafe_write(t)),
+            None,
+        )
+        if unsafe_target is not None:
+            seg = self._slice(node, src)
+            decisions.append(self._maybe_allow(
+                seg, (DECISION_UNSAFE,
+                      "writes to protected path '{}' via redirection".format(
+                          unsafe_target)),
+            ))
+            return
+        if any(not self._target_is_safe_write(t) for t in write_targets):
             seg = self._slice(node, src)
             decisions.append(self._maybe_allow(
                 seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
             ))
             return
+        # All write targets safe (or none): fall through and classify the
+        # command itself.
 
         cmd_node = self._first_child(node, "command")
         heredoc_node = self._first_child(node, "heredoc_redirect")
@@ -279,7 +302,10 @@ class GrammarClassifier:
 
     # --- Helpers ---
 
-    def _redirect_writes_to_file(self, redirect_node, src):
+    def _redirect_write_target(self, redirect_node, src):
+        """Return the target path of a write redirect (`> FILE`, `>> FILE`),
+        or None if this redirect is not a write. The caller classifies the
+        target's tier (unsafe / safe / unknown); this only extracts it."""
         op = None
         target = None
         for c in redirect_node.children:
@@ -289,13 +315,9 @@ class GrammarClassifier:
                 target = self._slice(c, src)
             elif c.type == "string" and target is None:
                 target = self._reconstruct_string(c, src)
-        if op is None:
-            return False
-        if target is None:
-            return False
-        if self._target_is_safe_write(target):
-            return False
-        return True
+        if op is None or target is None:
+            return None
+        return target
 
     def _target_is_safe_write(self, target):
         """Match `target` against the configured safe-write globs from
@@ -304,6 +326,20 @@ class GrammarClassifier:
         `~/.cache/*` both line up. Uses fnmatch semantics."""
         expanded = self._expand_home(target)
         for pat in self.safe_write_targets:
+            pat_expanded = self._expand_home(pat)
+            if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
+                return True
+        return False
+
+    def _target_is_unsafe_write(self, target):
+        """Match `target` against rules/shell.json#unsafe_write_targets --
+        dotfile / config / startup paths dangerous enough to classify
+        unsafe (ask with a specific reason) rather than unknown. Same
+        fnmatch + `~/`-expansion semantics as `_target_is_safe_write`.
+        Checked before the safe list so an entry here overrides a broader
+        safe glob (the ~/.claude/settings.json carve-out)."""
+        expanded = self._expand_home(target)
+        for pat in self.unsafe_write_targets:
             pat_expanded = self._expand_home(pat)
             if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
                 return True
