@@ -57,13 +57,21 @@ BASH_PATTERN_RE = re.compile(r"^Bash\((.*)\)$")
 # keyword. This treats `EXPLAIN DELETE FROM t` as unsafe (the DELETE
 # keyword is still present even though it would not execute); we accept
 # that false-positive to keep the rule simple.
+#
+# Keyword-only scanning misses side-effecting *functions* called from
+# inside an otherwise read-looking statement (`SELECT pg_terminate_backend(...)`,
+# `SELECT LOAD_FILE('/etc/passwd')`, `SELECT load_extension('evil.so')`).
+# After the keyword pass we therefore scan `IDENT(` function calls against
+# per-dialect deny lists, plus MySQL `INTO OUTFILE/DUMPFILE` file-write
+# tokens. Dialect is taken from the CLI name (psql->postgres, mysql/mariadb
+# ->mysql, sqlite3->sqlite, duckdb->duckdb). See issue #26.
 
 SQL_MUTATING_KEYWORDS = frozenset({
     "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
     "TRUNCATE", "REPLACE", "MERGE", "GRANT", "REVOKE",
     "VACUUM", "REINDEX", "ATTACH", "DETACH",
     "COMMIT", "ROLLBACK", "BEGIN", "SAVEPOINT", "RELEASE",
-    "CALL", "EXEC", "EXECUTE",
+    "CALL", "EXEC", "EXECUTE", "DO",
     "COPY", "LOAD", "IMPORT",
     "LOCK", "UNLOCK",
     "SET", "RESET",
@@ -107,6 +115,83 @@ SQLITE_DOT_UNSAFE = frozenset({
     ".archive", ".clone", ".log", ".recover",
 })
 
+# SQL dialect per CLI name. mysql and mariadb share a dialect.
+SQL_DIALECT_BY_CLI = {
+    "psql": "postgres",
+    "mysql": "mysql",
+    "mariadb": "mysql",
+    "sqlite3": "sqlite",
+    "duckdb": "duckdb",
+}
+
+# Side-effecting functions that can be called from inside a SELECT and so
+# slip past the keyword + safe-first-keyword check. Names are lowercase for
+# case-insensitive matching. See issue #26 for the source enumeration.
+SQL_SIDE_EFFECT_FUNCTIONS = {
+    "postgres": frozenset({
+        "pg_terminate_backend", "pg_cancel_backend", "pg_promote",
+        "pg_reload_conf", "pg_rotate_logfile",
+        "nextval", "setval",
+        "lo_unlink", "lo_export", "lo_import",
+        "pg_read_file", "pg_read_binary_file", "pg_ls_dir",
+        "dblink_exec", "pg_logical_emit_message",
+        "pg_advisory_lock", "pg_advisory_xact_lock",
+        "pg_sleep", "pg_sleep_for", "pg_sleep_until",
+        "set_config",
+    }),
+    "mysql": frozenset({
+        "load_file", "get_lock", "sleep", "benchmark",
+    }),
+    "sqlite": frozenset({
+        "load_extension", "randomblob",
+    }),
+    "duckdb": frozenset(),
+}
+
+# Non-function tokens that still mutate/exfil, scanned per dialect. MySQL
+# `SELECT ... INTO OUTFILE/DUMPFILE '...'` writes a file with no function
+# call and no mutating keyword.
+SQL_DIALECT_DENY_TOKENS = {
+    "mysql": frozenset({"OUTFILE", "DUMPFILE"}),
+}
+
+# Postgres `pg_*` system functions are a mostly-side-effecting set, so any
+# pg_-prefixed call is denied unless it is a known read-only one (exact name
+# or a read-only prefix such as `pg_get_*`). See issue #26.
+PG_READONLY_FUNCTIONS = frozenset({
+    "pg_database_size", "pg_relation_size", "pg_total_relation_size",
+    "pg_typeof", "pg_size_pretty",
+})
+PG_READONLY_PREFIXES = ("pg_get_",)
+
+# Function-call identifier immediately followed by `(` (optional whitespace).
+_SQL_FUNC_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _classify_sql_functions(cmd_name, dialect, stripped):
+    """Scan stripped+uppercased SQL for side-effecting function calls.
+    Returns a (decision, reason) tuple when a denied function is found,
+    else None. `stripped` has had comments/literals removed already."""
+    if dialect is None:
+        return None
+    deny = SQL_SIDE_EFFECT_FUNCTIONS.get(dialect, frozenset())
+    for m in _SQL_FUNC_RE.finditer(stripped):
+        ident = m.group(1).lower()
+        if ident in deny:
+            retval = (DECISION_UNSAFE,
+                      "{}: side-effecting function {}()".format(cmd_name, ident))
+            return retval
+        if dialect == "postgres" and ident.startswith("pg_"):
+            if ident in PG_READONLY_FUNCTIONS:
+                continue
+            if any(ident.startswith(p) for p in PG_READONLY_PREFIXES):
+                continue
+            retval = (DECISION_UNSAFE,
+                      "{}: postgres system function {}() not read-only "
+                      "allowlisted".format(cmd_name, ident))
+            return retval
+    return None
+
 
 def classify_sql_text(cmd_name, sql):
     """Return (decision, reason) for a single SQL string passed to a
@@ -134,6 +219,12 @@ def classify_sql_text(cmd_name, sql):
         return retval
 
     stripped = _SQL_STRIP_RE.sub(" ", sql).upper()
+    dialect = SQL_DIALECT_BY_CLI.get(cmd_name)
+    deny_tokens = (
+        SQL_DIALECT_DENY_TOKENS.get(dialect, frozenset())
+        if dialect is not None
+        else frozenset()
+    )
 
     first_word = None
     for m in _SQL_WORD_RE.finditer(stripped):
@@ -144,6 +235,14 @@ def classify_sql_text(cmd_name, sql):
             retval = (DECISION_UNSAFE,
                       "{}: SQL contains mutating keyword {}".format(cmd_name, word))
             return retval
+        if word in deny_tokens:
+            retval = (DECISION_UNSAFE,
+                      "{}: SQL writes file via {}".format(cmd_name, word))
+            return retval
+
+    func_decision = _classify_sql_functions(cmd_name, dialect, stripped)
+    if func_decision is not None:
+        return func_decision
 
     if first_word == "PRAGMA":
         if "=" in stripped:

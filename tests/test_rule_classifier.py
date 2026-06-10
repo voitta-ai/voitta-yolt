@@ -537,6 +537,143 @@ class TestClassifySqlText(unittest.TestCase):
         self.assertEqual(d, DECISION_SAFE)
 
 
+class TestSqlFunctionSideEffects(unittest.TestCase):
+    """Issue #26: side-effecting functions called from inside a read-looking
+    statement must not classify safe just because the first keyword is
+    SELECT/WITH/etc."""
+
+    def test_pg_terminate_backend_unsafe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_terminate_backend(12345)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_pg_cancel_backend_unsafe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_cancel_backend(12345)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_pg_read_file_unsafe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_read_file('/etc/passwd')")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_pg_sleep_unsafe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_sleep(1e9)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_nextval_unsafe(self):
+        d, _ = classify_sql_text("psql", "SELECT nextval('s')")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_setval_unsafe(self):
+        d, _ = classify_sql_text("psql", "SELECT setval('s', 1)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_dblink_exec_unsafe(self):
+        d, _ = classify_sql_text(
+            "psql", "SELECT dblink_exec('conn', 'DROP TABLE t')")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_set_config_unsafe(self):
+        d, _ = classify_sql_text(
+            "psql", "SELECT set_config('search_path', 'evil', false)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_pg_unknown_system_function_unsafe(self):
+        # pg_* prefix is denied unless on the read-only allowlist.
+        d, _ = classify_sql_text("psql", "SELECT pg_switch_wal()")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_pg_database_size_safe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_database_size('db')")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_pg_relation_size_safe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_relation_size('t')")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_pg_get_prefix_safe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_get_constraintdef(1)")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_pg_typeof_safe(self):
+        d, _ = classify_sql_text("psql", "SELECT pg_typeof(1)")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_do_block_unsafe(self):
+        # DO is now a mutating keyword; the anonymous block can side-effect.
+        d, _ = classify_sql_text(
+            "psql",
+            "DO $$ BEGIN PERFORM pg_terminate_backend(0); END $$",
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mysql_get_lock_unsafe(self):
+        d, _ = classify_sql_text("mysql", "SELECT GET_LOCK('x', 9999)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mysql_sleep_unsafe(self):
+        d, _ = classify_sql_text("mysql", "SELECT SLEEP(1e9)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mysql_benchmark_unsafe(self):
+        d, _ = classify_sql_text("mysql", "SELECT BENCHMARK(1e9, MD5('x'))")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mysql_load_file_unsafe(self):
+        d, _ = classify_sql_text("mysql", "SELECT LOAD_FILE('/etc/passwd')")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mysql_into_outfile_unsafe(self):
+        d, _ = classify_sql_text(
+            "mysql", "SELECT * FROM t INTO OUTFILE '/tmp/x'")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mysql_into_dumpfile_unsafe(self):
+        d, _ = classify_sql_text(
+            "mysql", "SELECT * FROM t INTO DUMPFILE '/tmp/x'")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_mariadb_sleep_unsafe(self):
+        d, _ = classify_sql_text("mariadb", "SELECT SLEEP(99)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_sqlite_load_extension_unsafe(self):
+        d, _ = classify_sql_text(
+            "sqlite3", "SELECT load_extension('/path/to/evil.so')")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_sqlite_randomblob_unsafe(self):
+        d, _ = classify_sql_text("sqlite3", "SELECT randomblob(1099511627776)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_explain_analyze_insert_unsafe(self):
+        # Postgres EXPLAIN ANALYZE executes the wrapped DML.
+        d, _ = classify_sql_text(
+            "psql", "EXPLAIN ANALYZE INSERT INTO t VALUES (1)")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_with_cte_delete_returning_unsafe(self):
+        # DML in a CTE; scanner is not gated on the first keyword only.
+        d, _ = classify_sql_text(
+            "psql",
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_function_name_in_literal_stays_safe(self):
+        # A denied function name inside a string literal is stripped first.
+        d, _ = classify_sql_text(
+            "psql", "SELECT name FROM users WHERE note = 'pg_sleep(9)'")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_plain_select_still_safe(self):
+        d, _ = classify_sql_text("psql", "SELECT * FROM users WHERE id = 1")
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_count_function_safe(self):
+        # Ordinary aggregate functions are not on any deny list.
+        d, _ = classify_sql_text("mysql", "SELECT COUNT(*) FROM t")
+        self.assertEqual(d, DECISION_SAFE)
+
+
 class TestParseSqlCliArgv(unittest.TestCase):
     def test_sqlite3_positional_sql(self):
         spec = {"sql_positional_index": 1}
