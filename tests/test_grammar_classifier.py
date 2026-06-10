@@ -777,6 +777,29 @@ class TestUnsafeWriteTargets(unittest.TestCase):
         d, _ = clf.classify("echo x > /etc/profile")
         self.assertEqual(d, DECISION_SAFE)
 
+    def test_safe_first_redirect_does_not_mask_unsafe_second(self):
+        # Every write redirect is evaluated, not just the first: a safe
+        # leading target must not mask a later protected one.
+        self.assertDecision("echo x > /tmp/safe > ~/.bashrc", DECISION_UNSAFE)
+
+    def test_safe_stdout_redirect_does_not_mask_unsafe_stderr(self):
+        # The masked redirect can be a different fd (`2>`), still a write.
+        self.assertDecision("echo x > /tmp/safe 2> ~/.bashrc", DECISION_UNSAFE)
+
+    def test_masked_unsafe_reason_names_the_protected_path(self):
+        _, reason = self.clf.classify("echo x > /tmp/safe > ~/.bashrc")
+        self.assertIn("~/.bashrc", reason)
+        self.assertIn("protected", reason)
+
+    def test_safe_first_redirect_does_not_mask_unknown_second(self):
+        # unsafe > unknown > safe precedence: a non-deny non-safe later
+        # target downgrades the whole statement to unknown.
+        self.assertDecision("echo x > /tmp/safe > out.json", DECISION_UNKNOWN)
+
+    def test_all_safe_redirects_fall_through_to_command(self):
+        # Multiple redirects that are all safe still classify the command.
+        self.assertDecision("echo x > /tmp/a > /tmp/b", DECISION_SAFE)
+
 
 class TestClassifierAllowPatterns(unittest.TestCase):
     """Whitelist upgrades unknown and unsafe matches to safe."""

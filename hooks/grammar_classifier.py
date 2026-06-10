@@ -142,32 +142,39 @@ class GrammarClassifier:
             self._walk(c, src, decisions, _depth)
 
     def _walk_redirected(self, node, src, decisions, _depth):
-        write_target = None
+        write_targets = []
         for c in node.children:
             if c.type == "file_redirect":
                 t = self._redirect_write_target(c, src)
                 if t is not None:
-                    write_target = t
-                    break
-        if write_target is not None:
-            # Deny list is checked before the safe list, so a protected
-            # path (e.g. ~/.claude/settings.json) overrides a broader safe
-            # glob (~/.claude/*) and classifies unsafe.
-            if self._target_is_unsafe_write(write_target):
-                seg = self._slice(node, src)
-                decisions.append(self._maybe_allow(
-                    seg, (DECISION_UNSAFE,
-                          "writes to protected path '{}' via redirection".format(
-                              write_target)),
-                ))
-                return
-            if not self._target_is_safe_write(write_target):
-                seg = self._slice(node, src)
-                decisions.append(self._maybe_allow(
-                    seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
-                ))
-                return
-            # Safe target: fall through and classify the command itself.
+                    write_targets.append(t)
+        # Evaluate EVERY write redirect with unsafe > unknown > safe
+        # precedence. A safe first redirect must not mask a later unsafe or
+        # unknown target -- e.g. `echo x > /tmp/ok > ~/.bashrc` and
+        # `echo x > /tmp/ok 2> ~/.bashrc` both still write ~/.bashrc.
+        # Deny list is checked before the safe list, so a protected path
+        # (e.g. ~/.claude/settings.json) overrides a broader safe glob
+        # (~/.claude/*) and classifies unsafe.
+        unsafe_target = next(
+            (t for t in write_targets if self._target_is_unsafe_write(t)),
+            None,
+        )
+        if unsafe_target is not None:
+            seg = self._slice(node, src)
+            decisions.append(self._maybe_allow(
+                seg, (DECISION_UNSAFE,
+                      "writes to protected path '{}' via redirection".format(
+                          unsafe_target)),
+            ))
+            return
+        if any(not self._target_is_safe_write(t) for t in write_targets):
+            seg = self._slice(node, src)
+            decisions.append(self._maybe_allow(
+                seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
+            ))
+            return
+        # All write targets safe (or none): fall through and classify the
+        # command itself.
 
         cmd_node = self._first_child(node, "command")
         heredoc_node = self._first_child(node, "heredoc_redirect")

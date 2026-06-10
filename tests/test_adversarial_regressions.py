@@ -409,6 +409,19 @@ class TestIssue28UnsafeWriteTargets(unittest.TestCase):
             "allow",
         )
 
+    def test_safe_first_redirect_does_not_mask_unsafe_second(self):
+        # Regression: `_walk_redirected` stopped at the first write target,
+        # so a safe leading redirect (/tmp) auto-allowed a statement that
+        # also writes a protected path. Every write redirect is now checked.
+        self.assertEqual(
+            _Hook.decision_for("echo x > /tmp/safe > ~/.bashrc"),
+            "ask",
+        )
+        self.assertEqual(
+            _Hook.decision_for("echo x > /tmp/safe 2> ~/.bashrc"),
+            "ask",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
