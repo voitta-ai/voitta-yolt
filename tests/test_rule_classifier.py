@@ -400,6 +400,26 @@ class TestAwsSqlPayloadFlags(unittest.TestCase):
         )
         self.assertEqual(d, DECISION_UNKNOWN)
 
+    def test_athena_missing_flag_with_safe_override_is_unknown(self):
+        # A registered SQL op with a safe override but no --query-string must
+        # NOT inherit the blanket-safe verb decision: the payload is
+        # unscannable, so it downgrades to unknown rather than safe.
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution"],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_athena_cli_input_json_with_safe_override_is_unknown(self):
+        # Alternate input form (--cli-input-json) carries the SQL off the
+        # scanned flag; a safe override must not blanket-allow it.
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution",
+             "--cli-input-json", '{"QueryString": "DROP TABLE t"}'],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_UNKNOWN)
+
     def test_unregistered_operation_untouched(self):
         # An aws op with no registry entry keeps its plain verb decision.
         d, _ = self.clf.classify_aws(

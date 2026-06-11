@@ -1190,9 +1190,15 @@ class RuleClassifier:
         flag = entry.get("flag")
         sql = extract_flag_value(cmd_args, flag)
         if sql is None:
-            retval = (verb_decision,
-                      "{}; {}: no {} value to scan".format(
-                          verb_reason, label, flag))
+            # The operation is registered as SQL-bearing but the payload is
+            # not on the expected flag — absent, interactive, or supplied via
+            # an alternate input form such as `--cli-input-json`. The scanner
+            # cannot inspect it, so a verb-safe override must NOT blanket-allow
+            # the call; downgrade to unknown so Claude Code prompts. (A verb
+            # already classified unsafe returned above.)
+            retval = (DECISION_UNKNOWN,
+                      "{}: registered SQL op but no {} payload to scan; "
+                      "not certifying safe".format(label, flag))
             return retval
 
         dialect = entry.get("dialect")
