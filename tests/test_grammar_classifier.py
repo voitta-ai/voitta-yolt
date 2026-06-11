@@ -86,6 +86,14 @@ class TestClassifyScenarios(unittest.TestCase):
             DECISION_SAFE,
         )
 
+    def test_aws_timestream_query_select_is_payload_safe(self):
+        # Issue #29: verb `query` matches no pattern (-> unknown); the SQL
+        # payload refines it to safe.
+        self.assertDecision(
+            'aws timestream-query query --query-string "SELECT * FROM db.t"',
+            DECISION_SAFE,
+        )
+
     def test_compound_for_loop_all_reads(self):
         self.assertDecision(
             'for svc in $(aws ecs list-services --cluster X); do '
@@ -183,6 +191,21 @@ class TestClassifyScenarios(unittest.TestCase):
 
     def test_aws_s3_rm_unsafe(self):
         self.assertDecision("aws s3 rm s3://bucket/key", DECISION_UNSAFE)
+
+    def test_aws_timestream_query_delete_is_payload_unsafe(self):
+        # Issue #29: the SQL payload escalates an otherwise-unknown verb.
+        self.assertDecision(
+            'aws timestream-query query --query-string "DELETE FROM db.t"',
+            DECISION_UNSAFE,
+        )
+
+    def test_aws_athena_start_query_select_stays_unsafe_floor(self):
+        # Issue #29: start-* is a write verb; with no user override the SQL
+        # payload cannot weaken it, so a read-only query still asks.
+        self.assertDecision(
+            'aws athena start-query-execution --query-string "SELECT 1"',
+            DECISION_UNSAFE,
+        )
 
     def test_gh_api_post_unsafe(self):
         self.assertDecision(

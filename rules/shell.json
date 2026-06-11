@@ -538,6 +538,13 @@
           "extra_safe_patterns": ["filter-log-events", "start-query", "get-query-results", "stop-query", "tail"],
           "_note": "Logs service has some 'start-*' operations that are actually read-only queries (start-query). Explicit overrides."
         }
+      },
+      "sql_payload_flags": {
+        "athena start-query-execution":     {"flag": "--query-string", "dialect": "presto"},
+        "rds-data execute-statement":       {"flag": "--sql",          "dialect": "varies"},
+        "timestream-query query":           {"flag": "--query-string", "dialect": "timestream"},
+        "redshift-data execute-statement":  {"flag": "--sql",          "dialect": "redshift"},
+        "_note": "(service operation) -> SQL-carrying flag. The verb decision is a floor: start-*/execute-* stay unsafe unless the user marks the op safe via an override, after which the SQL payload governs (read-only SELECT -> safe, destructive -> unsafe). 'timestream-query query' (verb -> unknown) is refined to safe/unsafe by its payload out of the box. dialect feeds the per-dialect function scanner (issue #26); presto/timestream/redshift/varies have no function set yet, so only the dialect-agnostic keyword scan applies to them today."
       }
     },
 

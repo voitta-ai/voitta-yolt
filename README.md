@@ -334,6 +334,37 @@ are classified separately by name — `.tables` / `.schema` / `.headers`
 are safe; `.import` / `.load` / `.read` / `.shell` / `.backup` are
 unsafe.
 
+### SQL carried in cloud-CLI flags
+
+Several AWS CLIs take a SQL string as a flag value (`aws athena
+start-query-execution --query-string`, `aws rds-data execute-statement
+--sql`, `aws timestream-query query --query-string`, `aws redshift-data
+execute-statement --sql`). The `aws` rule names these in a
+`sql_payload_flags` registry keyed by `"<service> <operation>"`; each
+entry gives the SQL-carrying `flag` and a `dialect`. When the operation
+matches, the flag value is pulled and run through the same SQL scanner
+described above.
+
+The verb decision is a **floor**, so payload scanning never weakens a
+mutating operation on its own:
+
+- A write verb (`start-*`, `execute-*`) stays `unsafe` regardless of
+  payload. Reading the SQL only helps once the user has explicitly
+  marked the operation safe — e.g. an `extra_safe_patterns` override
+  for `start-query-execution`. After that, the payload governs:
+  read-only `SELECT` → `safe`, destructive SQL → `unsafe`, unclassified
+  SQL → `unknown`. This is the point of the registry: an override that
+  used to blanket-allow every query now keeps destructive ones flagged.
+- `aws timestream-query query` matches no verb pattern (so it was
+  `unknown` and prompted every time); its payload now refines it to
+  `safe` / `unsafe` out of the box.
+
+`dialect` feeds the per-dialect function-side-effect scanner (see issue
+#26). `presto` / `timestream` / `redshift` / `varies` have no function
+deny-set yet, so only the dialect-agnostic keyword scan applies to them
+today; the field is recorded so adding a deny-set later lights up
+function detection for those services with no further wiring.
+
 ## Python rules (interpreter delegate)
 
 When the grammar walker hands a Python source body to the analyzer

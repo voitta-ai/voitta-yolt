@@ -192,10 +192,16 @@ def _classify_sql_functions(cmd_name, dialect, stripped):
     return None
 
 
-def classify_sql_text(cmd_name, sql):
+def classify_sql_text(cmd_name, sql, dialect=None):
     """Return (decision, reason) for a single SQL string passed to a
     SQL CLI. Handles sqlite3 dot-commands too — they're not SQL but they
-    arrive through the same channel (positional / -cmd / -e)."""
+    arrive through the same channel (positional / -cmd / -e).
+
+    `dialect` overrides the CLI→dialect lookup. SQL CLIs leave it None and
+    the dialect is derived from `cmd_name`; payload scanning of cloud-API
+    flags (see `classify_aws`) passes it explicitly because the synthetic
+    `cmd_name` (e.g. "aws athena start-query-execution") is not a known
+    SQL CLI."""
     sql = sql.strip()
     if not sql:
         retval = (DECISION_SAFE, "{}: empty SQL".format(cmd_name))
@@ -218,7 +224,8 @@ def classify_sql_text(cmd_name, sql):
         return retval
 
     stripped = _SQL_STRIP_RE.sub(" ", sql).upper()
-    dialect = SQL_DIALECT_BY_CLI.get(cmd_name)
+    if dialect is None:
+        dialect = SQL_DIALECT_BY_CLI.get(cmd_name)
 
     first_word = None
     for m in _SQL_WORD_RE.finditer(stripped):
@@ -629,7 +636,10 @@ _ALLOWED_COMMAND_KEYS = frozenset({
     "service_overrides",
     "safe_operation_patterns", "unsafe_operation_patterns",
     "sql_flags", "sql_file_flags", "sql_positional_index",
+    "sql_payload_flags",
 })
+
+_ALLOWED_SQL_PAYLOAD_FLAG_KEYS = frozenset({"flag", "dialect"})
 
 _ALLOWED_EMPTY_DECISIONS = frozenset({"safe", "unsafe"})
 
@@ -769,6 +779,23 @@ def _validate_command_spec(path, spec, errors):
                         .format(path, svc, key)
                     )
 
+    payload_flags = spec.get("sql_payload_flags", {})
+    if isinstance(payload_flags, dict):
+        for op_key, entry in payload_flags.items():
+            if op_key.startswith("_"):
+                continue
+            entry_path = "{}.sql_payload_flags.{}".format(path, op_key)
+            if not isinstance(entry, dict):
+                errors.append("{}: must be a dict".format(entry_path))
+                continue
+            for key in entry:
+                if key not in _ALLOWED_SQL_PAYLOAD_FLAG_KEYS:
+                    errors.append(
+                        "{}: unknown key '{}'".format(entry_path, key)
+                    )
+            if not entry.get("flag"):
+                errors.append("{}: missing 'flag'".format(entry_path))
+
 
 def parse_aws_positionals(cmd_args):
     """Walk aws CLI args skipping flags. Return (service, operation, trailing)."""
@@ -804,6 +831,26 @@ def parse_aws_positionals(cmd_args):
         i += 1
 
     return (service, operation, trailing)
+
+
+def extract_flag_value(cmd_args, flag):
+    """Return the value passed to `flag` in cmd_args, or None if the flag is
+    absent (or present with no following value). Handles both `--flag value`
+    and `--flag=value` forms."""
+    retval = None
+    eq_prefix = flag + "="
+    i = 0
+    while i < len(cmd_args):
+        tok = cmd_args[i]
+        if tok == flag:
+            if i + 1 < len(cmd_args):
+                retval = cmd_args[i + 1]
+            break
+        if tok.startswith(eq_prefix):
+            retval = tok[len(eq_prefix):]
+            break
+        i += 1
+    return retval
 
 
 class RuleClassifier:
@@ -1109,6 +1156,61 @@ class RuleClassifier:
         if operation is None:
             return (DECISION_UNKNOWN, "aws {}: no operation".format(service))
 
+        verb_decision, verb_reason = self._classify_aws_verb(
+            service, operation, spec
+        )
+
+        payload_flags = spec.get("sql_payload_flags", {})
+        entry = payload_flags.get("{} {}".format(service, operation))
+        if entry is None:
+            return (verb_decision, verb_reason)
+
+        retval = self._scan_aws_sql_payload(
+            cmd_args, service, operation, entry, verb_decision, verb_reason
+        )
+        return retval
+
+    def _scan_aws_sql_payload(self, cmd_args, service, operation, entry,
+                              verb_decision, verb_reason):
+        """Refine an aws decision by scanning the SQL string the operation
+        carries in a flag (e.g. athena `--query-string`, rds-data `--sql`).
+
+        A write verb is a hard floor: `start-*` / `execute-*` stay unsafe
+        regardless of payload, so payload scanning cannot weaken an
+        un-overridden mutating operation. Below that floor the SQL governs,
+        which (a) refines an unknown verb such as `timestream-query query`
+        to safe/unsafe by its payload, and (b) lets a user who has marked
+        the operation safe (via an `extra_safe_patterns` override) still get
+        destructive SQL flagged instead of blanket-allowed."""
+        label = "aws {} {}".format(service, operation)
+        if verb_decision == DECISION_UNSAFE:
+            retval = (verb_decision, verb_reason)
+            return retval
+
+        flag = entry.get("flag")
+        sql = extract_flag_value(cmd_args, flag)
+        if sql is None:
+            # The operation is registered as SQL-bearing but the payload is
+            # not on the expected flag — absent, interactive, or supplied via
+            # an alternate input form such as `--cli-input-json`. The scanner
+            # cannot inspect it, so a verb-safe override must NOT blanket-allow
+            # the call; downgrade to unknown so Claude Code prompts. (A verb
+            # already classified unsafe returned above.)
+            retval = (DECISION_UNKNOWN,
+                      "{}: registered SQL op but no {} payload to scan; "
+                      "not certifying safe".format(label, flag))
+            return retval
+
+        dialect = entry.get("dialect")
+        payload_decision, payload_reason = classify_sql_text(
+            label, sql, dialect=dialect
+        )
+        retval = (payload_decision,
+                  "{} (payload scan; verb: {})".format(
+                      payload_reason, verb_decision))
+        return retval
+
+    def _classify_aws_verb(self, service, operation, spec):
         service_overrides = spec.get("service_overrides", {})
         per_service = service_overrides.get(service, {})
 

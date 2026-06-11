@@ -23,9 +23,11 @@ from rule_classifier import (  # noqa: E402
     DECISION_SAFE,
     DECISION_UNKNOWN,
     DECISION_UNSAFE,
+    RuleClassifier,
     aggregate_decisions,
     check_unsafe_flags,
     classify_sql_text,
+    extract_flag_value,
     load_allow_patterns,
     load_shell_rules,
     match_allow_patterns,
@@ -286,6 +288,144 @@ class TestParseAwsPositionals(unittest.TestCase):
     def test_no_cli_pager_is_valueless(self):
         svc, op, _ = parse_aws_positionals(["--no-cli-pager", "s3", "ls"])
         self.assertEqual((svc, op), ("s3", "ls"))
+
+
+class TestExtractFlagValue(unittest.TestCase):
+    def test_space_form(self):
+        v = extract_flag_value(["--sql", "SELECT 1", "--db", "x"], "--sql")
+        self.assertEqual(v, "SELECT 1")
+
+    def test_equals_form(self):
+        v = extract_flag_value(["--query-string=SELECT 1"], "--query-string")
+        self.assertEqual(v, "SELECT 1")
+
+    def test_equals_form_value_with_equals(self):
+        v = extract_flag_value(["--sql=SET x = 1"], "--sql")
+        self.assertEqual(v, "SET x = 1")
+
+    def test_absent(self):
+        self.assertIsNone(extract_flag_value(["--db", "x"], "--sql"))
+
+    def test_flag_last_token_no_value(self):
+        self.assertIsNone(extract_flag_value(["--db", "x", "--sql"], "--sql"))
+
+
+class TestAwsSqlPayloadFlags(unittest.TestCase):
+    """Payload scanning of SQL-carrying aws flags (issue #29). The verb
+    decision is a floor: start-*/execute-* stay unsafe unless an override
+    marks the op safe, after which the SQL governs. timestream-query query
+    (verb -> unknown) is refined by its payload out of the box."""
+
+    @classmethod
+    def setUpClass(cls):
+        rules = load_shell_rules(REPO_ROOT / "rules")
+        cls.clf = RuleClassifier(rules)
+        cls.spec = rules["commands"]["aws"]
+
+        # A second classifier whose rules mark athena start-query-execution
+        # safe (the override the issue's narrowing use case relies on).
+        ov_rules = json.loads(json.dumps(rules))
+        ov_aws = ov_rules["commands"]["aws"]
+        ov_aws["service_overrides"].setdefault("athena", {})[
+            "extra_safe_patterns"
+        ] = ["start-query-execution"]
+        cls.clf_override = RuleClassifier(ov_rules)
+        cls.spec_override = ov_aws
+
+    def test_timestream_select_safe(self):
+        d, _ = self.clf.classify_aws(
+            ["timestream-query", "query", "--query-string", "SELECT * FROM t"],
+            self.spec,
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_timestream_delete_unsafe(self):
+        d, _ = self.clf.classify_aws(
+            ["timestream-query", "query", "--query-string", "DELETE FROM t"],
+            self.spec,
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_timestream_missing_flag_unknown(self):
+        # verb -> unknown and no payload to scan -> stays unknown.
+        d, _ = self.clf.classify_aws(
+            ["timestream-query", "query"], self.spec,
+        )
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_athena_select_no_override_is_unsafe_floor(self):
+        # start-* is a write verb; without an override the payload cannot
+        # weaken it.
+        d, _ = self.clf.classify_aws(
+            ["athena", "start-query-execution", "--query-string", "SELECT 1"],
+            self.spec,
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_rds_data_select_no_override_is_unsafe_floor(self):
+        d, _ = self.clf.classify_aws(
+            ["rds-data", "execute-statement", "--sql", "SELECT 1"],
+            self.spec,
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_redshift_data_equals_form_select_no_override_unsafe(self):
+        d, _ = self.clf.classify_aws(
+            ["redshift-data", "execute-statement", "--sql=SELECT 1"],
+            self.spec,
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_athena_select_with_safe_override_is_safe(self):
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution", "--query-string", "SELECT 1"],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_SAFE)
+
+    def test_athena_drop_with_safe_override_still_unsafe(self):
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution",
+             "--query-string", "DROP TABLE t"],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_athena_unclassifiable_with_safe_override_is_unknown(self):
+        # A safe override does not blanket-allow SQL the scanner cannot read.
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution",
+             "--query-string", "FROBNICATE x"],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_athena_missing_flag_with_safe_override_is_unknown(self):
+        # A registered SQL op with a safe override but no --query-string must
+        # NOT inherit the blanket-safe verb decision: the payload is
+        # unscannable, so it downgrades to unknown rather than safe.
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution"],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_athena_cli_input_json_with_safe_override_is_unknown(self):
+        # Alternate input form (--cli-input-json) carries the SQL off the
+        # scanned flag; a safe override must not blanket-allow it.
+        d, _ = self.clf_override.classify_aws(
+            ["athena", "start-query-execution",
+             "--cli-input-json", '{"QueryString": "DROP TABLE t"}'],
+            self.spec_override,
+        )
+        self.assertEqual(d, DECISION_UNKNOWN)
+
+    def test_unregistered_operation_untouched(self):
+        # An aws op with no registry entry keeps its plain verb decision.
+        d, _ = self.clf.classify_aws(
+            ["ec2", "describe-instances"], self.spec,
+        )
+        self.assertEqual(d, DECISION_SAFE)
 
 
 class TestAggregateDecisions(unittest.TestCase):
@@ -695,6 +835,21 @@ class TestSqlFunctionSideEffects(unittest.TestCase):
         d, _ = classify_sql_text("mysql", "SELECT COUNT(*) FROM t")
         self.assertEqual(d, DECISION_SAFE)
 
+    def test_dialect_param_overrides_cli_lookup(self):
+        # A synthetic cmd_name (payload scanning of cloud-API flags) is not a
+        # known SQL CLI, so the explicit dialect routes function detection.
+        cmd = "aws athena start-query-execution"
+        d, _ = classify_sql_text(
+            cmd, "SELECT load_extension('x')", dialect="sqlite")
+        self.assertEqual(d, DECISION_UNSAFE)
+
+    def test_dialect_none_skips_function_scan(self):
+        # Without a resolvable dialect the function scanner is a no-op, so a
+        # SELECT-shaped statement classifies safe on the keyword scan alone.
+        cmd = "aws athena start-query-execution"
+        d, _ = classify_sql_text(cmd, "SELECT load_extension('x')")
+        self.assertEqual(d, DECISION_SAFE)
+
 
 class TestParseSqlCliArgv(unittest.TestCase):
     def test_sqlite3_positional_sql(self):
@@ -809,6 +964,51 @@ class TestValidateShellRules(unittest.TestCase):
             },
         })
         self.assertTrue(any("bogus" in e for e in errors), errors)
+
+    def test_unknown_sql_payload_flag_key_flagged(self):
+        errors = validate_shell_rules({
+            "commands": {
+                "aws": {
+                    "default": "aws_cli",
+                    "sql_payload_flags": {
+                        "athena start-query-execution": {
+                            "flag": "--query-string", "ghost": 1,
+                        },
+                    },
+                },
+            },
+        })
+        self.assertTrue(any("ghost" in e for e in errors), errors)
+
+    def test_sql_payload_flag_missing_flag_flagged(self):
+        errors = validate_shell_rules({
+            "commands": {
+                "aws": {
+                    "default": "aws_cli",
+                    "sql_payload_flags": {
+                        "athena start-query-execution": {"dialect": "presto"},
+                    },
+                },
+            },
+        })
+        self.assertTrue(any("missing 'flag'" in e for e in errors), errors)
+
+    def test_sql_payload_flag_note_key_allowed(self):
+        # Underscore-prefixed meta keys are skipped, not treated as entries.
+        errors = validate_shell_rules({
+            "commands": {
+                "aws": {
+                    "default": "aws_cli",
+                    "sql_payload_flags": {
+                        "_note": "doc string, not an entry",
+                        "athena start-query-execution": {
+                            "flag": "--query-string",
+                        },
+                    },
+                },
+            },
+        })
+        self.assertEqual(errors, [])
 
     def test_unknown_interpreter_key_flagged(self):
         errors = validate_shell_rules({
