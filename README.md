@@ -14,6 +14,7 @@
 - [How it works](#how-it-works)
 - [Install](#install)
   - [Updating](#updating)
+  - [Releasing (maintainers)](#releasing-maintainers)
   - [Migrating from manual to plugin install](#migrating-from-manual-to-plugin-install)
   - [Manual install (without the plugin system)](#manual-install-without-the-plugin-system)
 - [User whitelist as a secondary upgrade pass](#user-whitelist-as-a-secondary-upgrade-pass)
@@ -163,6 +164,23 @@ The plugin's `hooks/hooks.json` registers the `PreToolUse` hook on
   hook script in your `settings.json` already points at
   `<clone>/hooks/pre-tool-use.sh`, so the next Bash invocation picks up
   the new code without further action.
+
+### Releasing (maintainers)
+
+To publish a new version to either marketplace (this repo's own
+marketplace, or the official Anthropic one), cut a release with:
+
+```
+scripts/release.sh 0.2.0
+```
+
+That bumps the `version` field in `.claude-plugin/plugin.json` — the
+single source of truth both marketplaces read — commits `Release v0.2.0`,
+and tags `v0.2.0`. The marketplace pins on that version string, so a
+bump is required on every release: pushing commits without one leaves
+existing users on the cached copy. The script does not push; review the
+commit and tag, then run the `git push origin master --follow-tags`
+command it prints.
 
 ### Migrating from manual to plugin install
 
