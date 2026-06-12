@@ -167,20 +167,45 @@ The plugin's `hooks/hooks.json` registers the `PreToolUse` hook on
 
 ### Releasing (maintainers)
 
-To publish a new version to either marketplace (this repo's own
-marketplace, or the official Anthropic one), cut a release with:
+YOLT publishes to two marketplaces off the same repo:
+
+- **This repo's own marketplace (`voitta-yolt`)** — the repo IS the
+  marketplace, so there is nothing to onboard; a pushed release is live.
+- **Anthropic's community marketplace (`claude-plugins-community`)** —
+  Anthropic-hosted and submission-gated; needs a one-time submission
+  (below). The curated `claude-plugins-official` is invite-only, with no
+  submission path.
+
+**Every release — bump the version and tag:**
 
 ```
 scripts/release.sh 0.2.0
 ```
 
-That bumps the `version` field in `.claude-plugin/plugin.json` — the
-single source of truth both marketplaces read — commits `Release v0.2.0`,
-and tags `v0.2.0`. The marketplace pins on that version string, so a
-bump is required on every release: pushing commits without one leaves
+That rewrites the `version` field in `.claude-plugin/plugin.json` — the
+single source of truth for the plugin version — commits `Release v0.2.0`,
+and tags `v0.2.0`. The repo's own marketplace pins on that version string,
+so a bump is required on every release: pushing commits without one leaves
 existing users on the cached copy. The script does not push; review the
-commit and tag, then run the `git push origin master --follow-tags`
-command it prints.
+commit and tag, then run the `git push origin master --follow-tags` command
+it prints.
+
+**One-time — to list on Anthropic's community marketplace.** Validate
+(the same check Anthropic runs on submit), then submit the repo once:
+
+```
+claude plugin validate . --strict
+claude plugin validate .claude-plugin/plugin.json --strict
+```
+
+Submit through the plugin form — [Console](https://platform.claude.com/plugins/submit),
+or [claude.ai](https://claude.ai/admin-settings/directory/submissions/plugins/new)
+for Team/Enterprise orgs — and pass Anthropic's automated screening. On
+approval the plugin is pinned to a commit SHA in
+[`anthropics/claude-plugins-community`](https://github.com/anthropics/claude-plugins-community);
+the catalog then syncs nightly (~24h) and CI re-pins on later pushes, so
+there is no per-release step beyond the version bump above. Users install
+with `/plugin install yolt@claude-community`.
 
 ### Migrating from manual to plugin install
 
