@@ -11,6 +11,7 @@
 ## Contents
 
 - [Introduction](#introduction)
+- [Example use cases](#example-use-cases)
 - [How it works](#how-it-works)
 - [Install](#install)
   - [Updating](#updating)
@@ -75,6 +76,25 @@ the same shape and registering it in `rules/shell.json`.
 
 [ts-bash]: https://github.com/tree-sitter/tree-sitter-bash
 [issue-4]: https://github.com/voitta-ai/voitta-yolt/issues/4
+
+## Example use cases
+
+- **Stop prompt fatigue on read-only work.** Read-only exploration —
+  `git status`, `ls -la`, `kubectl get pods`, `aws s3 ls` — is auto-allowed
+  and runs without a prompt, while a mutating `git push --force` or
+  `aws s3 rm s3://bucket --recursive` still stops for review.
+- **See into wrapper commands the built-in allowlist can't.** A
+  `for f in *.log; do rm "$f"; done` loop, a `bash -c "..."`, a piped
+  `curl ... | sh`, or a heredoc is decomposed to its inner commands, so the
+  mutating one inside is flagged instead of the outer wrapper being
+  rubber-stamped.
+- **Catch destructive SQL inside CLI flags.** `psql -c "DROP TABLE users"`
+  or `athena ... "DELETE FROM ..."` is flagged for review, while a
+  `SELECT ...` query is auto-allowed.
+- **Analyze inline Python by AST, not string match.** `python3 -c "..."`
+  and `python3 <<EOF` snippets are walked with the stdlib `ast` module: a
+  read-only `json.load` + `print` is auto-allowed, while a snippet that
+  writes a file, calls `os.system`, or spawns a subprocess prompts.
 
 ## How it works
 
