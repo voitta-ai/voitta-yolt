@@ -383,6 +383,13 @@
       "_note": "Removed 'tag' from flat safe/unsafe lists. It now lives under nested_subcommand.tag with positional-aware classification: bare 'git tag' lists safely; 'git tag v1' is unknown (not silently safe); mutating flags are explicit."
     },
 
+    "eslint": {
+      "default": "safe",
+      "unsafe_flags_without_value": ["--fix"],
+      "unsafe_flag_any_value": ["--fix-type"],
+      "write_flag_value_targets": ["-o", "--output-file"],
+      "_note": "eslint is read-only (lint/report) unless it rewrites files: --fix / --fix-type, or -o/--output-file writing outside safe_write_targets. --fix-dry-run stays safe."
+    },
     "docker": {
       "default": "subcommand",
       "safe_subcommands": [

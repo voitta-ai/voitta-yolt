@@ -1137,5 +1137,54 @@ class TestLoadShellRulesValidation(unittest.TestCase):
         self.assertIn("commands", rules)
 
 
+class TestEslintRule(unittest.TestCase):
+    """End-to-end regression coverage for the eslint rule in rules/shell.json
+    (PR #57). Loads the real ruleset so a later drift -- eslint regressing to
+    unknown, or --fix / --fix-dry-run / --output-file being misclassified --
+    fails CI. safe_write_targets includes /tmp/* but not relative paths."""
+
+    @classmethod
+    def setUpClass(cls):
+        rules = load_shell_rules(REPO_ROOT / "rules")
+        cls.clf = RuleClassifier(rules)
+
+    def _decide(self, *tokens):
+        decision, _ = self.clf.classify_tokens(["eslint", *tokens])
+        return decision
+
+    def test_bare_eslint_safe(self):
+        self.assertEqual(self._decide(), DECISION_SAFE)
+
+    def test_targeted_lint_safe(self):
+        self.assertEqual(self._decide("src/app.js"), DECISION_SAFE)
+
+    def test_fix_unsafe(self):
+        self.assertEqual(self._decide("--fix"), DECISION_UNSAFE)
+
+    def test_fix_inline_equals_unsafe(self):
+        self.assertEqual(self._decide("--fix=true"), DECISION_UNSAFE)
+
+    def test_fix_dry_run_safe(self):
+        # Must not be swept up by the --fix prefix; flags match exactly.
+        self.assertEqual(self._decide("--fix-dry-run"), DECISION_SAFE)
+
+    def test_fix_type_any_value_unsafe(self):
+        self.assertEqual(self._decide("--fix-type", "suggestion"), DECISION_UNSAFE)
+
+    def test_output_file_short_safe_target(self):
+        self.assertEqual(self._decide("-o", "/tmp/report.json"), DECISION_SAFE)
+
+    def test_output_file_short_nonsafe_target_unsafe(self):
+        self.assertEqual(self._decide("-o", "report.json"), DECISION_UNSAFE)
+
+    def test_output_file_long_safe_target(self):
+        self.assertEqual(
+            self._decide("--output-file", "/tmp/report.json"), DECISION_SAFE)
+
+    def test_output_file_long_nonsafe_inline_unsafe(self):
+        self.assertEqual(
+            self._decide("--output-file=report.json"), DECISION_UNSAFE)
+
+
 if __name__ == "__main__":
     unittest.main()
