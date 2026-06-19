@@ -610,7 +610,7 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
 
 _ALLOWED_DEFAULTS = frozenset({
     "safe", "unsafe", "ask", "unknown",
-    "subcommand", "delegate_to_argument",
+    "subcommand", "delegate_to_argument", "alias",
     "aws_cli", "gcloud_cli", "az_cli", "sql_cli",
 })
 
@@ -623,6 +623,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
 
 _ALLOWED_COMMAND_KEYS = frozenset({
     "default", "_note", "_skip_first_positional",
+    "alias", "skip_value_flags",
     "unsafe_flag_values", "unsafe_flag_any_value",
     "unsafe_flags_without_value", "unsafe_flag_value_prefix",
     "write_flag_value_targets",
@@ -1042,6 +1043,8 @@ class RuleClassifier:
             return self.classify_subcommand(cmd_name, cmd_args, spec, _depth=_depth)
         if default == "delegate_to_argument":
             return self.classify_delegate_to_argument(cmd_name, cmd_args, spec, _depth=_depth)
+        if default == "alias":
+            return self.classify_alias(cmd_name, cmd_args, spec, _depth=_depth)
         if default == "aws_cli":
             return self.classify_aws(cmd_args, spec)
         if default == "gcloud_cli":
@@ -1052,6 +1055,42 @@ class RuleClassifier:
             return self.classify_sql_cli(cmd_name, cmd_args, spec)
 
         return (DECISION_UNKNOWN, "{}: unknown default '{}'".format(cmd_name, default))
+
+    def classify_alias(self, cmd_name, cmd_args, spec, _depth):
+        # Classify this command exactly as another command's rule. Used for thin
+        # wrappers that forward argv to a known CLI (e.g. a `git` wrapper). Optional
+        # `skip_value_flags` are leading wrapper-only flags (each consuming a value)
+        # stripped before the target sees the args. Fail-safe: an unknown alias
+        # target degrades to `unknown` (Claude Code's default prompt) rather than
+        # silently allowing.
+        if _depth >= self.MAX_RECURSION_DEPTH:
+            return (DECISION_UNKNOWN, "{}: alias recursion too deep".format(cmd_name))
+        target = spec.get("alias")
+        if not isinstance(target, str) or target not in self.commands:
+            return (DECISION_UNKNOWN, "{}: alias target '{}' not in rules".format(cmd_name, target))
+        skip_value_flags = set(spec.get("skip_value_flags", []))
+        forwarded = self._strip_leading_value_flags(cmd_args, skip_value_flags)
+        decision, reason = self.classify_known_command(target, forwarded, _depth=_depth + 1)
+        return (decision, "{} -> {}".format(cmd_name, reason))
+
+    @staticmethod
+    def _strip_leading_value_flags(cmd_args, value_flags):
+        # Drop a run of leading flags that each consume a value, supporting both
+        # `--flag value` and `--flag=value` forms. Stops at the first non-matching
+        # token so the wrapped command name / subcommand is preserved.
+        if not value_flags:
+            return list(cmd_args)
+        args = list(cmd_args)
+        while args:
+            head = args[0]
+            if "=" in head and head.split("=", 1)[0] in value_flags:
+                args = args[1:]
+                continue
+            if head in value_flags:
+                args = args[2:] if len(args) >= 2 else args[1:]
+                continue
+            break
+        return args
 
     def classify_subcommand(self, cmd_name, cmd_args, spec, _depth):
         valueless = set(spec.get("valueless_flags", []))

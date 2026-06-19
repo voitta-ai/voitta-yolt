@@ -518,6 +518,11 @@ name rather than guessed.
       "default": "subcommand",
       "safe_subcommands": ["status", "show"],
       "unsafe_subcommands": ["apply", "reset"]
+    },
+    "doubledoor-git-safe": {
+      "default": "alias",
+      "alias": "git",
+      "skip_value_flags": ["--repo"]
     }
   },
   "shell_builtins_safe": ["my-safe-wrapper"],
@@ -563,6 +568,15 @@ entire list; if you want to add `/scratch/*` while keeping the defaults,
 copy the default list through. `unsafe_write_targets` is checked before
 `safe_write_targets`, so a deny entry wins over a broader safe glob.
 Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
+
+A `"default": "alias"` command classifies *exactly* as another command's
+rule — useful for thin wrappers that forward argv to a known CLI. The example
+above makes `doubledoor-git-safe diff` inherit `git`'s read/write
+classification (so `diff`/`status`/`log` are safe and `commit`/`push` ask),
+reusing git's subcommand lists rather than duplicating them. `skip_value_flags`
+lists leading wrapper-only flags (each consuming a value, `--repo X` or
+`--repo=X`) stripped before the target's rule sees the args. An alias whose
+target is not itself a defined command degrades to `unknown` (default prompt).
 
 ## Debug / dogfood log
 

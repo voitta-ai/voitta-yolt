@@ -1137,5 +1137,53 @@ class TestLoadShellRulesValidation(unittest.TestCase):
         self.assertIn("commands", rules)
 
 
+class TestAliasDefault(unittest.TestCase):
+    def _classifier(self):
+        rules = {
+            "commands": {
+                "git": {
+                    "default": "subcommand",
+                    "safe_subcommands": ["diff", "status", "log"],
+                    "unsafe_subcommands": ["push", "commit"],
+                },
+                "ddgs": {
+                    "default": "alias",
+                    "alias": "git",
+                    "skip_value_flags": ["--repo"],
+                },
+                "badalias": {"default": "alias", "alias": "nope"},
+            }
+        }
+        return RuleClassifier(rules)
+
+    def test_alias_forwards_safe_subcommand(self):
+        decision, _ = self._classifier().classify_tokens(["ddgs", "diff", "--", "f.tsx"])
+        self.assertEqual(decision, DECISION_SAFE)
+
+    def test_alias_forwards_unsafe_subcommand(self):
+        decision, _ = self._classifier().classify_tokens(["ddgs", "push", "origin", "main"])
+        self.assertEqual(decision, DECISION_UNSAFE)
+
+    def test_alias_skips_leading_value_flag_space_form(self):
+        decision, _ = self._classifier().classify_tokens(["ddgs", "--repo", "x", "status"])
+        self.assertEqual(decision, DECISION_SAFE)
+
+    def test_alias_skips_leading_value_flag_equals_form(self):
+        decision, _ = self._classifier().classify_tokens(["ddgs", "--repo=x", "log"])
+        self.assertEqual(decision, DECISION_SAFE)
+
+    def test_alias_skip_flag_does_not_hide_mutating_subcommand(self):
+        decision, _ = self._classifier().classify_tokens(["ddgs", "--repo", "x", "commit"])
+        self.assertEqual(decision, DECISION_UNSAFE)
+
+    def test_alias_missing_target_is_unknown(self):
+        decision, _ = self._classifier().classify_tokens(["badalias", "diff"])
+        self.assertEqual(decision, DECISION_UNKNOWN)
+
+    def test_alias_via_path_basename(self):
+        decision, _ = self._classifier().classify_tokens(["/usr/local/bin/ddgs", "status"])
+        self.assertEqual(decision, DECISION_SAFE)
+
+
 if __name__ == "__main__":
     unittest.main()
