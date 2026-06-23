@@ -543,6 +543,75 @@ class TestNestedSubcommandPaths(unittest.TestCase):
         self.assertDecision("helm repo remove foo", DECISION_UNSAFE)
 
 
+class TestPrismaDestructiveOps(unittest.TestCase):
+    """Issue #61: gate destructive Prisma schema/DDL/migration ops as unsafe
+    while keeping read-only / codegen subcommands safe. Destructive verbs are
+    nested under 'db' and 'migrate', matching the docker nested_subcommand
+    shape."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, r = self.clf.classify(cmd)
+        self.assertEqual(
+            d, expected,
+            "cmd={!r}: got {}, reason={}".format(cmd, d, r),
+        )
+
+    # --- prisma db: destructive ---
+
+    def test_prisma_db_push_unsafe(self):
+        self.assertDecision("prisma db push", DECISION_UNSAFE)
+
+    def test_prisma_db_execute_unsafe(self):
+        self.assertDecision(
+            "prisma db execute --file ./migration.sql", DECISION_UNSAFE,
+        )
+
+    def test_prisma_db_seed_unsafe(self):
+        self.assertDecision("prisma db seed", DECISION_UNSAFE)
+
+    # --- prisma migrate: destructive vs read-only ---
+
+    def test_prisma_migrate_reset_unsafe(self):
+        self.assertDecision("prisma migrate reset", DECISION_UNSAFE)
+
+    def test_prisma_migrate_deploy_unsafe(self):
+        self.assertDecision("prisma migrate deploy", DECISION_UNSAFE)
+
+    def test_prisma_migrate_dev_unsafe(self):
+        self.assertDecision("prisma migrate dev", DECISION_UNSAFE)
+
+    def test_prisma_migrate_status_safe(self):
+        self.assertDecision("prisma migrate status", DECISION_SAFE)
+
+    def test_prisma_migrate_diff_safe(self):
+        self.assertDecision("prisma migrate diff", DECISION_SAFE)
+
+    # --- top-level read-only / codegen subcommands ---
+
+    def test_prisma_generate_safe(self):
+        self.assertDecision("prisma generate", DECISION_SAFE)
+
+    def test_prisma_validate_safe(self):
+        self.assertDecision("prisma validate", DECISION_SAFE)
+
+    def test_prisma_studio_safe(self):
+        self.assertDecision("prisma studio", DECISION_SAFE)
+
+    # --- partially-modeled namespaces should not auto-allow ---
+
+    def test_bare_prisma_db_not_safe(self):
+        d, _ = self.clf.classify("prisma db")
+        self.assertNotEqual(d, DECISION_SAFE)
+
+    def test_bare_prisma_migrate_not_safe(self):
+        d, _ = self.clf.classify("prisma migrate")
+        self.assertNotEqual(d, DECISION_SAFE)
+
+
 class TestPythonHeredoc(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1002,6 +1071,27 @@ class TestSqlCli(unittest.TestCase):
         self.assertDecision(
             'mysql --execute=SHOW DATABASES',
             DECISION_SAFE,
+        )
+
+    # --- Issue #61: destructive DDL through a SQL CLI must be unsafe. ---
+
+    def test_psql_alter_table_drop_column_unsafe(self):
+        # ALTER TABLE ... DROP COLUMN is a destructive schema change.
+        self.assertDecision(
+            'psql -c "ALTER TABLE users DROP COLUMN email" mydb',
+            DECISION_UNSAFE,
+        )
+
+    def test_psql_bare_drop_table_unsafe(self):
+        self.assertDecision(
+            'psql -c "DROP TABLE users" mydb',
+            DECISION_UNSAFE,
+        )
+
+    def test_psql_truncate_unsafe(self):
+        self.assertDecision(
+            'psql -c "TRUNCATE TABLE users" mydb',
+            DECISION_UNSAFE,
         )
 
     # SQL injected via $(...) substitution — placeholders preserve safety.
