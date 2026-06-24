@@ -444,6 +444,23 @@
       "_note": "Top-level 'image', 'container', 'volume', 'network', 'system' moved into nested_subcommand with explicit safe/unsafe sub-subcommands. Bare 'docker image' (no further positional) now classifies as unknown instead of silently safe."
     },
 
+    "prisma": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "generate", "validate", "format", "version", "studio"
+      ],
+      "nested_subcommand": {
+        "db": {
+          "unsafe_subcommands": ["push", "execute", "seed"]
+        },
+        "migrate": {
+          "safe_subcommands": ["status", "diff"],
+          "unsafe_subcommands": ["reset", "deploy", "dev"]
+        }
+      },
+      "_note": "Destructive schema/migration ops (prisma db push/execute/seed, prisma migrate reset/deploy/dev) are gated unsafe; read-only migrate status/diff are safe. Bare 'prisma db' / 'prisma migrate' (no further positional) classify as unknown. Codegen/read-only top-level subcommands (generate, validate, format, version, studio) are safe. See issue #61."
+    },
+
     "kubectl": {
       "default": "subcommand",
       "safe_subcommands": [
