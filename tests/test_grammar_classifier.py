@@ -565,6 +565,13 @@ class TestPrismaDestructiveOps(unittest.TestCase):
     def test_prisma_db_push_unsafe(self):
         self.assertDecision("prisma db push", DECISION_UNSAFE)
 
+    def test_prisma_db_push_accept_data_loss_unsafe(self):
+        # Trailing destructive flags must not downgrade the nested unsafe verb
+        # (this is the data-loss case gate #15 / issue #61 exists for).
+        self.assertDecision(
+            "prisma db push --accept-data-loss", DECISION_UNSAFE,
+        )
+
     def test_prisma_db_execute_unsafe(self):
         self.assertDecision(
             "prisma db execute --file ./migration.sql", DECISION_UNSAFE,
