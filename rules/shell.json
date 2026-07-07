@@ -521,6 +521,38 @@
       "_note": "'repo' moved into nested_subcommand: helm repo list is safe, helm repo add is unsafe."
     },
 
+    "istioctl": {
+      "default": "subcommand",
+      "safe_subcommands": [
+        "proxy-config", "pc", "proxy-status", "ps", "remote-clusters",
+        "version", "analyze", "validate", "describe"
+      ],
+      "unsafe_subcommands": [
+        "install", "uninstall", "upgrade", "kube-inject", "create-remote-secret"
+      ],
+      "nested_subcommand": {
+        "manifest": {
+          "safe_subcommands": ["generate", "diff", "dump"],
+          "unsafe_subcommands": ["install", "apply"]
+        },
+        "tag": {
+          "safe_subcommands": ["list"],
+          "unsafe_subcommands": ["set", "remove"]
+        }
+      },
+      "_note": "Read-only mesh introspection (proxy-config/pc, proxy-status/ps, remote-clusters, analyze, describe) is safe; install/uninstall/upgrade and kube-inject/create-remote-secret (which render credentials/manifests meant to be applied) are unsafe. Unlisted subcommands stay unknown."
+    },
+
+    "eksctl": {
+      "default": "subcommand",
+      "safe_subcommands": ["get", "version", "info"],
+      "unsafe_subcommands": [
+        "create", "delete", "upgrade", "scale", "drain", "update", "set",
+        "associate", "disassociate", "register", "deregister", "enable"
+      ],
+      "_note": "eksctl get/version/info are read-only; everything that provisions or mutates a cluster/nodegroup is unsafe. Bare or unlisted subcommands stay unknown."
+    },
+
     "aws": {
       "default": "aws_cli",
       "_note": "Special-cased. AWS CLI operations are uniformly verb-prefixed: describe-*/list-*/get-*/head-* are read-only; create-*/delete-*/update-*/put-*/terminate-*/start-*/stop-*/run-* are mutating.",
