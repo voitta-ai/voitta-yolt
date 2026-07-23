@@ -111,6 +111,27 @@ class TestClassifyScenarios(unittest.TestCase):
     def test_kubectl_get_pods(self):
         self.assertDecision("kubectl get pods -A", DECISION_SAFE)
 
+    def test_istioctl_read_subcommands_safe(self):
+        self.assertDecision(
+            "istioctl proxy-config cluster my-pod -n my-ns", DECISION_SAFE)
+        self.assertDecision("istioctl remote-clusters", DECISION_SAFE)
+        self.assertDecision("istioctl ps", DECISION_SAFE)
+        self.assertDecision("istioctl analyze", DECISION_SAFE)
+
+    def test_istioctl_mutating_subcommands_unsafe(self):
+        self.assertDecision("istioctl install --set x=y", DECISION_UNSAFE)
+        self.assertDecision("istioctl uninstall --purge", DECISION_UNSAFE)
+
+    def test_istioctl_manifest_nested(self):
+        self.assertDecision("istioctl manifest generate", DECISION_SAFE)
+        self.assertDecision("istioctl manifest install", DECISION_UNSAFE)
+
+    def test_eksctl_get_safe_create_unsafe(self):
+        self.assertDecision("eksctl get cluster", DECISION_SAFE)
+        self.assertDecision("eksctl version", DECISION_SAFE)
+        self.assertDecision("eksctl create cluster -f c.yaml", DECISION_UNSAFE)
+        self.assertDecision("eksctl delete nodegroup ng", DECISION_UNSAFE)
+
     def test_python3_c_inline_safe(self):
         self.assertDecision('python3 -c "print(1+1)"', DECISION_SAFE)
 
