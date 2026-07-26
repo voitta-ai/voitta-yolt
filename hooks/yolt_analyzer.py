@@ -842,6 +842,13 @@ def make_hook_response(decision, reason=None):
     return output
 
 
+SUBAGENT_DENY_PREFIX = (
+    "Denied rather than asked: no operator is reachable from a background "
+    "subagent, so an approval prompt would hang forever. Re-run this from "
+    "the main session, or add the allow pattern below.\n\n"
+)
+
+
 def format_unsafe_reason(reason, allow_hint=None):
     from rule_classifier import UNANALYZABLE_INLINE_PYTHON_PREFIX
 
@@ -926,10 +933,17 @@ def _maybe_rotate_log(log_path, max_bytes):
         pass
 
 
-def _log_hook_decision(command, decision, reason):
+def _log_hook_decision(command, decision, reason,
+                       permission_mode=None, agent_id=None):
     """Append a JSON-line record of this hook fire to the resolved log
     path. Logs by default to `~/.claude/yolt.log`; the user can override
     with `YOLT_LOG_FILE=<path>` or opt out with `YOLT_LOG_FILE=""`.
+
+    `permission_mode` and `agent_id` come straight from the hook payload
+    (`agent_id` is present only when the hook fires inside a subagent
+    call). Recording them makes per-agent attribution possible, and the
+    live permission mode is not observable anywhere else. Both are
+    `null` when the payload omits them. See issue #76.
 
     Useful for dogfooding / QA: tail the log to see exactly which
     decision YOLT made on every Bash invocation — including the silent
@@ -954,6 +968,8 @@ def _log_hook_decision(command, decision, reason):
             "decision": decision,
             "reason": reason,
             "command": command[:500] if command else "",
+            "permission_mode": permission_mode,
+            "agent_id": agent_id,
         }
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
@@ -1040,7 +1056,10 @@ def run_hook():
          delegates python3 inline / script analysis to SafetyAnalyzer.
       3. Map classifier decision -> hook response:
            safe    -> permissionDecision: allow
-           unsafe  -> permissionDecision: ask (with explanation)
+           unsafe  -> permissionDecision: ask (with explanation), or
+                      deny when the payload carries an `agent_id` (the
+                      hook fired inside a subagent, where no operator
+                      can answer an ask — see issue #76)
            unknown -> exit silently, let Claude Code apply its default.
 
     If tree-sitter-bash is not importable on the host (broken install,
@@ -1063,6 +1082,12 @@ def run_hook():
     if not command.strip():
         sys.exit(0)
 
+    # `agent_id` is present only when the hook fires inside a subagent
+    # call; `permission_mode` is always present. Both are logged, and
+    # `agent_id` also flips `ask` -> `deny` below. See issue #76.
+    permission_mode = hook_input.get("permission_mode")
+    agent_id = hook_input.get("agent_id")
+
     yolt_dir = Path(__file__).resolve().parent.parent
     py_rules = load_rules(
         rules_dir=yolt_dir / "rules",
@@ -1080,7 +1105,8 @@ def run_hook():
             load_allow_patterns, load_shell_rules,
         )
     except ImportError as e:
-        _log_hook_decision(command, "import-error", str(e))
+        _log_hook_decision(command, "import-error", str(e),
+                           permission_mode, agent_id)
         sys.exit(0)
 
     try:
@@ -1089,7 +1115,8 @@ def run_hook():
             user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
         )
     except ShellRulesValidationError as e:
-        _log_hook_decision(command, "rules-validation-error", str(e))
+        _log_hook_decision(command, "rules-validation-error", str(e),
+                           permission_mode, agent_id)
         sys.exit(0)
 
     cwd_str = hook_input.get("cwd") or os.getcwd()
@@ -1109,7 +1136,7 @@ def run_hook():
         allow_patterns=allow_patterns,
     )
     decision, reason = classifier.classify(command)
-    _log_hook_decision(command, decision, reason)
+    _log_hook_decision(command, decision, reason, permission_mode, agent_id)
 
     if decision == DECISION_SAFE:
         response = make_hook_response("allow", "YOLT: {}".format(reason))
@@ -1117,7 +1144,18 @@ def run_hook():
         sys.exit(0)
     if decision == DECISION_UNSAFE:
         allow_hint = classifier.suggest_allow_pattern(command)
-        response = make_hook_response("ask", format_unsafe_reason(reason, allow_hint))
+        message = format_unsafe_reason(reason, allow_hint)
+        if agent_id:
+            # No operator is reachable from a background subagent: the
+            # `ask` dialog never surfaces and nothing times out, so the
+            # agent wedges indefinitely. `deny` is strictly more
+            # restrictive than `ask` and fails in seconds with a reason
+            # the agent can report upward. Issue #76.
+            response = make_hook_response(
+                "deny", SUBAGENT_DENY_PREFIX + message
+            )
+        else:
+            response = make_hook_response("ask", message)
         print(json.dumps(response))
         sys.exit(0)
     # decision == DECISION_UNKNOWN: let Claude Code handle it

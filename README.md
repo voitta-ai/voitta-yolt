@@ -140,7 +140,14 @@ After visiting, decisions are aggregated with precedence
 `unsafe > unknown > safe`, and the hook emits one of:
 
 - `safe` → `permissionDecision: allow` with a short reason.
-- `unsafe` → `permissionDecision: ask` with the specific reason.
+- `unsafe` → `permissionDecision: ask` with the specific reason — or
+  `deny` when the hook payload carries an `agent_id`, i.e. the call came
+  from a background subagent. No operator is reachable there, so an `ask`
+  dialog never surfaces and never times out: the agent hangs indefinitely.
+  `deny` is strictly more restrictive than `ask`, and it fails in seconds
+  with a reason the agent can report to its orchestrator. The fix is the
+  same either way — add the suggested `permissions.allow` entry, or re-run
+  from the main session.
 - `unknown` → silent exit; Claude Code falls through to its default.
 
 Argv is dispatched per-`command_name`: safe builtins → safe;
@@ -590,7 +597,7 @@ YOLT logs every examined Bash invocation by default to
 `~/.claude/yolt.log`. Each line is a JSON record:
 
 ```json
-{"ts": "2026-05-08T14:00:00.000+00:00", "decision": "safe", "reason": "ls: read-only", "command": "ls /tmp"}
+{"ts": "2026-05-08T14:00:00.000+00:00", "decision": "safe", "reason": "ls: read-only", "command": "ls /tmp", "permission_mode": "default", "agent_id": null}
 ```
 
 `decision` is one of `safe`, `unsafe`, `unknown`, `import-error` (the
@@ -598,8 +605,12 @@ tree-sitter dependency is missing), or `rules-validation-error` (the
 bundled or user-override `shell.json` failed schema validation; the
 `reason` field carries the list of offending keys / defaults so the
 user can fix the override). The `command` field is truncated to 500
-characters. Logging failures are swallowed — the hook never breaks the
-session because of an unwritable log path.
+characters. `permission_mode` and `agent_id` are copied from the hook
+payload: `agent_id` is set only when the call came from a subagent (so
+it doubles as per-agent attribution when several agents run in
+parallel), and `permission_mode` is not observable anywhere else. Both
+are `null` when the payload omits them. Logging failures are swallowed
+— the hook never breaks the session because of an unwritable log path.
 
 ```bash
 tail -f ~/.claude/yolt.log
