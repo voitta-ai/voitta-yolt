@@ -845,7 +845,7 @@ def make_hook_response(decision, reason=None):
 SUBAGENT_DENY_PREFIX = (
     "Denied rather than asked: no operator is reachable from a background "
     "subagent, so an approval prompt would hang forever. Re-run this from "
-    "the main session, or add the allow pattern below.\n\n"
+    "the main session, or add a matching permissions.allow entry.\n\n"
 )
 
 
