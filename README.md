@@ -203,19 +203,18 @@ YOLT publishes to two marketplaces off the same repo:
   (below). The curated `claude-plugins-official` is invite-only, with no
   submission path.
 
-**Every release — bump the version and tag:**
+**Every merge that ships — bump the version.** `.claude-plugin/plugin.json`
+holds the version, and Claude Code's plugin cache is keyed by it, so
+`claude plugin update` on an unchanged version reports "up to date" and
+re-extracts nothing: users keep running the old code. Not hypothetical —
+the version sat at `0.1.0` from the initial ship through issue #78 and
+every change in between was invisible to installed copies.
 
-```
-scripts/release.sh 0.2.0
-```
-
-That rewrites the `version` field in `.claude-plugin/plugin.json` — the
-single source of truth for the plugin version — commits `Release v0.2.0`,
-and tags `v0.2.0`. The repo's own marketplace pins on that version string,
-so a bump is required on every release: pushing commits without one leaves
-existing users on the cached copy. The script does not push; review the
-commit and tag, then run the `git push origin master --follow-tags` command
-it prints.
+`CLAUDE.md` has the full convention: which semver part to bump for what,
+and how to tag under this repo's squash-merge policy (edit the version in
+the PR; tag master's squash commit after the merge). `scripts/release.sh
+<version>` rewrites and validates the field, but its commit-and-tag half
+does not fit squash merges — see `CLAUDE.md`.
 
 **One-time — to list on Anthropic's community marketplace.** Validate
 (the same check Anthropic runs on submit), then submit the repo once:
