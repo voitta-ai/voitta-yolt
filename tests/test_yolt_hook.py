@@ -209,6 +209,54 @@ class TestHookEndToEnd(unittest.TestCase):
         self.assertIn("Bash(gh issue create*)", reason)
 
 
+class TestHookSubagentDeny(unittest.TestCase):
+    """Inside a background subagent (payload carries `agent_id`) an `ask`
+    never surfaces a dialog and never times out, so the agent hangs.
+    Unsafe commands are denied there instead. Issue #76."""
+
+    def _run(self, command, **extra):
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        }
+        payload.update(extra)
+        retval = HookSubprocess.response_of(HookSubprocess.run(payload))
+        return retval
+
+    def test_unsafe_in_subagent_returns_deny(self):
+        resp = self._run("rm -rf /tmp/foo", agent_id="agent_abc123")
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+    def test_deny_reason_explains_and_keeps_allow_hint(self):
+        resp = self._run(
+            "git -C /tmp/wt-76 push origin feature/issue-76",
+            agent_id="agent_abc123",
+        )
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("no operator is reachable", reason)
+        self.assertIn("Bash(git -C * push origin feature/*)", reason)
+
+    def test_unsafe_without_agent_id_still_asks(self):
+        resp = self._run("rm -rf /tmp/foo")
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "ask"
+        )
+
+    def test_safe_in_subagent_still_allows(self):
+        resp = self._run("ls /tmp", agent_id="agent_abc123")
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_unknown_in_subagent_still_exits_silently(self):
+        resp = self._run(
+            "somecommand_unknown_xyz --flag", agent_id="agent_abc123"
+        )
+        self.assertIsNone(resp)
+
+
 class TestHookWhitelistDiscovery(unittest.TestCase):
     """The hook reads the user's settings.json `permissions.allow` Bash()
     entries and uses them as an explicit override for unknown and unsafe
@@ -331,15 +379,17 @@ class TestHookLogFile(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    def _run_with_log(self, command):
+    def _run_with_log(self, command, **extra):
         env = dict(os.environ)
         env["YOLT_LOG_FILE"] = str(self.log_path)
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        }
+        payload.update(extra)
         subprocess.run(
             [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
-            input=json.dumps({
-                "tool_name": "Bash",
-                "tool_input": {"command": command},
-            }),
+            input=json.dumps(payload),
             capture_output=True,
             text=True,
             timeout=30,
@@ -386,6 +436,24 @@ class TestHookLogFile(unittest.TestCase):
         self.assertEqual(len(recs), 3)
         decisions = [r["decision"] for r in recs]
         self.assertEqual(decisions, ["safe", "unsafe", "safe"])
+
+    def test_logs_permission_mode_and_agent_id(self):
+        self._run_with_log(
+            "rm -rf /tmp/foo",
+            permission_mode="acceptEdits",
+            agent_id="agent_abc123",
+        )
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["permission_mode"], "acceptEdits")
+        self.assertEqual(recs[0]["agent_id"], "agent_abc123")
+
+    def test_permission_mode_and_agent_id_null_when_absent(self):
+        self._run_with_log("ls /tmp")
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertIsNone(recs[0]["permission_mode"])
+        self.assertIsNone(recs[0]["agent_id"])
 
     def test_long_command_is_truncated(self):
         long_cmd = "echo " + ("x" * 1000)
