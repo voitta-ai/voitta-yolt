@@ -651,6 +651,8 @@ _ALLOWED_SERVICE_OVERRIDE_KEYS = frozenset({
 })
 
 _ALLOWED_INTERPRETER_KEYS = frozenset({
+    "_note",
+    "inherits",
     "inline_flag", "module_flag", "delegate", "read_script_file",
     "safe_modules", "unsafe_modules",
     "safe_module_patterns", "unsafe_module_patterns",
@@ -658,6 +660,7 @@ _ALLOWED_INTERPRETER_KEYS = frozenset({
 })
 
 _ALLOWED_NESTED_MODULE_KEYS = frozenset({
+    "_note",
     "default",
     "safe_subcommands", "unsafe_subcommands",
     "safe_subcommand_patterns", "unsafe_subcommand_patterns",
@@ -705,6 +708,19 @@ def validate_shell_rules(rules):
                 errors.append(
                     "interpreters.{}: unknown key '{}'".format(name, key)
                 )
+        base_name = spec.get("inherits")
+        if base_name is not None:
+            base = interpreters.get(base_name)
+            if not isinstance(base, dict):
+                errors.append(
+                    "interpreters.{}: inherits unknown interpreter '{}'"
+                    .format(name, base_name)
+                )
+            elif base.get("inherits") is not None:
+                errors.append(
+                    "interpreters.{}: inherits '{}', which itself inherits "
+                    "(chains are not resolved)".format(name, base_name)
+                )
         nested = spec.get("nested_modules", {})
         if isinstance(nested, dict):
             for mod, mod_spec in nested.items():
@@ -731,6 +747,36 @@ def validate_shell_rules(rules):
                     )
 
     return errors
+
+
+def resolve_interpreter_inheritance(interpreters):
+    """Expand `inherits` in interpreter specs.
+
+    `python` and `python3` (and any future `python3.12`) share one module
+    policy; duplicating `safe_modules` / `nested_modules` per alias is how
+    the two copies drift apart. A spec may name a base with
+    `"inherits": "<other interpreter>"`; the base's keys fill in whatever
+    the child does not set, and the child always wins on a key it does set.
+
+    Inheritance is one level only — a base that itself declares `inherits`
+    is left unexpanded rather than followed, so a cycle cannot hang the
+    hook. Naming a base that does not exist is likewise a no-op here; the
+    validator reports it.
+    """
+    resolved = {}
+    for name, spec in interpreters.items():
+        if not isinstance(spec, dict):
+            resolved[name] = spec
+            continue
+        base_name = spec.get("inherits")
+        base = interpreters.get(base_name) if base_name else None
+        if not isinstance(base, dict):
+            resolved[name] = spec
+            continue
+        merged = {k: v for k, v in base.items() if k not in ("inherits", "_note")}
+        merged.update(spec)
+        resolved[name] = merged
+    return resolved
 
 
 def _validate_command_spec(path, spec, errors):
@@ -864,7 +910,9 @@ class RuleClassifier:
         self.rules = rules
         self.commands = rules.get("commands", {})
         self.shell_builtins_safe = set(rules.get("shell_builtins_safe", []))
-        self.interpreters = rules.get("interpreters", {})
+        self.interpreters = resolve_interpreter_inheritance(
+            rules.get("interpreters", {})
+        )
         self.safe_write_targets = list(rules.get("safe_write_targets", []))
         self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
         self.python_analyzer_factory = python_analyzer_factory
@@ -1000,6 +1048,20 @@ class RuleClassifier:
             return (DECISION_SAFE, "{} {}: read-only".format(label, sub))
         if sub in unsafe_subs:
             return (DECISION_UNSAFE, "{} {}: mutating".format(label, sub))
+
+        # Patterns cover namespaces whose "subcommand" slot is really a
+        # free-form target — `python3 -m unittest <test.module>` names a
+        # module, not a verb, so no exact list can enumerate it. Unsafe
+        # patterns are consulted first so a broad safe pattern cannot
+        # swallow a narrower mutating one.
+        for pat in mod_spec.get("unsafe_subcommand_patterns", []):
+            if fnmatch(sub, pat):
+                return (DECISION_UNSAFE,
+                        "{} {}: matches unsafe pattern".format(label, sub))
+        for pat in mod_spec.get("safe_subcommand_patterns", []):
+            if fnmatch(sub, pat):
+                return (DECISION_SAFE,
+                        "{} {}: matches safe pattern".format(label, sub))
 
         return (DECISION_UNKNOWN, "{} {}: no rule".format(label, sub))
 

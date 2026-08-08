@@ -108,15 +108,20 @@
         },
         "unittest": {
           "safe_subcommands": ["discover"],
-          "default": "safe"
+          "safe_subcommand_patterns": ["*"],
+          "default": "safe",
+          "_note": "The positional after `-m unittest` is a test target (module, class, or method path), not a verb, so no list can enumerate it. Bare `unittest`, `unittest discover`, and `unittest pkg.test_mod.TestCase` all classify safe. Deliberate policy call: a test run executes project code, so safe here means 'YOLT will not prompt', not 'provably no side effects'."
+        },
+        "pytest": {
+          "default": "safe",
+          "safe_subcommand_patterns": ["*"],
+          "_note": "pytest takes no subcommands; positionals are paths / node ids. Same policy call as unittest above."
         }
       }
     },
     "python":  {
-      "inline_flag": "-c",
-      "module_flag": "-m",
-      "delegate": "python",
-      "read_script_file": true
+      "inherits": "python3",
+      "_note": "Same binary in practice (venv `python`, `python3.12`). Inheriting keeps one copy of the module policy so the aliases cannot drift."
     },
     "bash":    {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
     "sh":      {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
@@ -638,6 +643,11 @@
 
     "yarn": {"default": "ask", "_note": "yarn invokes scripts by default. Punt."},
     "pnpm": {"default": "ask"},
+
+    "pytest": {
+      "default": "safe",
+      "_note": "Console-script form of `python3 -m pytest`; classified the same way. See interpreters.python3.nested_modules.pytest for why a test run counts as safe."
+    },
 
     "pip": {
       "default": "subcommand",

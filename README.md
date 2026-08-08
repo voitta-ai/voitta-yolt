@@ -22,6 +22,8 @@
 - [Dependencies](#dependencies)
 - [What the grammar classifier handles](#what-the-grammar-classifier-handles)
 - [SQL CLIs](#sql-clis)
+- [Test runners](#test-runners)
+  - [Interpreter aliases (`inherits`)](#interpreter-aliases-inherits)
 - [Python rules (interpreter delegate)](#python-rules-interpreter-delegate)
 - [Custom rules](#custom-rules)
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
@@ -154,7 +156,9 @@ Argv is dispatched per-`command_name`: safe builtins → safe;
 interpreters delegate inline scripts (see lead-in); `python3 -m <mod>`
 consults the `safe_modules` / `unsafe_modules` / `nested_modules` lists
 in `rules/shell.json#interpreters.python3` (so e.g. `python3 -m pip list`
-is safe but `python3 -m pip install` is unsafe); known CLIs use their
+is safe but `python3 -m pip install` is unsafe — and `python` inherits
+that whole policy via `"inherits": "python3"`, so a venv's `python -m`
+classifies identically); known CLIs use their
 `rules/shell.json` spec; wrappers (`time`, `xargs`, `timeout`, `env`,
 `nice`, `watch`, ...) re-classify the wrapped command; anything else →
 unknown.
@@ -433,6 +437,49 @@ mutating operation on its own:
 deny-set yet, so only the dialect-agnostic keyword scan applies to them
 today; the field is recorded so adding a deny-set later lights up
 function detection for those services with no further wiring.
+
+## Test runners
+
+Python test invocations classify `safe`:
+
+```
+python3 -m unittest                                  # bare
+python3 -m unittest discover -p "test_*.py"          # discover
+python3 -m unittest tests.test_mod.TestCase.test_x   # explicit target
+python3 -m pytest -q tests/
+pytest -q
+python -m pytest                                     # via inherits
+```
+
+The target after `-m unittest` is a module / class / method path, not a
+verb, so it cannot be enumerated in `safe_subcommands`. It is matched by
+`safe_subcommand_patterns: ["*"]` on the `unittest` and `pytest` entries
+in `rules/shell.json#interpreters.python3.nested_modules`.
+
+**This is a policy call, not a proof.** A test run executes project
+code, and a test is free to write files or call an API. "Safe" here
+means *YOLT will not prompt for it* — the same trade the bundled rules
+already made for bare `python3 -m unittest`. Narrow it in your own
+`~/.claude/yolt/shell.json` if you do not want it:
+
+```json
+{"interpreters": {"python3": {"nested_modules": {
+  "unittest": {"safe_subcommands": ["discover"], "default": "safe"}
+}}}}
+```
+
+Runners for other ecosystems (`go test`, `cargo test`, `npm test`) are
+deliberately not covered by this rule — `npm test` in particular runs
+whatever `package.json` says, which is often a build.
+
+### Interpreter aliases (`inherits`)
+
+An interpreter spec may name another with `"inherits": "<name>"`; the
+base's keys fill in whatever the child does not set, and the child wins
+on any key it does set. `python` inherits `python3` so the two aliases
+cannot drift apart. Inheritance is one level — a base that itself
+declares `inherits` is left unexpanded (no cycles), and naming a
+nonexistent base is a schema-validation error.
 
 ## Python rules (interpreter delegate)
 
@@ -838,6 +885,7 @@ The tree-sitter-bash grammar walker handles:
 | `python3 file.py` | `hooks/yolt_analyzer.py` (stdlib `ast`) |
 | `python3 <<EOF ... EOF` | `hooks/yolt_analyzer.py` (stdlib `ast`) |
 | `python3 -m mod[.sub] ...` | `interpreters.python3.nested_modules` in `rules/shell.json` |
+| `python -m mod[.sub] ...` | same, via `interpreters.python.inherits` |
 
 ### Delegated language analysis (out of scope)
 
