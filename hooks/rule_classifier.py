@@ -619,6 +619,13 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "shell_builtins_safe", "shell_keywords",
     "safe_write_targets", "unsafe_write_targets",
     "commands", "interpreters",
+    "policies",
+})
+
+_ALLOWED_POLICY_KEYS = frozenset({"_note", "enabled", "allow"})
+
+_ALLOWED_POLICY_ENTRY_KEYS = frozenset({
+    "_note", "argv", "require", "deny_flags", "deny_default_branch_refspec",
 })
 
 _ALLOWED_COMMAND_KEYS = frozenset({
@@ -730,7 +737,60 @@ def validate_shell_rules(rules):
                         .format(name, mod, mod_default)
                     )
 
+    _validate_policies(rules.get("policies", {}), errors)
+
     return errors
+
+
+def _validate_policies(policies, errors):
+    """Schema-check the `policies` block.
+
+    A policy can only turn `unsafe` into `safe`, so a typo here is a
+    false-allow, not a false-prompt. Unknown keys and unknown predicate
+    names are hard errors for the same reason the rest of the validator
+    exists: the classifier would silently ignore them."""
+    from git_policy import PREDICATES
+
+    if not isinstance(policies, dict):
+        errors.append("policies: must be a dict")
+        return
+
+    for name, spec in policies.items():
+        if name.startswith("_"):
+            continue
+        path = "policies.{}".format(name)
+        if not isinstance(spec, dict):
+            errors.append("{}: must be a dict".format(path))
+            continue
+        for key in spec:
+            if key not in _ALLOWED_POLICY_KEYS:
+                errors.append("{}: unknown key '{}'".format(path, key))
+
+        entries = spec.get("allow", [])
+        if not isinstance(entries, list):
+            errors.append("{}.allow: must be a list".format(path))
+            continue
+        for i, entry in enumerate(entries):
+            entry_path = "{}.allow[{}]".format(path, i)
+            if not isinstance(entry, dict):
+                errors.append("{}: must be a dict".format(entry_path))
+                continue
+            for key in entry:
+                if key not in _ALLOWED_POLICY_ENTRY_KEYS:
+                    errors.append(
+                        "{}: unknown key '{}'".format(entry_path, key)
+                    )
+            argv = entry.get("argv")
+            if not isinstance(argv, list) or not argv:
+                errors.append(
+                    "{}: 'argv' must be a non-empty list".format(entry_path)
+                )
+            for predicate in entry.get("require", []):
+                if predicate not in PREDICATES:
+                    errors.append(
+                        "{}: unknown predicate '{}' (known: {})"
+                        .format(entry_path, predicate, ", ".join(PREDICATES))
+                    )
 
 
 def _validate_command_spec(path, spec, errors):

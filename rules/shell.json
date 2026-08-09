@@ -4,6 +4,42 @@
     "description": "YOLT shell command classification rules. Used to decide whether the *full* invocation of a Bash command is read-only (auto-allow) or mutating (ask)."
   },
 
+  "policies": {
+    "_note": "Policies answer a question static analysis cannot: not 'does this mutate?' but 'is this write confined to work that is already mine?'. They run ONLY on commands the rules already classified unsafe, they can only upgrade unsafe -> safe, and every predicate is a read-only git probe that resolves to 'not satisfied' on any failure. Set enabled=false (or export YOLT_NO_POLICIES=1) to turn the layer off.",
+    "self_authored_git": {
+      "enabled": true,
+      "allow": [
+        {
+          "argv": ["git", "commit"],
+          "require": ["linked_worktree", "non_default_branch", "solo_author"],
+          "_note": "Committing to a branch nobody else has touched, in a worktree that is not the primary checkout."
+        },
+        {
+          "argv": ["git", "push"],
+          "require": ["linked_worktree", "non_default_branch", "solo_author"],
+          "deny_flags": ["-f", "--force", "--force-with-lease", "--force-if-includes", "--delete", "--mirror", "--prune", "--all", "--tags", "--follow-tags"],
+          "deny_default_branch_refspec": true,
+          "_note": "Bare `git push` or `git push [-u] <remote> <current-branch>`. History rewrites, deletions, and pushing any ref other than the branch the predicates examined still ask."
+        },
+        {
+          "argv": ["gh", "pr", "create"],
+          "require": ["linked_worktree", "non_default_branch", "solo_author"],
+          "_note": "Opening a PR for the branch you are standing on."
+        },
+        {
+          "argv": ["gh", "issue", "comment"],
+          "require": [],
+          "_note": "A comment is additive and reversible and carries no repository state, so it needs no predicate."
+        },
+        {
+          "argv": ["gh", "pr", "comment"],
+          "require": []
+        }
+      ],
+      "_note": "To also skip the prompt on `git add`, append {\"argv\": [\"git\", \"add\"], \"require\": [\"linked_worktree\", \"non_default_branch\", \"solo_author\"]} in ~/.claude/yolt/shell.json. It is out of the bundled defaults because staging is not what the policy was asked to cover."
+    }
+  },
+
   "shell_builtins_safe": [
     "echo", "printf", "pwd", "true", "false",
     "test", "[", "[[",

@@ -23,6 +23,10 @@
 - [What the grammar classifier handles](#what-the-grammar-classifier-handles)
 - [SQL CLIs](#sql-clis)
 - [Python rules (interpreter delegate)](#python-rules-interpreter-delegate)
+- [Policies](#policies)
+  - [What is allowed by default](#what-is-allowed-by-default)
+  - [Cost](#cost)
+  - [Turning it off or changing it](#turning-it-off-or-changing-it)
 - [Custom rules](#custom-rules)
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
   - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
@@ -517,6 +521,109 @@ Still out of scope: variable rebinding via attribute access,
 Anything the analyzer cannot resolve statically is left at its surface
 name rather than guessed.
 
+## Policies
+
+The rules answer *"does this command mutate anything?"*. That question
+has no good answer for `git commit`: committing to a shared branch other
+people are building on is a very different act from committing to a
+feature branch you opened five minutes ago in your own worktree, and the
+argv is identical. The rules see the argv, so `git commit` is `unsafe`,
+and you approve the same prompt all day.
+
+A **policy** answers a second question — *"is this write confined to work
+that is already mine?"* — and needs repository state to do it. Policies
+live under the `policies` key of `rules/shell.json`.
+
+### What is allowed by default
+
+`self_authored_git`, enabled out of the box:
+
+| Command | Requires |
+| ------- | -------- |
+| `git commit` | linked worktree + non-default branch + solo author |
+| `git push` (no force / delete / foreign refspec) | same |
+| `gh pr create` | same |
+| `gh issue comment`, `gh pr comment` | nothing |
+
+The three predicates:
+
+- **`linked_worktree`** — the command's directory is a `git worktree`,
+  not the primary checkout. Under the convention where the repo dir
+  stays on its default branch and branch work happens in
+  `<repo>.worktrees/<branch>/`, this alone says "this is branch work".
+  Checked with `--git-dir` vs `--git-common-dir`.
+- **`non_default_branch`** — the checked-out branch is not the
+  repository's default. The default comes from `origin/HEAD`, falling
+  back to whichever of `init.defaultBranch` / `main` / `master`
+  actually resolves in this repo. Detached HEAD never qualifies.
+- **`solo_author`** — every commit on this branch that is not on the
+  default branch was authored *and* committed by `git config user.email`.
+  A branch with no commits of its own yet is vacuously solo — that is
+  the state you are in the moment before the first `git commit`.
+
+Three properties keep the layer honest:
+
+1. **It only upgrades.** A policy can turn `unsafe` into `safe`. It can
+   never make a safe command unsafe, and it never sees a command the
+   rules did not already flag.
+2. **Failure means "no".** Every probe is read-only `git` with a 3s
+   timeout. No git, not a repo, timeout, unparseable output, a `-C` path
+   with a shell expansion in it — all resolve to *predicate not
+   satisfied*, so the original `ask` stands.
+3. **It judges the right directory.** `cd /path/to/wt && git commit` is
+   followed (the walker tracks literal `cd` targets in order), and
+   `git -C <path>` retargets the probe. A `cd` the walker cannot resolve
+   statically — `cd "$DIR"`, `cd -` — disables the policy for the rest
+   of that invocation rather than letting it judge the wrong tree.
+
+So these still prompt:
+
+```
+git commit -m x            # in the repo dir, on master
+git push --force           # deny_flags
+git push origin master     # refspec the predicates never examined
+git commit -m x            # branch that has a commit by someone else
+cd "$DIR" && git commit     # unresolvable cd
+```
+
+### Cost
+
+Zero on every command that does not match a policy entry — the probes
+only run after the rules said `unsafe` *and* the argv head matched. On a
+matching command it is ~40ms of read-only `git`, memoized per directory,
+so `git commit ... && git push` probes once.
+
+### Turning it off or changing it
+
+`export YOLT_NO_POLICIES=1` disables the layer wholesale. Otherwise it is
+data like every other rule, and `~/.claude/yolt/shell.json` overrides the
+`policies` key:
+
+```json
+{"policies": {"self_authored_git": {"enabled": false}}}
+```
+
+Add an entry the bundled defaults leave out — `git add` is the obvious
+one, deliberately omitted because staging is not what the policy was
+asked to cover:
+
+```json
+{"policies": {"self_authored_git": {"enabled": true, "allow": [
+  {"argv": ["git", "add"],
+   "require": ["linked_worktree", "non_default_branch", "solo_author"]}
+]}}}
+```
+
+Overrides merge per top-level key, so an `allow` list in your override
+**replaces** the bundled one — copy the entries you want to keep.
+
+Entry fields: `argv` (prefix, matched skipping flags, argv[0] by
+basename), `require` (any of `linked_worktree`, `non_default_branch`,
+`solo_author`; empty means unconditional), `deny_flags`, and
+`deny_default_branch_refspec`. Unknown keys and unknown predicate names
+fail schema validation at hook load — a typo here would be a
+false-allow, not a false-prompt.
+
 ## Custom rules
 
 ### Python rules - `~/.claude/yolt/rules.json`
@@ -936,6 +1043,15 @@ this path:
   `rules-validation-error` and exits silently so Claude Code's
   default prompt fires.
 
+### Policy layer (in scope, and the one place YOLT forks)
+
+The `policies` block re-decides an already-`unsafe` command by probing
+read-only `git` state — see [Policies](#policies). It only upgrades
+`unsafe` -> `safe`, every probe failure counts as "predicate not
+satisfied", and the directory it judges follows literal `cd` and
+`git -C`. An unresolvable `cd` disables it for the rest of the
+invocation.
+
 Schema validation runs at hook load time
 (`hooks/rule_classifier.py:validate_shell_rules`) on both the
 bundled rules and any user override, so a typo in a policy field
@@ -952,4 +1068,8 @@ becomes a hard fail at startup rather than a silent false-allow.
 - **Configurable** — rules are data (`rules/shell.json`,
   `rules/default.json`), not code.
 - **Fast** — classification is purely syntactic; no subprocess fork. A
-  representative compound command parses in ~1ms.
+  representative compound command parses in ~1ms. The one exception is
+  the [policy layer](#policies), which forks read-only `git` probes —
+  only for a command the rules already classified `unsafe`, and only
+  when its argv head matches a configured policy entry. Nothing else
+  pays for it.

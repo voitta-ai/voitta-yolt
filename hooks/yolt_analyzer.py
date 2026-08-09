@@ -1099,6 +1099,7 @@ def run_hook():
         if str(hooks_dir) not in sys.path:
             sys.path.insert(0, str(hooks_dir))
         from grammar_classifier import GrammarClassifier
+        from git_policy import load_policies
         from rule_classifier import (
             DECISION_SAFE, DECISION_UNSAFE,
             ShellRulesValidationError,
@@ -1134,6 +1135,8 @@ def run_hook():
         shell_rules,
         python_analyzer_factory=_python_factory,
         allow_patterns=allow_patterns,
+        cwd=cwd_str,
+        policy=load_policies(shell_rules),
     )
     decision, reason = classifier.classify(command)
     _log_hook_decision(command, decision, reason, permission_mode, agent_id)
