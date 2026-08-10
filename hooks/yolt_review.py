@@ -98,6 +98,32 @@ RAN_MATCH_SKEW_SECONDS = 5
 # direction -- better than fabricating an approval.
 RAN_MATCH_WINDOW_SECONDS = 600
 
+SESSION_STATE_NAME = "sessions.json"
+
+# How many DISTINCT friction prefixes this session must hit before the
+# UserPromptSubmit nudge fires. Distinct, not total: ten prompts on the
+# same command is one gap, and one gap is not worth interrupting for.
+SESSION_NUDGE_MIN_PREFIXES = 3
+MAX_TRACKED_SESSIONS = 20
+
+# Decision values in the log that count as friction for the session nudge.
+KIND_DECISION_UNSAFE = "unsafe"
+KIND_DECISION_UNKNOWN = "unknown"
+
+SESSION_NUDGE_TEMPLATE = (
+    "YOLT friction in this session: {fires} prompt(s) across {distinct}"
+    " distinct commands ({sample}).\n"
+    "AFTER you finish the user's current request, evaluate whether that"
+    " friction is a YOLT rules gap worth fixing upstream -- i.e. a common"
+    " CLI or invocation shape that should have classified read-only. If it"
+    " is, tell the user in one line what you saw and offer /yolt:contribute"
+    " (interview, then an issue + PR on voitta-ai/voitta-yolt). If it is"
+    " not -- YOLT was right to prompt, or the command is personal to this"
+    " machine -- say nothing about it.\n"
+    "This is an offer, not a task. If the user declines or ignores it, drop"
+    " it and do not raise it again this session."
+)
+
 KIND_UNSAFE = "friction-unsafe"
 KIND_UNKNOWN = "friction-unknown"
 KIND_FASTPATH = "fastpath"
@@ -1000,6 +1026,132 @@ def cmd_nudge(args):
     return 0
 
 
+def cmd_session_nudge(args):
+    """UserPromptSubmit helper. Emits an `additionalContext` block once per
+    session, when THIS session has hit enough distinct friction to be worth
+    reviewing while the context that produced it is still in the window.
+
+    `--nudge` (SessionStart) points at accumulated, already-distilled
+    suggestions. This one is about the session you are in: it is the
+    moment the reasoning behind a rules gap is still recoverable, which is
+    what turns friction into a filable issue instead of a log line.
+
+    Deliberately cheap, because it runs on every prompt: the log is read
+    from a stored byte offset, never from the top. A session seen for the
+    first time records the current end-of-file as its offset, so it only
+    ever counts its own records.
+    """
+    payload = {}
+    if not sys.stdin.isatty():
+        try:
+            payload = json.load(sys.stdin) or {}
+        except (json.JSONDecodeError, EOFError, OSError):
+            payload = {}
+    session_id = payload.get("session_id") or "unknown"
+
+    log_path = resolve_log_path(args.log)
+    if log_path is None:
+        # Logging opted out; there is nothing to mine.
+        return 0
+    state_dir = resolve_state_dir(args.state_dir)
+    sessions_path = state_dir / SESSION_STATE_NAME
+
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return 0
+
+    sessions = _load_json_obj(sessions_path) or {}
+    if not isinstance(sessions, dict):
+        sessions = {}
+    entry = sessions.get(session_id)
+    first_sight = entry is None
+    if first_sight:
+        entry = {"offset": size, "nudged": False}
+        sessions[session_id] = entry
+
+    if entry.get("nudged"):
+        return 0
+
+    offset = min(entry.get("offset", 0), size)
+    prefixes, fires = _scan_friction_since(log_path, offset)
+
+    threshold = _session_nudge_threshold()
+    if len(prefixes) < threshold:
+        _save_sessions(sessions_path, sessions)
+        return 0
+
+    entry["nudged"] = True
+    _save_sessions(sessions_path, sessions)
+
+    message = SESSION_NUDGE_TEMPLATE.format(
+        fires=fires,
+        distinct=len(prefixes),
+        sample=", ".join("`{}`".format(p) for p in prefixes[:5]),
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": message,
+        }
+    }))
+    return 0
+
+
+def _session_nudge_threshold():
+    raw = os.environ.get("YOLT_SESSION_NUDGE_MIN")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return SESSION_NUDGE_MIN_PREFIXES
+
+
+def _scan_friction_since(log_path, offset):
+    """Return (distinct friction prefixes, total friction fires) from the
+    log tail starting at `offset`. Compound commands are counted but never
+    contribute a prefix, matching how suggestions are grouped."""
+    seen = []
+    fires = 0
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            f.seek(offset)
+            for line in f:
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if record.get("decision") not in (KIND_DECISION_UNSAFE,
+                                                  KIND_DECISION_UNKNOWN):
+                    continue
+                fires += 1
+                command = record.get("command", "")
+                if is_compound(command):
+                    continue
+                prefix = group_key(command)
+                if prefix and prefix not in seen:
+                    seen.append(prefix)
+    except OSError:
+        return ([], 0)
+    return (seen, fires)
+
+
+def _save_sessions(path, sessions):
+    """Persist per-session nudge state, keeping only the most recent few.
+
+    Sessions are never explicitly ended here, so without a cap this file
+    would grow one entry per session forever."""
+    if len(sessions) > MAX_TRACKED_SESSIONS:
+        keys = list(sessions)[-MAX_TRACKED_SESSIONS:]
+        sessions = {k: sessions[k] for k in keys}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(path, sessions)
+    except OSError:
+        pass
+
+
 def cmd_list(args):
     state_dir = resolve_state_dir(args.state_dir)
     state = load_state(state_dir / STATE_NAME)
@@ -1190,6 +1342,11 @@ def main():
     group.add_argument("--generate", action="store_true")
     group.add_argument("--status", action="store_true")
     group.add_argument("--nudge", action="store_true")
+    group.add_argument("--session-nudge", action="store_true",
+                       dest="session_nudge",
+                       help="UserPromptSubmit helper: offer /yolt:contribute "
+                            "once per session when this session hit enough "
+                            "distinct friction")
     group.add_argument("--list", action="store_true")
     group.add_argument("--applied", nargs="+", metavar="ID", dest="applied_ids")
     group.add_argument("--dismiss", nargs="+", metavar="ID", dest="dismiss_ids")
@@ -1206,6 +1363,8 @@ def main():
         retval = cmd_status(args)
     elif args.nudge:
         retval = cmd_nudge(args)
+    elif args.session_nudge:
+        retval = cmd_session_nudge(args)
     elif args.list:
         retval = cmd_list(args)
     elif args.applied_ids:
