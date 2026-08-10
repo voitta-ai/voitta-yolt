@@ -28,6 +28,7 @@
   - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
 - [Debug / dogfood log](#debug--dogfood-log)
 - [Self-improvement loop](#self-improvement-loop)
+  - [Contributing a rules fix upstream (`/yolt:contribute`)](#contributing-a-rules-fix-upstream-yoltcontribute)
 - [CLI usage](#cli-usage)
 - [Tests and demo](#tests-and-demo)
 - [Analysis boundaries](#analysis-boundaries)
@@ -711,12 +712,47 @@ stripped to `<...>`) may leave the machine in an upstream issue. The
 - **SessionEnd** regenerates the doc with `--generate --if-stale`: a
   no-op (just an mtime check) when the log has not changed since the last
   run, so quiet sessions cost almost nothing.
+- **UserPromptSubmit** offers `/yolt:contribute` once per session when
+  *this* session hit enough distinct friction — see below.
+
+### Contributing a rules fix upstream (`/yolt:contribute`)
+
+`/yolt:review` triages friction into *your* settings and *your*
+overrides. The other outcome is that the bundled rules are wrong, and the
+fix belongs upstream where everyone gets it. `/yolt:contribute` covers
+that path: interview, then an issue and a PR on voitta-ai/voitta-yolt for
+the maintainers to review.
+
+The timing is the point. A log line records that `foo bar` prompted, but
+only the session that produced it still knows *what you were doing* — and
+that is exactly what decides whether the fix is a whole-command default, a
+subcommand entry, or a flag-conditional rule. So the offer arrives while
+the session is still live, from a `UserPromptSubmit` hook, in the same
+shape as any other end-of-turn evaluation: **it is an offer, and a
+declined offer is dropped for the rest of the session.**
+
+The nudge fires at most once per session, and only after the session has
+hit at least `YOLT_SESSION_NUDGE_MIN` (default 3) **distinct** friction
+prefixes — ten prompts on one command is one gap, and one gap is not worth
+interrupting for. It is cheap enough to run on every prompt because it
+reads the decision log from a stored byte offset (`~/.claude/yolt/
+sessions.json`), never from the top; a session seen for the first time
+records the current end-of-file, so it only ever counts its own records.
+
+The command itself will not draft anything until the interview
+establishes: what you were doing, whether the command is read-only under
+*every* flag, whether some flag could make it write, whether the rule
+should apply to other people's machines, and what the narrowest fix is. If
+the answers say "local", it routes you back to `/yolt:review`. Only the
+redacted `shape` field leaves the machine, and the PR must show both the
+now-allowed invocation and the still-prompting mutating variant.
 
 Run it by hand the same way the hooks do:
 
 ```bash
 python3 hooks/yolt_review.py --generate   # parse logs, write doc + state
 python3 hooks/yolt_review.py --status     # {"pending": N, ...}
+python3 hooks/yolt_review.py --session-nudge < payload.json  # UserPromptSubmit offer
 python3 hooks/yolt_review.py --list       # full suggestion JSON
 python3 hooks/yolt_review.py --applied <id> [<id> ...]
 python3 hooks/yolt_review.py --dismiss <id> [<id> ...]
