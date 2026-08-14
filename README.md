@@ -27,6 +27,7 @@
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
   - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
 - [Debug / dogfood log](#debug--dogfood-log)
+  - [Credential redaction](#credential-redaction)
 - [Self-improvement loop](#self-improvement-loop)
 - [CLI usage](#cli-usage)
 - [Tests and demo](#tests-and-demo)
