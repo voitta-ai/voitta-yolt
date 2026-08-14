@@ -16,6 +16,16 @@ import symtable
 from fnmatch import fnmatch
 from pathlib import Path
 
+# Both hook entry points run this file as a script, so its directory is
+# already sys.path[0]; the guard is for callers that import the module by
+# path. Deliberately not wrapped in a try/except: if the redactor cannot
+# be loaded, failing loudly beats silently writing credentials to disk.
+_HOOKS_DIR = str(Path(__file__).resolve().parent)
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+
+from secret_redact import redact  # noqa: E402
+
 
 def load_rules(rules_dir, user_overrides_path=None):
     """Load and merge rules from default + user overrides."""
@@ -953,6 +963,13 @@ def _log_hook_decision(command, decision, reason,
     5MB) by renaming it to `<log>.old` — one previous generation
     preserved. Set `YOLT_LOG_MAX_BYTES=0` to disable.
 
+    Credential-shaped substrings in `command` and `reason` are replaced
+    with `[REDACTED:<shape>]` markers before the record is written - this
+    log is append-only and long-lived, so anything landing in it should
+    be assumed permanent. Redaction runs *before* the 500-char truncation
+    so a secret straddling that boundary cannot be half-written. See
+    `secret_redact.py` and issue #84.
+
     Failures (unwritable path, full disk, ...) are swallowed: logging
     must never break the hook. The command is truncated to 500 chars to
     avoid pathologically long lines.
@@ -966,8 +983,8 @@ def _log_hook_decision(command, decision, reason,
         record = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "decision": decision,
-            "reason": reason,
-            "command": command[:500] if command else "",
+            "reason": redact(reason),
+            "command": redact(command)[:500] if command else "",
             "permission_mode": permission_mode,
             "agent_id": agent_id,
         }
@@ -1001,8 +1018,9 @@ def _resolve_ran_log_path():
 
 def _log_ran_command(command):
     """Append a JSON-line ran-record to the resolved ran-log path. Shares
-    the size-based rotation and failure-swallowing conventions of
-    `_log_hook_decision`. The command is truncated to 500 chars.
+    the credential redaction, size-based rotation and failure-swallowing
+    conventions of `_log_hook_decision`. The command is truncated to 500
+    chars, after redaction.
     """
     log_path = _resolve_ran_log_path()
     if log_path is None:
@@ -1012,7 +1030,7 @@ def _log_ran_command(command):
         _maybe_rotate_log(log_path, _resolve_log_max_bytes())
         record = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "command": command[:500] if command else "",
+            "command": redact(command)[:500] if command else "",
         }
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")

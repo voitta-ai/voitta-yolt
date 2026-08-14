@@ -627,6 +627,47 @@ YOLT rotates the log when it grows past 5 MB by renaming it to
 preserved. `YOLT_LOG_MAX_BYTES` overrides the threshold; set
 `YOLT_LOG_MAX_BYTES=0` to disable rotation.
 
+### Credential redaction
+
+Credentials land on command lines routinely — `curl -H "X-Api-Key: ..."`,
+`--token`, connection strings — and both logs are append-only, so
+anything written to them should be assumed permanent. Before a record is
+written, credential-shaped substrings in `command` (and in `reason`) are
+replaced with a `[REDACTED:<shape>]` marker naming the shape only, never
+the value. This applies to `~/.claude/yolt.log` and
+`~/.claude/yolt-ran.log` alike, and happens at write time — the risk
+being closed is the file on disk. Issue
+[#84](https://github.com/voitta-ai/voitta-yolt/issues/84).
+
+```json
+{"ts": "...", "decision": "unsafe", "reason": "curl: mutating", "command": "curl -H \"Authorization: Bearer [REDACTED:github-token]\" https://api.github.com", "permission_mode": "default", "agent_id": null}
+```
+
+Two match families (`hooks/secret_redact.py`):
+
+- **Structured prefixes** — `ghp_`/`gho_`/`ghs_`/`ghr_`/`ghu_`,
+  `github_pat_`, `glpat-`, `xox[baprse]-`, `xapp-`, `AKIA`/`ASIA`,
+  `sk-`, PEM `PRIVATE KEY` blocks, and the password field of
+  `scheme://user:secret@host`. Self-identifying, so these are matched
+  wherever they appear.
+- **Assignment shapes** — `--token X`, `Authorization: X`, `FOO_TOKEN=X`
+  and friends. Only the *value* is redacted, and only when it looks like
+  a literal: a shell expansion (`--token $API_KEY`) or an ordinary name
+  (`--token some-resource-name`) is left alone.
+
+Redaction is deliberately value-only where it can be, because the
+command *shape* is what the self-improvement reviewer mines — a redacted
+value costs it nothing.
+
+Note the scope: this stops YOLT persisting a secret it already saw. It
+does not stop the secret reaching `argv` in the first place, where any
+process that can run `ps` sees it. Prefer keeping credentials in the
+environment:
+
+```bash
+KEY="$(fetch-secret)" sh -c 'curl -H "X-Api-Key: $KEY" https://service/endpoint'
+```
+
 ## Self-improvement loop
 
 The dogfood log is also a record of where YOLT got in your way. The
