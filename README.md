@@ -26,6 +26,7 @@
 - [Custom rules](#custom-rules)
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
   - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
+- [Credentials in the command line (advisory)](#credentials-in-the-command-line-advisory)
 - [Debug / dogfood log](#debug--dogfood-log)
   - [Credential redaction](#credential-redaction)
 - [Self-improvement loop](#self-improvement-loop)
@@ -590,6 +591,79 @@ entire list; if you want to add `/scratch/*` while keeping the defaults,
 copy the default list through. `unsafe_write_targets` is checked before
 `safe_write_targets`, so a deny entry wins over a broader safe glob.
 Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
+
+## Credentials in the command line (advisory)
+
+YOLT already parses every Bash command for safety, which makes
+`PreToolUse` the natural place to catch a hazard it is otherwise blind
+to: **a credential sitting in the command string itself.** Issue
+[#85](https://github.com/voitta-ai/voitta-yolt/issues/85).
+
+The motivating case is not a mistake:
+
+```bash
+curl -H "X-Api-Key: <value>" https://service/endpoint
+```
+
+The key was fetched correctly from a secret manager. Nothing about the
+command is unsafe by YOLT's lights. But that string then lands in the
+session transcript, in session memory (usually embedded and searchable,
+so it can resurface in a *later* session's context), in any spilled tool
+output, in YOLT's own logs, and in `permissions.allow` if the approved
+command string contained it — copies with different lifetimes, none in
+git, most never swept. `argv` is also world-readable to anything that
+can run `ps` while the process lives.
+
+`PreToolUse` is the only point where that is preventable rather than
+cleanable. Once the command has run, every one of those copies exists.
+
+So YOLT warns — and only warns:
+
+```
+YOLT: possible credential on this command line (github-token at char 24). Not blocked.
+It will persist in the transcript, session memory and the allowlist, and `argv` is
+visible to `ps`. Keep it out of `argv`:
+  KEY="$(fetch-secret)" sh -c 'curl -H "X-Api-Key: $KEY" https://service/endpoint'
+```
+
+Three lines, deliberately. It rides along with a permission prompt the
+user is already reading, and a paragraph of security prose on every
+credential-bearing command is the fastest route to the whole feature
+being switched off.
+
+Properties, all deliberate:
+
+- **Advisory, never blocking.** The warning attaches to whatever
+  decision was already reached (`allow`, `ask`, `deny`, and the silent
+  `unknown` fallthrough alike) and never changes it. A control that
+  false-positives on legitimate work gets switched off and then protects
+  nothing.
+- **Suggests the fix.** Delivered as both `systemMessage` (you see it)
+  and `additionalContext` (Claude sees it, so the remediation is
+  actionable rather than decorative).
+- **Reports shape and offset, never the value.** A warning that quotes
+  the secret puts the secret straight into the transcript it is warning
+  about.
+- **Structured prefixes first**, assignment shapes second with a
+  literal-value guard — the same matcher as [credential
+  redaction](#credential-redaction), so `--token $API_KEY` and
+  `--token some-resource-name` do not trip it.
+
+- **Never breaks the hook.** The scan runs in the critical path of every
+  Bash call, so a bug in a credential pattern costs the warning and
+  nothing else — the safety decision is already made by that point, and
+  it matters more than the advisory.
+
+To disable, set `YOLT_SECRET_WARN` to any of `0`, `false`, `no`, `off`,
+`n`, `disable`, `disabled` (case and surrounding space ignored). The
+generous list is on purpose: an exact `=0` test looks precise and
+behaves as a trap, since someone silencing a noisy control reaches for
+`false` or `off` first and would conclude the switch is broken.
+
+Note the division of labour: this stops the secret reaching the command
+line; redaction stops YOLT persisting one it already saw. They are
+independent, and redaction is worth having regardless. Neither is a
+guarantee — see the [known gaps](#credential-redaction).
 
 ## Debug / dogfood log
 

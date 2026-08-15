@@ -24,7 +24,7 @@ _HOOKS_DIR = str(Path(__file__).resolve().parent)
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from secret_redact import redact  # noqa: E402
+from secret_redact import find_secrets, redact  # noqa: E402
 
 
 def load_rules(rules_dir, user_overrides_path=None):
@@ -887,6 +887,76 @@ def format_unsafe_reason(reason, allow_hint=None):
     return message
 
 
+# Kept to three short lines on purpose. This rides along with a prompt
+# the user is already reading, and a wall of text on every
+# credential-bearing command is the fastest route to the whole feature
+# being switched off. The full rationale lives in the README.
+SECRET_ADVISORY_HEADER = (
+    "YOLT: possible credential on this command line ({}). Not blocked.\n"
+    "It will persist in the transcript, session memory and the allowlist, "
+    "and `argv` is visible to `ps`. Keep it out of `argv`:\n"
+    "  KEY=\"$(fetch-secret)\" sh -c 'curl -H \"X-Api-Key: $KEY\" "
+    "https://service/endpoint'"
+)
+
+# Any of these disables the warning. An exact `== "0"` test looks precise
+# and behaves as a trap: a user who reaches for `false` or `off` to
+# silence a noisy control sees no change and concludes it is broken.
+SECRET_WARN_OFF_VALUES = frozenset(
+    {"0", "false", "no", "off", "n", "disable", "disabled"}
+)
+
+
+def format_secret_advisory(command):
+    """Build the credential warning for `command`, or None if clean.
+
+    Advisory only — this never changes YOLT's decision. A control that
+    false-positives on legitimate work gets switched off and then
+    protects nothing, so this warns and suggests the fix rather than
+    refusing. See `SECRET_WARN_OFF_VALUES` for the disable switch, and
+    issue #85.
+
+    The text reports shape and character offset only. The matched value
+    is never interpolated into it: a warning that quotes the secret puts
+    the secret straight into the transcript it is warning about.
+
+    Never raises. The scan runs in the critical path of every Bash call,
+    so a bug in a credential pattern must cost the warning and nothing
+    else — the safety decision is already made by this point, and it is
+    strictly more important than the advisory.
+    """
+    retval = None
+    setting = os.environ.get("YOLT_SECRET_WARN", "").strip().lower()
+    if setting in SECRET_WARN_OFF_VALUES:
+        return retval
+    try:
+        spans = find_secrets(command)
+    except Exception:
+        return retval
+    if not spans:
+        return retval
+    found = ", ".join(
+        "{} at char {}".format(kind, start) for start, _, kind in spans
+    )
+    retval = SECRET_ADVISORY_HEADER.format(found)
+    return retval
+
+
+def attach_secret_advisory(response, advisory):
+    """Add `advisory` to an already-built hook response, in place.
+
+    `systemMessage` surfaces it to the user; `additionalContext` puts it
+    in front of Claude, which is what makes the suggested remediation
+    actionable rather than decorative. Neither field affects the
+    permission decision, so this is safe to attach to allow, ask and
+    deny alike.
+    """
+    if advisory:
+        response["systemMessage"] = advisory
+        response["hookSpecificOutput"]["additionalContext"] = advisory
+    return response
+
+
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
 DEFAULT_RAN_LOG_PATH = Path.home() / ".claude" / "yolt-ran.log"
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -1093,6 +1163,12 @@ def run_hook():
     unsupported platform), exit silently so Claude Code falls through to
     its default prompt rather than failing the hook.
 
+    Independently of the decision, the command is scanned for
+    credential-shaped substrings; a hit attaches an advisory warning
+    (`systemMessage` + `additionalContext`) to whatever response was
+    already built, including the unknown fallthrough. It never changes
+    the decision. See `format_secret_advisory` and issue #85.
+
     When `YOLT_LOG_FILE` is set, every examined Bash invocation appends
     a JSON-line record there — including the silent-fallthrough cases.
     """
@@ -1165,9 +1241,14 @@ def run_hook():
     decision, reason = classifier.classify(command)
     _log_hook_decision(command, decision, reason, permission_mode, agent_id)
 
+    # Orthogonal to the safety decision: a command can be entirely safe
+    # and still be carrying a credential into argv. Advisory only — it
+    # rides along with whatever decision was reached. Issue #85.
+    advisory = format_secret_advisory(command)
+
     if decision == DECISION_SAFE:
         response = make_hook_response("allow", "YOLT: {}".format(reason))
-        print(json.dumps(response))
+        print(json.dumps(attach_secret_advisory(response, advisory)))
         sys.exit(0)
     if decision == DECISION_UNSAFE:
         allow_hint = classifier.suggest_allow_pattern(command)
@@ -1183,9 +1264,16 @@ def run_hook():
             )
         else:
             response = make_hook_response("ask", message)
-        print(json.dumps(response))
+        print(json.dumps(attach_secret_advisory(response, advisory)))
         sys.exit(0)
-    # decision == DECISION_UNKNOWN: let Claude Code handle it
+
+    # decision == DECISION_UNKNOWN: let Claude Code handle it. Emit a
+    # response only when there is an advisory to carry — omitting
+    # `permissionDecision` leaves Claude Code's default prompt intact,
+    # so the warning costs the fallthrough nothing.
+    if advisory:
+        response = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+        print(json.dumps(attach_secret_advisory(response, advisory)))
     sys.exit(0)
 
 
