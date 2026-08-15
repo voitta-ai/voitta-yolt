@@ -27,6 +27,7 @@
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
   - [Shell rules — `~/.claude/yolt/shell.json`](#shell-rules---claudeyoltshelljson)
 - [Debug / dogfood log](#debug--dogfood-log)
+  - [Credential redaction](#credential-redaction)
 - [Self-improvement loop](#self-improvement-loop)
 - [CLI usage](#cli-usage)
 - [Tests and demo](#tests-and-demo)
@@ -626,6 +627,66 @@ YOLT rotates the log when it grows past 5 MB by renaming it to
 `<log>.old`, clobbering any previous `.old`. One generation is
 preserved. `YOLT_LOG_MAX_BYTES` overrides the threshold; set
 `YOLT_LOG_MAX_BYTES=0` to disable rotation.
+
+### Credential redaction
+
+Credentials land on command lines routinely — `curl -H "X-Api-Key: ..."`,
+`--token`, connection strings — and both logs are append-only, so
+anything written to them should be assumed permanent. Before a record is
+written, credential-shaped substrings in `command` (and in `reason`) are
+replaced with a `[REDACTED:<shape>]` marker naming the shape only, never
+the value. This applies to `~/.claude/yolt.log` and
+`~/.claude/yolt-ran.log` alike, and happens at write time — the risk
+being closed is the file on disk. Issue
+[#84](https://github.com/voitta-ai/voitta-yolt/issues/84).
+
+```json
+{"ts": "...", "decision": "unsafe", "reason": "curl: mutating", "command": "curl -H \"Authorization: Bearer [REDACTED:github-token]\" https://api.github.com", "permission_mode": "default", "agent_id": null}
+```
+
+Two match families (`hooks/secret_redact.py`):
+
+- **Structured prefixes** — `ghp_`/`gho_`/`ghs_`/`ghr_`/`ghu_`,
+  `github_pat_`, `glpat-`, `xox[baprse]-`, `xapp-`, `AKIA`/`ASIA`,
+  `sk-`, PEM `PRIVATE KEY` blocks, and the password field of
+  `scheme://user:secret@host`. Self-identifying, so these are matched
+  wherever they appear.
+- **Contextual shapes**, where only the surrounding text identifies the
+  value — `--token X`, `Authorization: X`, `FOO_TOKEN=X`,
+  `curl -u user:X`, `?password=X` in a query string, and bare
+  `aws_secret_access_key X` (the AWS *secret* key, unlike the `AKIA` id,
+  has no prefix of its own). Only the *value* is redacted, and only when
+  it passes a literal-shape guard: a shell expansion (`--token $API_KEY`)
+  or an ordinary name (`--token some-resource-name`) is left alone.
+
+Redaction is deliberately value-only where it can be, because the
+command *shape* is what the self-improvement reviewer mines — a redacted
+value costs it nothing.
+
+**This is best-effort, not a guarantee.** It removes the shapes above,
+not "all credentials". A value with no self-identifying prefix and no
+secret-ish context around it is indistinguishable from an ordinary
+argument. Known gaps, kept open on purpose:
+
+- `mysql -pSECRET` and friends — a `-p` rule cannot be told apart from
+  `mkdir -p /var/log/app/2024/01`, and a redactor that mangles ordinary
+  commands gets switched off, which protects nothing.
+- A bare positional secret: `./deploy s3cr3tvalue00000000`.
+- Credentials inside a file the command merely references.
+
+So treat the logs as sensitive regardless — redaction narrows the blast
+radius, it does not license leaving a credential on a command line. The
+`YOLT_LOG_FILE=""` / `YOLT_RAN_LOG_FILE=""` opt-outs remain the way to
+write nothing at all.
+
+Note the scope: this stops YOLT persisting a secret it already saw. It
+does not stop the secret reaching `argv` in the first place, where any
+process that can run `ps` sees it. Prefer keeping credentials in the
+environment:
+
+```bash
+KEY="$(fetch-secret)" sh -c 'curl -H "X-Api-Key: $KEY" https://service/endpoint'
+```
 
 ## Self-improvement loop
 
