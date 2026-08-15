@@ -136,6 +136,116 @@ class RedactAssignmentShapeTests(unittest.TestCase):
             self.assertEqual(redact(command), command, command)
 
 
+class BypassRegressionTests(unittest.TestCase):
+    """Shapes that survived redaction during adversarial review.
+
+    Each of these was a verified bypass: the credential reached the log
+    in plaintext. Keep them failing-if-broken.
+    """
+
+    def assert_redacted(self, command):
+        self.assertNotEqual(redact(command), command,
+                            "credential survived: {}".format(command))
+
+    def test_aws_secret_access_key_has_no_prefix_of_its_own(self):
+        # Only the surrounding context identifies it, unlike AKIA/ASIA.
+        self.assert_redacted(
+            "aws configure set aws_secret_access_key "
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+
+    def test_curl_basic_auth(self):
+        for flag in ("-u", "--user"):
+            self.assert_redacted(
+                "curl {} admin:s3cr3tP4ssw0rdVeryLong123 "
+                "https://api.example.com".format(flag))
+
+    def test_curl_basic_auth_keeps_the_account(self):
+        out = redact("curl -u admin:s3cr3tP4ssw0rdVeryLong123 https://x")
+        self.assertNotIn("s3cr3tP4ssw0rdVeryLong123", out)
+        self.assertIn("admin", out)
+
+    def test_password_in_query_string(self):
+        self.assert_redacted(
+            'curl "https://api.example.com/login'
+            '?password=hunter2VeryLongPassword99"')
+
+    def test_token_in_later_query_param(self):
+        self.assert_redacted(
+            'curl "https://x/api?page=2'
+            '&access_token=8f14e45fceea167a5a36dedd4bea2543"')
+
+    def test_sixteen_char_token(self):
+        # The old 20-char floor let common token lengths through.
+        self.assert_redacted("deploy --token a1b2c3d4e5f6g7h8")
+
+    def test_long_value_without_digits(self):
+        # An all-hex key can contain no digits; an all-alpha base62 token
+        # is ordinary. Both used to be dismissed as "reads like a name".
+        self.assert_redacted(
+            "deploy --token deadbeefcafebabedeadbeefcafebabe")
+        self.assert_redacted(
+            "deploy --token abcdefghijklmnopqrstuvwxyzABCDEF")
+
+    def test_url_encoded_value(self):
+        self.assert_redacted("deploy --token abc%123def%456ghi%789jkl")
+
+    def test_bare_secretish_word_then_value(self):
+        self.assert_redacted(
+            "oauth2 client_secret 8f14e45fceea167a5a36dedd4bea2543")
+
+
+class FalsePositiveCorpusTests(unittest.TestCase):
+    """Ordinary commands that must survive redaction byte-for-byte.
+
+    Widening the matcher is only safe while this stays green - a
+    redactor that mangles normal commands makes the log useless and
+    gets the whole feature turned off.
+    """
+
+    CLEAN = [
+        "deploy --token some-resource-name",
+        "deploy --token $DEPLOY_TOKEN_FOR_PRODUCTION",
+        "aws s3 ls s3://my-bucket-2024/",
+        "aws secretsmanager get-secret-value --secret-id prod/db/credentials-v2",
+        "kubectl get secret app-credentials -n default",
+        "mkdir -p /var/log/myapp/2024/01/backups",
+        "docker run -u 1000:1000 alpine",
+        "git checkout a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+        "curl https://api.example.com/v1/users?page=2&limit=100",
+        "terraform apply -var access_key_id=aws_iam_access_key.ci.id",
+        "python3 -m pytest tests/test_secret_redact.py -v",
+        "ssh -i ~/.ssh/id_ed25519 user@host.example.com",
+        'curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com',
+        'find . -name "*.log" -mtime +30 -delete',
+        "aws configure set region us-east-1",
+        "helm upgrade myapp ./chart --set image.tag=v1.2.3-rc4",
+        'psql -h db.internal -U appuser -d production -c "select 1"',
+    ]
+
+    def test_ordinary_commands_untouched(self):
+        for command in self.CLEAN:
+            self.assertEqual(redact(command), command, command)
+
+
+class PerformanceTests(unittest.TestCase):
+    """The matcher runs on every Bash call, so a pathological command
+    must not stall the hook."""
+
+    def test_pathological_inputs_stay_fast(self):
+        import time
+        for command in (
+            "echo " + "a" * 100000,
+            # Unterminated PEM header + bulk: exercises the `.*?` with re.S.
+            "echo '-----BEGIN RSA PRIVATE KEY-----" + "A" * 100000,
+            " ".join(["--token abc"] * 5000),
+        ):
+            start = time.perf_counter()
+            find_secrets(command)
+            elapsed = time.perf_counter() - start
+            self.assertLess(elapsed, 1.0,
+                            "find_secrets took {:.2f}s".format(elapsed))
+
+
 class FindSecretsTests(unittest.TestCase):
 
     def test_reports_shape_and_position_only(self):
