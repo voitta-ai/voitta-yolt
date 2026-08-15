@@ -18,13 +18,28 @@ from pathlib import Path
 
 # Both hook entry points run this file as a script, so its directory is
 # already sys.path[0]; the guard is for callers that import the module by
-# path. Deliberately not wrapped in a try/except: if the redactor cannot
-# be loaded, failing loudly beats silently writing credentials to disk.
+# path.
 _HOOKS_DIR = str(Path(__file__).resolve().parent)
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from secret_redact import find_secrets, redact  # noqa: E402
+# This import used to be unguarded, on the theory that failing loudly
+# beats silently writing credentials to disk. Measured, it did neither:
+# ModuleNotFoundError exits 1, a non-zero non-2 exit from PreToolUse is
+# *non-blocking*, and hook stderr is not surfaced - so every Bash command
+# ran unclassified, nothing was logged, and nobody was told. Strictly
+# worse than the tree-sitter path, which degrades gracefully.
+#
+# Guarded now. The degradation keeps the two things that matter:
+# classification still happens (it never needed the redactor), and no
+# command text is written anywhere. See issue #93.
+try:
+    from secret_redact import find_secrets, redact  # noqa: E402
+    REDACTOR_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover - exercised via subprocess
+    find_secrets = None
+    redact = None
+    REDACTOR_IMPORT_ERROR = str(exc)
 
 
 def load_rules(rules_dir, user_overrides_path=None):
@@ -929,6 +944,10 @@ def format_secret_advisory(command):
     setting = os.environ.get("YOLT_SECRET_WARN", "").strip().lower()
     if setting in SECRET_WARN_OFF_VALUES:
         return retval
+    if find_secrets is None:
+        # Redactor unavailable (#93). No advisory rather than a wrong one;
+        # the withheld-command log record is what surfaces the problem.
+        return retval
     try:
         spans = find_secrets(command)
     except Exception:
@@ -955,6 +974,28 @@ def attach_secret_advisory(response, advisory):
         response["systemMessage"] = advisory
         response["hookSpecificOutput"]["additionalContext"] = advisory
     return response
+
+
+WITHHELD = "[WITHHELD:redactor-unavailable]"
+
+
+def _redact_or_withhold(text):
+    """Redact `text`, or withhold it entirely if the redactor is missing.
+
+    The fallback is never "write it raw". A log record that says
+    `[WITHHELD:redactor-unavailable]` is diagnosable and carries no
+    credential; the alternative would quietly reintroduce the exact bug
+    issue #84 closed. The record still records the decision, so the log
+    remains useful for everything except the command text. See #93.
+    """
+    if not text:
+        retval = text
+        return retval
+    if redact is None:
+        retval = WITHHELD
+        return retval
+    retval = redact(text)
+    return retval
 
 
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
@@ -1053,11 +1094,13 @@ def _log_hook_decision(command, decision, reason,
         record = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "decision": decision,
-            "reason": redact(reason),
-            "command": redact(command)[:500] if command else "",
+            "reason": _redact_or_withhold(reason),
+            "command": _redact_or_withhold(command)[:500] if command else "",
             "permission_mode": permission_mode,
             "agent_id": agent_id,
         }
+        if REDACTOR_IMPORT_ERROR:
+            record["redactor_error"] = REDACTOR_IMPORT_ERROR
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
@@ -1106,8 +1149,10 @@ def _log_ran_command(command):
         _maybe_rotate_log(log_path, _resolve_log_max_bytes())
         record = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "command": redact(command)[:500] if command else "",
+            "command": _redact_or_withhold(command)[:500] if command else "",
         }
+        if REDACTOR_IMPORT_ERROR:
+            record["redactor_error"] = REDACTOR_IMPORT_ERROR
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:

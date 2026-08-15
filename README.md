@@ -722,20 +722,46 @@ Two match families (`hooks/secret_redact.py`):
 
 - **Structured prefixes** — `ghp_`/`gho_`/`ghs_`/`ghr_`/`ghu_`,
   `github_pat_`, `glpat-`, `xox[baprse]-`, `xapp-`, `AKIA`/`ASIA`,
-  `sk-`, PEM `PRIVATE KEY` blocks, and the password field of
-  `scheme://user:secret@host`. Self-identifying, so these are matched
-  wherever they appear.
+  `sk-`/`sk_`/`rk_`, `dckr_pat_`, `npm_`, `hf_`, `glc_`, `shpat_`,
+  `AIza`, bare JWTs (`eyJ….eyJ….`), PEM `PRIVATE KEY` blocks, and the
+  password field of `scheme://user:secret@host`. Self-identifying, so
+  these are matched wherever they appear.
 - **Contextual shapes**, where only the surrounding text identifies the
   value — `--token X`, `Authorization: X`, `FOO_TOKEN=X`,
   `curl -u user:X`, `?password=X` in a query string, and bare
   `aws_secret_access_key X` (the AWS *secret* key, unlike the `AKIA` id,
-  has no prefix of its own). Only the *value* is redacted, and only when
-  it passes a literal-shape guard: a shell expansion (`--token $API_KEY`)
-  or an ordinary name (`--token some-resource-name`) is left alone.
+  has no prefix of its own). Quoted values are captured whole, so
+  `--password "correct horse battery staple"` does not lose everything
+  after the first space. Only the *value* is redacted, and only when it
+  passes a literal-shape guard.
+
+That guard is a **deny**-list: it rejects shell expansions
+(`--token $API_KEY`, `$(…)`, backticks) and values too short or too
+monotonous to be keys (`--token some-resource-name`). It deliberately
+does *not* restrict which characters a value may contain — an earlier
+allow-list ran backwards, dismissing `Tr0ub4dor&3!…` precisely because
+the punctuation that made it strong was not on the list.
+
+Two tests carry that decision. Past 28 characters the "must mix letters
+and digits" rule is waived, which catches passphrases like
+`CORRECTHORSEBATTERYSTAPLE`. Separately, any all-hex value of 20+
+characters is treated as a key regardless of length, which catches
+`deadbeefcafebabedeadbeef`. Keeping those two rules distinct matters:
+the hex case was never about length, it is about being drawn from an
+alphabet nobody names things in — and conflating them redacted ordinary
+words like `authenticationprovidername`.
+
+Residual over-redaction is accepted where it remains, e.g. a
+Secret-Manager *path* in `SECRET=projects/…/secrets/db-password/…` is
+redacted although a path is not a secret. The direction is deliberate: a
+false positive costs one unreadable value in a debug log, a false
+negative costs a credential on disk forever.
 
 Redaction is deliberately value-only where it can be, because the
 command *shape* is what the self-improvement reviewer mines — a redacted
-value costs it nothing.
+value costs it nothing. It is also **idempotent**: re-running it over
+already-redacted text is a no-op, which is what makes "re-scan and
+expect zero hits" a valid way to verify a cleanup of old log files.
 
 **This is best-effort, not a guarantee.** It removes the shapes above,
 not "all credentials". A value with no self-identifying prefix and no
@@ -752,6 +778,13 @@ So treat the logs as sensitive regardless — redaction narrows the blast
 radius, it does not license leaving a credential on a command line. The
 `YOLT_LOG_FILE=""` / `YOLT_RAN_LOG_FILE=""` opt-outs remain the way to
 write nothing at all.
+
+If `hooks/secret_redact.py` cannot be imported at all, the hook does not
+fail and does not fall back to writing raw commands. Classification
+still happens — it never needed the redactor — and the log record
+carries `"command": "[WITHHELD:redactor-unavailable]"` plus a
+`redactor_error` field, so the failure is visible without a credential
+riding along.
 
 Note the scope: this stops YOLT persisting a secret it already saw. It
 does not stop the secret reaching `argv` in the first place, where any
