@@ -325,6 +325,37 @@ class LogWritingTests(unittest.TestCase):
     def test_ran_log_redacts(self):
         self.assert_log_clean("--ran-hook", "YOLT_RAN_LOG_FILE")
 
+    def test_redactor_failure_writes_nothing_and_does_not_raise(self):
+        """A bug in the redactor must cost a log line, not the session -
+        and must never fall back to writing the raw command."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ya_failclosed", REPO_ROOT / "hooks" / "yolt_analyzer.py")
+        analyzer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(analyzer)
+
+        def exploding_redact(text):
+            raise ValueError("simulated redactor bug")
+
+        analyzer.redact = exploding_redact
+        command = "curl -H 'X-Api-Key: {}' https://x".format(FAKE_GH_TOKEN)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "yolt.log"
+            os.environ["YOLT_LOG_FILE"] = str(log_path)
+            os.environ["YOLT_RAN_LOG_FILE"] = str(log_path)
+            try:
+                # Must not propagate.
+                analyzer._log_hook_decision(
+                    command, "safe", "reason", "default", None)
+                analyzer._log_ran_command(command)
+            finally:
+                os.environ.pop("YOLT_LOG_FILE", None)
+                os.environ.pop("YOLT_RAN_LOG_FILE", None)
+            # Fail closed: the record is built before it is written, so a
+            # raising redactor writes nothing rather than the raw command.
+            written = log_path.read_text() if log_path.exists() else ""
+            self.assertNotIn(FAKE_GH_TOKEN, written)
+
 
 if __name__ == "__main__":
     unittest.main()

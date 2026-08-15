@@ -990,7 +990,13 @@ def _log_hook_decision(command, decision, reason,
         }
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
-    except OSError:
+    except Exception:
+        # Broader than OSError on purpose. `redact` runs inside this
+        # block, so a future bug in a pattern would otherwise take down
+        # every PreToolUse fire. Failing here loses one log line and
+        # nothing else - and it fails closed, since the record is built
+        # before it is written: a redactor that raises writes nothing
+        # rather than writing the raw command.
         pass
 
 
@@ -1034,7 +1040,10 @@ def _log_ran_command(command):
         }
         with open(log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
-    except OSError:
+    except Exception:
+        # Same reasoning as `_log_hook_decision`: broad on purpose so a
+        # redactor bug costs a log line, not the session, and never a
+        # raw command.
         pass
 
 
