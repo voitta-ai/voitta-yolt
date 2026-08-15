@@ -72,7 +72,8 @@ except ImportError:
 # logs (issue #91). Guarded like the import above so the reviewer keeps
 # working, but the fallback is deliberately *not* "emit the raw command":
 # `redact_command` below reduces a command to its shape, dropping every
-# value token. Less useful in a report, incapable of leaking.
+# value token. Much less likely to leak, though not airtight - see
+# `redact_example`.
 try:
     from secret_redact import redact as _redact_values
 except ImportError:
@@ -454,9 +455,12 @@ def redact_example(command):
     command readable and removes only credential-shaped values, which is
     what an `examples` entry needs to stay useful for diagnosing friction.
 
-    Falls back to the shape reducer when `secret_redact` is unavailable -
-    fail closed, since the whole point is that this text leaves the log
-    and lands in two more files. See issue #91.
+    Falls back to the shape reducer when `secret_redact` is unavailable,
+    since the whole point is that this text leaves the log and lands in
+    two more files. That fallback strips every *value* token but passes
+    `argv[0]` and valueless `-flags` through verbatim, so it is much
+    safer, not airtight - a bare `<secret> --dry-run` would survive it.
+    See issue #91.
     """
     if _redact_values is None:
         retval = redact_command(command)
@@ -578,7 +582,11 @@ def annotate_glob_collisions(suggestion, nonsafe_commands, own_commands=None):
         if command in own:
             continue
         if fnmatch(command, pattern):
-            collisions.append(command[:MAX_EXAMPLE_CHARS])
+            # Redacted for the same reason as `examples` (issue #91), and
+            # this is the likelier of the two to carry auth: a collision
+            # is by definition a *non-safe* command, i.e. exactly the
+            # `-X POST ... -H Authorization:` shape.
+            collisions.append(redact_example(command)[:MAX_EXAMPLE_CHARS])
             if len(collisions) >= MAX_EXAMPLES:
                 break
     suggestion["glob_collisions"] = collisions

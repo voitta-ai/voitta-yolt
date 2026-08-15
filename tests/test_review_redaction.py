@@ -85,6 +85,57 @@ class ReviewerRedactionTests(unittest.TestCase):
             self.assertIn("frobnicate push", doc)
             self.assertIn("--env prod", doc)
 
+    def test_glob_collisions_are_redacted(self):
+        """The sibling sink of `examples` (issue #91 follow-up).
+
+        A collision is by definition a *non-safe* command, so it is the
+        likelier of the two to carry auth — a `-X POST ... -H
+        'Authorization: ...'` is exactly what gets flagged. The first fix
+        redacted `examples` and left this one, which put the same
+        credential in the same two files eight lines apart.
+        """
+        safe = "gh api /repos/o/r/issues?page={}"
+        unsafe = ("gh api -X POST /repos/o/r/issues "
+                  "-H 'Authorization: token {}'".format(FAKE_GH_TOKEN))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "yolt.log"
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            with open(log_path, "w") as f:
+                # Enough safe fires to clear the fastpath threshold, and a
+                # single unsafe one so it stays a collision rather than
+                # becoming its own suggestion.
+                rows = [("safe", safe.format(i)) for i in range(12)]
+                rows.append(("unsafe", unsafe))
+                for i, (decision, command) in enumerate(rows):
+                    f.write(json.dumps({
+                        "ts": (now - datetime.timedelta(minutes=i)).isoformat(),
+                        "decision": decision,
+                        "reason": "gh api",
+                        "command": command,
+                        "permission_mode": "default",
+                        "agent_id": None,
+                    }) + "\n")
+
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "hooks" / "yolt_review.py"),
+                 "--generate", "--log", str(log_path),
+                 "--state-dir", str(state_dir)],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            produced = [p for p in state_dir.rglob("*") if p.is_file()]
+            self.assertTrue(produced, "reviewer generated nothing")
+            for path in produced:
+                text = path.read_text(errors="replace")
+                self.assertNotIn(FAKE_GH_TOKEN, text,
+                                 "credential reached {}".format(path.name))
+            # Guard against a vacuous pass: the collision must have been
+            # rendered at all.
+            doc = (state_dir / "review.md").read_text(errors="replace")
+            self.assertIn("Would also allow", doc)
+
     def test_falls_back_to_shape_reducer_without_the_redactor(self):
         """Fail closed: with `secret_redact` unimportable, examples must
         degrade to the value-stripping shape reducer, never to the raw
