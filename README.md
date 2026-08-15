@@ -742,14 +742,20 @@ does *not* restrict which characters a value may contain — an earlier
 allow-list ran backwards, dismissing `Tr0ub4dor&3!…` precisely because
 the punctuation that made it strong was not on the list.
 
-One accepted cost: past 24 characters the "must mix letters and digits"
-test is waived, so a long ordinary word passed to a secret-ish flag
-(`--secret ThisIsAVeryLongDescription`) is redacted too. There is no
-cheap way to separate that from a passphrase —
-`CORRECTHORSEBATTERYSTAPLE` and `authenticationprovidername` have the
-same length class and the same alphabet diversity. Erring this way is
-deliberate: a false positive costs one unreadable value in a debug log,
-a false negative costs a credential on disk forever.
+Two tests carry that decision. Past 28 characters the "must mix letters
+and digits" rule is waived, which catches passphrases like
+`CORRECTHORSEBATTERYSTAPLE`. Separately, any all-hex value of 20+
+characters is treated as a key regardless of length, which catches
+`deadbeefcafebabedeadbeef`. Keeping those two rules distinct matters:
+the hex case was never about length, it is about being drawn from an
+alphabet nobody names things in — and conflating them redacted ordinary
+words like `authenticationprovidername`.
+
+Residual over-redaction is accepted where it remains, e.g. a
+Secret-Manager *path* in `SECRET=projects/…/secrets/db-password/…` is
+redacted although a path is not a secret. The direction is deliberate: a
+false positive costs one unreadable value in a debug log, a false
+negative costs a credential on disk forever.
 
 Redaction is deliberately value-only where it can be, because the
 command *shape* is what the self-improvement reviewer mines — a redacted
