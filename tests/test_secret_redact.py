@@ -194,6 +194,70 @@ class BypassRegressionTests(unittest.TestCase):
             "oauth2 client_secret 8f14e45fceea167a5a36dedd4bea2543")
 
 
+class BareEnvNameTests(unittest.TestCase):
+    """Issue #90: every keyword in `_SECRETISH_NAME` failed to match itself.
+
+    The pattern required at least one character *before* the keyword, so
+    `GH_TOKEN=` matched and bare `TOKEN=` did not. The existing corpus
+    only used prefixed names, which is precisely what hid it — so this
+    exercises each keyword standalone.
+    """
+
+    VALUE = "9f3c1a7e42b8d05e6c1f9a7b3d2e8c40"
+    KEYWORDS = [
+        "TOKEN", "PASSWORD", "PASSWD", "SECRET", "APIKEY", "API_KEY",
+        "ACCESS_KEY", "SECRET_KEY", "CREDENTIAL", "CREDENTIALS",
+    ]
+
+    def test_each_keyword_matches_standalone(self):
+        for keyword in self.KEYWORDS:
+            command = "{}={} ./deploy.sh".format(keyword, self.VALUE)
+            self.assertNotIn(self.VALUE, redact(command), command)
+
+    def test_lowercase_forms(self):
+        for keyword in ("token", "password", "secret"):
+            command = "{}={} ./deploy.sh".format(keyword, self.VALUE)
+            self.assertNotIn(self.VALUE, redact(command), command)
+
+    def test_prefixed_forms_still_work(self):
+        for keyword in ("GH_TOKEN", "DB_PASSWORD", "MYTOKEN", "X_API_KEY"):
+            command = "{}={} ./deploy.sh".format(keyword, self.VALUE)
+            self.assertNotIn(self.VALUE, redact(command), command)
+
+
+class OverlapClippingTests(unittest.TestCase):
+    """Issue #90: a span starting inside its predecessor but ending
+    beyond it was dropped entirely rather than clipped, leaving the
+    uncovered tail in cleartext next to a marker that made the record
+    read as handled."""
+
+    def test_run_on_pem_after_a_flag_value(self):
+        command = ("ssh-add --password abc123def456ghi789"
+                   "-----BEGIN RSA PRIVATE KEY-----\n"
+                   "BODYSECRETMATERIAL\n"
+                   "-----END RSA PRIVATE KEY-----")
+        out = redact(command)
+        self.assertNotIn("BODYSECRETMATERIAL", out)
+        self.assertNotIn("abc123def456ghi789", out)
+
+    def test_clipped_spans_are_contiguous_and_ordered(self):
+        command = ("ssh-add --password abc123def456ghi789"
+                   "-----BEGIN RSA PRIVATE KEY-----\n"
+                   "BODY\n-----END RSA PRIVATE KEY-----")
+        spans = find_secrets(command)
+        self.assertGreater(len(spans), 1)
+        for (s1, e1, _), (s2, e2, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(e1, s2, "spans overlap after clipping")
+            self.assertLess(s2, e2, "empty span emitted")
+
+    def test_fully_contained_span_still_collapses(self):
+        # The original behaviour for containment must not regress: one
+        # span, not two.
+        command = 'curl -H "Authorization: Bearer {}" https://x'.format(
+            FAKE_GH_TOKEN)
+        self.assertEqual(len(find_secrets(command)), 1)
+
+
 class FalsePositiveCorpusTests(unittest.TestCase):
     """Ordinary commands that must survive redaction byte-for-byte.
 

@@ -98,8 +98,12 @@ _SECRETISH_QUERY = (
 _ASSIGNMENT_PATTERNS = [
     ("flag-value", re.compile(
         r"--(?:" + _SECRETISH_FLAG + r")(?:[=\s]+)[\"']?([^\s\"']+)", re.I), 1),
+    # The name prefix is optional. It used to be `[A-Za-z_][A-Za-z0-9_]*`,
+    # which required at least one character *before* the keyword and so
+    # made every keyword fail to match itself: `GH_TOKEN=` matched,
+    # bare `TOKEN=` did not. See issue #90.
     ("env-assignment", re.compile(
-        r"\b[A-Za-z_][A-Za-z0-9_]*(?:" + _SECRETISH_NAME + r")"
+        r"\b[A-Za-z0-9_]*(?:" + _SECRETISH_NAME + r")"
         r"\s*=\s*[\"']?([^\s\"']+)", re.I), 1),
     ("header-value", re.compile(
         r"(?:" + _SECRETISH_HEADER + r")\s*:\s*"
@@ -158,6 +162,12 @@ def find_secrets(text):
     nested inside it). The value itself is never returned - callers get
     shape and position only, so a caller cannot accidentally surface a
     secret in a warning or a diagnostic.
+
+    Overlaps are *clipped*, never dropped. Dropping a span that starts
+    inside its predecessor but ends beyond it left the uncovered tail in
+    cleartext next to a marker that made the record read as handled -
+    a `--password <run-on PEM>` leaked the whole key body that way. See
+    issue #90.
     """
     spans = []
     for kind, pattern, group in _STRUCTURED_PATTERNS:
@@ -174,9 +184,13 @@ def find_secrets(text):
     retval = []
     reach = -1
     for start, end, kind in spans:
-        if start >= reach:
-            retval.append((start, end, kind))
-            reach = end
+        if end <= reach:
+            # Fully covered by an earlier span; nothing left to redact.
+            continue
+        # Clip to the uncovered tail rather than discarding the span.
+        start = max(start, reach)
+        retval.append((start, end, kind))
+        reach = end
     return retval
 
 

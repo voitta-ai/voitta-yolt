@@ -68,6 +68,16 @@ except ImportError:
     validate_shell_rules = None
     _RULES_AVAILABLE = False
 
+# Credential redaction for the command text this tool copies out of the
+# logs (issue #91). Guarded like the import above so the reviewer keeps
+# working, but the fallback is deliberately *not* "emit the raw command":
+# `redact_command` below reduces a command to its shape, dropping every
+# value token. Less useful in a report, incapable of leaking.
+try:
+    from secret_redact import redact as _redact_values
+except ImportError:
+    _redact_values = None
+
 DEFAULT_LOG_PATH = Path.home() / ".claude" / "yolt.log"
 DEFAULT_RAN_LOG_PATH = Path.home() / ".claude" / "yolt-ran.log"
 DEFAULT_STATE_DIR = Path.home() / ".claude" / "yolt"
@@ -436,6 +446,25 @@ def redact_command(command):
     return retval
 
 
+def redact_example(command):
+    """Credential-redact a command before it is copied into a report.
+
+    Distinct from `redact_command` above: that reduces a command to its
+    *shape* for sharing upstream, dropping every value. This keeps the
+    command readable and removes only credential-shaped values, which is
+    what an `examples` entry needs to stay useful for diagnosing friction.
+
+    Falls back to the shape reducer when `secret_redact` is unavailable -
+    fail closed, since the whole point is that this text leaves the log
+    and lands in two more files. See issue #91.
+    """
+    if _redact_values is None:
+        retval = redact_command(command)
+        return retval
+    retval = _redact_values(command)
+    return retval
+
+
 def suggestion_id(kind, prefix):
     """Stable id so applied/dismissed status survives regeneration."""
     digest = hashlib.sha256("{}|{}".format(kind, prefix).encode("utf-8"))
@@ -630,7 +659,13 @@ def build_groups(records, ran_index, min_fires, min_fires_safe, known_clis=None)
             group["reasons"][reason] = group["reasons"].get(reason, 0) + 1
         if index in approved_indices:
             group["approved"] += 1
-        example = command[:MAX_EXAMPLE_CHARS]
+        # Redact at collection, not at render: `examples` flows into both
+        # ~/.claude/yolt/review.md and ~/.claude/yolt/suggestions.json, and
+        # doing it here covers both. The analyzer redacts at write time
+        # (issue #84), but log lines written before that still hold
+        # plaintext, and this reviewer would otherwise keep copying them
+        # into two more files every session. See issue #91.
+        example = redact_example(command)[:MAX_EXAMPLE_CHARS]
         if example not in group["examples"] and len(group["examples"]) < MAX_EXAMPLES:
             group["examples"].append(example)
 
