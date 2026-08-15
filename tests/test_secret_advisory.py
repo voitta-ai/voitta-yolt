@@ -78,8 +78,12 @@ class AdvisoryTests(unittest.TestCase):
     def test_advisory_suggests_the_env_remediation(self):
         response = run_hook("gh auth login --with-token {}".format(
             FAKE_GH_TOKEN))
-        self.assertIn("environment", response["systemMessage"])
-        self.assertIn("$KEY", response["systemMessage"])
+        # The runnable fix, not just a complaint: the value moves into an
+        # env var so it never appears in argv.
+        message = response["systemMessage"]
+        self.assertIn("argv", message)
+        self.assertIn('KEY="$(fetch-secret)"', message)
+        self.assertIn("$KEY", message)
 
     def test_unsafe_command_keeps_its_decision(self):
         response = run_hook(
@@ -102,10 +106,82 @@ class AdvisoryTests(unittest.TestCase):
         self.assertNotIn("systemMessage", response)
 
     def test_kill_switch(self):
+        # An exact `== "0"` test would leave `false` / `off` silently
+        # warning, which reads as a broken switch.
+        for value in ("0", "false", "FALSE", "no", "off", " off "):
+            response = run_hook(
+                "gh auth login --with-token {}".format(FAKE_GH_TOKEN),
+                extra_env={"YOLT_SECRET_WARN": value})
+            self.assertNotIn(
+                "systemMessage", response,
+                "YOLT_SECRET_WARN={!r} did not disable".format(value))
+
+    def test_advisory_stays_short(self):
+        # It rides along with a prompt the user is already reading. A
+        # wall of text is how a security control gets switched off.
+        response = run_hook("gh auth login --with-token {}".format(
+            FAKE_GH_TOKEN))
+        self.assertLess(len(response["systemMessage"]), 400)
+
+
+class DecisionIntegrityTests(unittest.TestCase):
+    """The central claim of this PR: the advisory changes nothing.
+
+    Asserting "the decision is not deny" is not enough — that would pass
+    even if the advisory silently flipped `ask` to `allow`. These
+    compare the same command with and without a credential and require
+    the decision to come out identical.
+    """
+
+    def decision_of(self, response):
+        return response.get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_decision_identical_with_and_without_credential(self):
+        templates = [
+            'curl -H "X-Api-Key: {}" https://service/endpoint',
+            "gh auth login --with-token {}",
+            'curl -X POST -H "Authorization: Bearer {}" https://api.github.com/x',
+            "some-unknown-internal-cli --token {}",
+        ]
+        for template in templates:
+            with_secret = run_hook(template.format(FAKE_GH_TOKEN))
+            without_secret = run_hook(template.format("PLACEHOLDERVALUE"))
+            # Guard against a vacuous pass: the credential case must
+            # actually have warned, or this proves nothing.
+            self.assertIn("systemMessage", with_secret, template)
+            self.assertNotIn("systemMessage", without_secret, template)
+            self.assertEqual(self.decision_of(with_secret),
+                             self.decision_of(without_secret),
+                             "advisory moved the decision for: " + template)
+
+    def test_unknown_path_warns_without_claiming_a_decision(self):
+        """The riskiest path: this previously printed nothing at all.
+
+        Emitting a `permissionDecision` here would convert Claude Code's
+        default prompt into an allow. The response must carry the
+        warning and assert no decision.
+        """
         response = run_hook(
-            "gh auth login --with-token {}".format(FAKE_GH_TOKEN),
-            extra_env={"YOLT_SECRET_WARN": "0"})
-        self.assertNotIn("systemMessage", response)
+            "some-unknown-internal-cli --token {}".format(FAKE_GH_TOKEN))
+        self.assertIn("systemMessage", response)
+        self.assertIsNone(self.decision_of(response),
+                          "advisory asserted a permission decision on the "
+                          "unknown fallthrough")
+
+    def test_scanner_failure_does_not_break_the_hook(self):
+        """A bug in a credential pattern must cost the warning, not the
+        session. The safety decision is already made by this point."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ya_advisory", REPO_ROOT / "hooks" / "yolt_analyzer.py")
+        analyzer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(analyzer)
+
+        def exploding_find_secrets(text):
+            raise ValueError("simulated pattern bug")
+
+        analyzer.find_secrets = exploding_find_secrets
+        self.assertIsNone(analyzer.format_secret_advisory("ls /tmp"))
 
 
 if __name__ == "__main__":
