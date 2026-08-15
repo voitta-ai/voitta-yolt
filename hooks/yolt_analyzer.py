@@ -887,17 +887,23 @@ def format_unsafe_reason(reason, allow_hint=None):
     return message
 
 
+# Kept to three short lines on purpose. This rides along with a prompt
+# the user is already reading, and a wall of text on every
+# credential-bearing command is the fastest route to the whole feature
+# being switched off. The full rationale lives in the README.
 SECRET_ADVISORY_HEADER = (
-    "YOLT: this command line appears to carry a credential ({}).\n"
-    "It is not blocked, and the command may be perfectly correct — but "
-    "the string itself is about to be copied to places with different "
-    "lifetimes: the session transcript, session memory (searchable, so "
-    "it can resurface in a later session), any spilled tool output, and "
-    "the permissions allowlist if you approve it. `argv` is also "
-    "readable by anything that can run `ps` while the process lives.\n"
-    "Move the value into the environment so it never appears in `argv`:\n"
+    "YOLT: possible credential on this command line ({}). Not blocked.\n"
+    "It will persist in the transcript, session memory and the allowlist, "
+    "and `argv` is visible to `ps`. Keep it out of `argv`:\n"
     "  KEY=\"$(fetch-secret)\" sh -c 'curl -H \"X-Api-Key: $KEY\" "
     "https://service/endpoint'"
+)
+
+# Any of these disables the warning. An exact `== "0"` test looks precise
+# and behaves as a trap: a user who reaches for `false` or `off` to
+# silence a noisy control sees no change and concludes it is broken.
+SECRET_WARN_OFF_VALUES = frozenset(
+    {"0", "false", "no", "off", "n", "disable", "disabled"}
 )
 
 
@@ -907,18 +913,27 @@ def format_secret_advisory(command):
     Advisory only — this never changes YOLT's decision. A control that
     false-positives on legitimate work gets switched off and then
     protects nothing, so this warns and suggests the fix rather than
-    refusing. `YOLT_SECRET_WARN=0` disables it. See issue #85.
+    refusing. See `SECRET_WARN_OFF_VALUES` for the disable switch, and
+    issue #85.
 
     The text reports shape and character offset only. The matched value
     is never interpolated into it: a warning that quotes the secret puts
     the secret straight into the transcript it is warning about.
+
+    Never raises. The scan runs in the critical path of every Bash call,
+    so a bug in a credential pattern must cost the warning and nothing
+    else — the safety decision is already made by this point, and it is
+    strictly more important than the advisory.
     """
-    if os.environ.get("YOLT_SECRET_WARN") == "0":
-        retval = None
+    retval = None
+    setting = os.environ.get("YOLT_SECRET_WARN", "").strip().lower()
+    if setting in SECRET_WARN_OFF_VALUES:
         return retval
-    spans = find_secrets(command)
+    try:
+        spans = find_secrets(command)
+    except Exception:
+        return retval
     if not spans:
-        retval = None
         return retval
     found = ", ".join(
         "{} at char {}".format(kind, start) for start, _, kind in spans

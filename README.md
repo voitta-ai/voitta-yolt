@@ -620,12 +620,16 @@ cleanable. Once the command has run, every one of those copies exists.
 So YOLT warns — and only warns:
 
 ```
-YOLT: this command line appears to carry a credential (github-token at char 24).
-It is not blocked, and the command may be perfectly correct — but the string
-itself is about to be copied to places with different lifetimes: ...
-Move the value into the environment so it never appears in `argv`:
+YOLT: possible credential on this command line (github-token at char 24). Not blocked.
+It will persist in the transcript, session memory and the allowlist, and `argv` is
+visible to `ps`. Keep it out of `argv`:
   KEY="$(fetch-secret)" sh -c 'curl -H "X-Api-Key: $KEY" https://service/endpoint'
 ```
+
+Three lines, deliberately. It rides along with a permission prompt the
+user is already reading, and a paragraph of security prose on every
+credential-bearing command is the fastest route to the whole feature
+being switched off.
 
 Properties, all deliberate:
 
@@ -645,11 +649,21 @@ Properties, all deliberate:
   redaction](#credential-redaction), so `--token $API_KEY` and
   `--token some-resource-name` do not trip it.
 
-Set `YOLT_SECRET_WARN=0` to disable.
+- **Never breaks the hook.** The scan runs in the critical path of every
+  Bash call, so a bug in a credential pattern costs the warning and
+  nothing else — the safety decision is already made by that point, and
+  it matters more than the advisory.
+
+To disable, set `YOLT_SECRET_WARN` to any of `0`, `false`, `no`, `off`,
+`n`, `disable`, `disabled` (case and surrounding space ignored). The
+generous list is on purpose: an exact `=0` test looks precise and
+behaves as a trap, since someone silencing a noisy control reaches for
+`false` or `off` first and would conclude the switch is broken.
 
 Note the division of labour: this stops the secret reaching the command
 line; redaction stops YOLT persisting one it already saw. They are
-independent, and redaction is worth having regardless.
+independent, and redaction is worth having regardless. Neither is a
+guarantee — see the [known gaps](#credential-redaction).
 
 ## Debug / dogfood log
 
