@@ -297,6 +297,27 @@ class ValueGuardTests(unittest.TestCase):
                         'deploy --token "$(fetch-secret --name prod-token)"'):
             self.assertEqual(redact(command), command, command)
 
+    def test_long_alpha_values_over_redact_by_design(self):
+        """A documented, accepted cost of lowering _LONG_VALUE_LEN to 24.
+
+        Above that length the "must mix letters and digits" test is
+        waived, so an ordinary long word passed to a secret-ish flag is
+        redacted too. There is no cheap way to separate the two cases:
+        `CORRECTHORSEBATTERYSTAPLEXYZZY` (a passphrase we must catch) and
+        `authenticationprovidername` (a name we would rather keep) have
+        identical length class and identical alphabet diversity — a long
+        all-alpha passphrase and a long all-alpha word are structurally
+        the same string.
+
+        Erring this way is the intended direction: a false positive costs
+        one unreadable value in a debug log, a false negative costs a
+        credential on disk forever. Asserted so the behaviour is a
+        decision on record rather than a surprise.
+        """
+        for command in ("deploy --secret ThisIsAVeryLongDescription",
+                        "app --auth authenticationprovidername"):
+            self.assertIn("[REDACTED:", redact(command), command)
+
 
 class VendorPrefixTests(unittest.TestCase):
     """Issue #92: `sk-` was hyphen-only, and several common vendor

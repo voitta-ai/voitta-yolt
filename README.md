@@ -742,6 +742,15 @@ does *not* restrict which characters a value may contain — an earlier
 allow-list ran backwards, dismissing `Tr0ub4dor&3!…` precisely because
 the punctuation that made it strong was not on the list.
 
+One accepted cost: past 24 characters the "must mix letters and digits"
+test is waived, so a long ordinary word passed to a secret-ish flag
+(`--secret ThisIsAVeryLongDescription`) is redacted too. There is no
+cheap way to separate that from a passphrase —
+`CORRECTHORSEBATTERYSTAPLE` and `authenticationprovidername` have the
+same length class and the same alphabet diversity. Erring this way is
+deliberate: a false positive costs one unreadable value in a debug log,
+a false negative costs a credential on disk forever.
+
 Redaction is deliberately value-only where it can be, because the
 command *shape* is what the self-improvement reviewer mines — a redacted
 value costs it nothing. It is also **idempotent**: re-running it over
