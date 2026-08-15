@@ -258,6 +258,116 @@ class OverlapClippingTests(unittest.TestCase):
         self.assertEqual(len(find_secrets(command)), 1)
 
 
+class ValueGuardTests(unittest.TestCase):
+    """Issue #92: the guard's character allow-list ran backwards.
+
+    It excluded `! @ # , & { }` and space, so the more punctuation a
+    password had - the more entropy - the likelier it was to be dismissed
+    as "not secret-shaped". Now a deny-list: only shell expansions are
+    rejected outright.
+    """
+
+    def assert_redacted(self, command):
+        self.assertNotEqual(redact(command), command,
+                            "credential survived: {}".format(command))
+
+    def test_passwords_with_punctuation(self):
+        for value in ("Tr0ub4dor&3!SuperLongPassword",
+                      "MyP@ssw0rd!VeryLongIndeed2024",
+                      "Str0ngP#ssword!LongEnough2024",
+                      "{9f3c1a7e42b8d05e6c1f9a7b3d2e8c40}",
+                      "user,pass,SuperSecretTokenValue123"):
+            self.assert_redacted(
+                'deploy --token "{}" --env prod'.format(value))
+
+    def test_quoted_multiword_passphrase(self):
+        # An unquoted capture stopped at the first space, redacting
+        # `correct` and leaving the rest of the passphrase in cleartext.
+        out = redact('deploy --password "correct horse battery staple"')
+        self.assertNotIn("horse battery staple", out)
+
+    def test_long_values_without_a_digit(self):
+        # _LONG_VALUE_LEN lowered 32 -> 24; both of these sat in the gap.
+        self.assert_redacted("deploy --token deadbeefcafebabedeadbeef")
+        self.assert_redacted("deploy --token CORRECTHORSEBATTERYSTAPLEXYZZY")
+
+    def test_shell_expansions_still_rejected(self):
+        for command in ("deploy --token $DEPLOY_TOKEN_FOR_PRODUCTION",
+                        "deploy --token ${DEPLOY_TOKEN_FOR_PRODUCTION}",
+                        'deploy --token "$(fetch-secret --name prod-token)"'):
+            self.assertEqual(redact(command), command, command)
+
+
+class VendorPrefixTests(unittest.TestCase):
+    """Issue #92: `sk-` was hyphen-only, and several common vendor
+    prefixes plus bare JWTs had no pattern at all."""
+
+    def assert_redacted(self, value):
+        command = "deploy {}".format(value)
+        self.assertNotIn(value, redact(command), value)
+
+    def test_stripe_underscore_separator(self):
+        self.assert_redacted("sk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
+        self.assert_redacted("rk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
+
+    def test_other_vendor_prefixes(self):
+        self.assert_redacted("dckr_pat_AbCdEfGhIjKlMnOpQrStUvWxYz01")
+        self.assert_redacted("npm_AbCdEfGhIjKlMnOpQrStUvWxYz012345")
+        self.assert_redacted("hf_AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh")
+
+    def test_google_api_key(self):
+        self.assert_redacted("AIzaSyD-1234567890abcdefghijklmnopqrs")
+
+    def test_bare_jwt(self):
+        # Previously caught only behind an Authorization header.
+        self.assert_redacted(
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0."
+            "abcdefghijklmnopqrstuvwxyz123456")
+
+    def test_hyphen_form_still_works(self):
+        self.assert_redacted("sk-ant-api03-aB3dE6gH9jK2mN5pQ8sT1vW4")
+
+
+class IdempotenceTests(unittest.TestCase):
+    """Issue #89: patterns matched inside the module's own markers, so a
+    second pass rewrote its own output. That made "re-scan and expect
+    zero hits" useless for verifying a retro-scrub of existing logs."""
+
+    PROBES = [
+        'curl -H "Authorization: Bearer {}" https://x'.format(FAKE_GH_TOKEN),
+        "psql postgres://u:hunter2ismypassword@h/db",
+        "TOKEN=9f3c1a7e42b8d05e6c1f9a7b3d2e8c40 ./x",
+        "curl -u admin:s3cr3tP4ssw0rdVeryLong123 https://x",
+        "deploy sk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu",
+        'deploy --token "Tr0ub4dor&3!SuperLongPassword" --env prod',
+        ("ssh-add --password abc123def456ghi789"
+         "-----BEGIN RSA PRIVATE KEY-----\nB\n"
+         "-----END RSA PRIVATE KEY-----"),
+    ]
+
+    def test_redact_is_idempotent(self):
+        for probe in self.PROBES:
+            once = redact(probe)
+            self.assertEqual(once, redact(once), probe)
+            self.assertEqual(once, redact(redact(once)), probe)
+
+    def test_rescan_of_redacted_text_is_clean(self):
+        """The property that makes verifying a scrub possible at all."""
+        for probe in self.PROBES:
+            once = redact(probe)
+            leftovers = [
+                (s, e, k) for s, e, k in find_secrets(once)
+                if not once[s:e].startswith("[REDACTED:")
+            ]
+            self.assertEqual(leftovers, [], probe)
+
+    def test_a_real_secret_beside_a_marker_is_still_caught(self):
+        # The skip is character-level, not "overlaps a marker", so
+        # adjacency must not create a blind spot.
+        text = "TOKEN=[REDACTED:api-key]{}".format(FAKE_GH_TOKEN)
+        self.assertNotIn(FAKE_GH_TOKEN, redact(text))
+
+
 class FalsePositiveCorpusTests(unittest.TestCase):
     """Ordinary commands that must survive redaction byte-for-byte.
 
@@ -284,6 +394,22 @@ class FalsePositiveCorpusTests(unittest.TestCase):
         "aws configure set region us-east-1",
         "helm upgrade myapp ./chart --set image.tag=v1.2.3-rc4",
         'psql -h db.internal -U appuser -d production -c "select 1"',
+        # Added when the guard moved from allow-list to deny-list (#92):
+        # dropping the character class is the change most likely to start
+        # matching ordinary arguments, so the corpus grew with it.
+        "echo TOKENIZER=simple >> config.env",
+        "make TOKEN_LIMIT=4096 build",
+        "git commit -m 'fix: token=abc parsing in the lexer'",
+        "curl -u ci-bot:$GITHUB_TOKEN https://api.github.com",
+        "deploy --secret-key-file /etc/app/config/production.key.json",
+        "vault read secret/data/app-config-production-v2",
+        "kubectl describe pod my-app-deployment-7d4b8c9f5-x2m9k",
+        "npm install --save-dev @types/node-fetch",
+        "gh pr view 94 --repo voitta-ai/voitta-yolt --json body",
+        "docker build -t registry.example.com/team/app:sha-abc1234 .",
+        "aws ecs update-service --service my-service --force-new-deployment",
+        "./deploy --token ${DEPLOY_TOKEN}",
+        "grep -rn 'password' src/ --include='*.py'",
     ]
 
     def test_ordinary_commands_untouched(self):
@@ -308,6 +434,23 @@ class PerformanceTests(unittest.TestCase):
             elapsed = time.perf_counter() - start
             self.assertLess(elapsed, 1.0,
                             "find_secrets took {:.2f}s".format(elapsed))
+
+    def test_many_unterminated_pem_headers(self):
+        """Issue #92: the `.*?` with re.S was O(n^2) in unterminated
+        BEGIN markers - 800 of them across 4MB measured at 7.7s. No END
+        in the text means no match is possible, so the scan is skipped."""
+        import time
+        command = "echo '-----BEGIN RSA PRIVATE KEY-----" * 800 + "A" * 5000
+        start = time.perf_counter()
+        find_secrets(command)
+        self.assertLess(time.perf_counter() - start, 1.0)
+
+    def test_a_real_pem_is_still_matched(self):
+        """The short-circuit must not cost a genuine key."""
+        command = ("echo '-----BEGIN RSA PRIVATE KEY-----\n"
+                   "BODYSECRETMATERIAL\n"
+                   "-----END RSA PRIVATE KEY-----'")
+        self.assertNotIn("BODYSECRETMATERIAL", redact(command))
 
 
 class FindSecretsTests(unittest.TestCase):
