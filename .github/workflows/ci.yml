@@ -4,7 +4,14 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    # Long-lived umbrella branches too, not just master. A stacked stack
+    # (see the multi-phase-feature-pr-worktrees convention) has every
+    # phase PR targeting an umbrella branch, so a master-only filter
+    # means each phase merges with ZERO CI and the first real run
+    # happens at the umbrella -> master PR, with all phases entangled.
+    branches:
+      - master
+      - 'feature/**'
 
 jobs:
   test:
