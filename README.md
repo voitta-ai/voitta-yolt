@@ -14,6 +14,7 @@
 - [Introduction](#introduction)
 - [Example use cases](#example-use-cases)
 - [How it works](#how-it-works)
+- [Tools other than Bash](#tools-other-than-bash)
 - [Install](#install)
   - [Updating](#updating)
   - [Releasing (maintainers)](#releasing-maintainers)
@@ -218,6 +219,51 @@ is safe but `python3 -m pip install` is unsafe); known CLIs use their
 `rules/shell.json` spec; wrappers (`time`, `xargs`, `timeout`, `env`,
 `nice`, `watch`, ...) re-classify the wrapped command; anything else →
 unknown.
+
+## Tools other than Bash
+
+The PreToolUse matcher is `*`, not `Bash`
+([#99](https://github.com/voitta-ai/voitta-yolt/issues/99)). The reason is
+empirical rather than tidy: the subagent wedge investigated in
+[#80](https://github.com/voitta-ai/voitta-yolt/issues/80) hung on a
+`Write`, so YOLT was never in its path. A guard registered on one tool is
+not a guard.
+
+A structured tool has no argv, no shell and no rule lookup, so exactly two
+things happen for it:
+
+1. **The agent-steering write check.** If the call writes to a path in
+   `rules/shell.json#unsafe_write_targets` — settings, hooks, skills,
+   commands, agents, memory, MCP config — it is `unsafe`. That is the
+   self-modification shape, and it is the one thing on the non-delegable
+   list a structured tool can reach today.
+2. **The credential advisory**, over every string in the payload, so a
+   token in a `Write` body or an MCP argument is caught the same as one on
+   a command line. The wording drops the `argv` / `ps` framing there,
+   because neither applies.
+
+Everything else is `unknown` and the host decides.
+
+The write-target field list is **closed** — `Write`, `Edit`, `MultiEdit`
+and `NotebookEdit`, by their documented path fields. Guessing which field
+of an arbitrary MCP payload is a write target eventually guesses wrong,
+and a wrong guess is a false `deny` inside a subagent, which is the exact
+failure this is meant to prevent. This is deliberately not a second
+classifier for structured tools: the host's own vetting covers the general
+case.
+
+> **“YOLT denies in subagents” is not “subagent wedges are handled.”**
+> The deny converts *YOLT's own* `ask` into a fast failure. Any other
+> gated call in a background subagent still hangs with no prompt and no
+> timeout — 2h37m with no result in the #80 probe. The general fix belongs
+> in Claude Code, where a subagent permission request should surface or
+> time out rather than hang.
+
+The conversion is skipped under `bypassPermissions` and `dontAsk`, where
+the operator blanket-authorised ahead of time and there was no prompt to
+hang on. It is **not** skipped under `auto`: auto mode delegates the
+decision to a classifier, it does not put an operator behind a hook's
+`ask`, so a subagent that receives one still has nobody to answer it.
 
 ## Install
 
