@@ -873,6 +873,195 @@ SUBAGENT_DENY_PREFIX = (
     "the main session, or add a matching permissions.allow entry.\n\n"
 )
 
+# Permission modes in which the operator has blanket-authorised ahead of
+# time, so an `ask` from this hook is not a question anybody was going to
+# be asked. Converting it to `deny` inside a subagent would override an
+# explicit pre-authorisation rather than protect against a hang. Issue
+# #80, gap 1.
+#
+# `auto` is deliberately NOT in this set, which departs from the list in
+# #80. Auto mode delegates the *decision* to a classifier; it does not
+# put an operator behind a hook's `ask`, so a subagent that receives one
+# still has nobody to answer it. The costs are wildly asymmetric — a
+# wrong deny fails in seconds with a reason the agent can report upward,
+# a wrong ask wedged an agent for 2h37m in the #80 probe — so `auto`
+# keeps the deny.
+SUBAGENT_DENY_EXEMPT_MODES = frozenset({"bypassPermissions", "dontAsk"})
+
+# Tools whose input carries a filesystem path the tool writes to.
+#
+# Deliberately a closed list. Guessing which field of an arbitrary MCP
+# payload is a write target will eventually guess wrong, and the failure
+# mode of a wrong guess is a false `deny` in a subagent, which is exactly
+# the wedge this hook exists to avoid. An unlisted tool falls through to
+# `unknown` and the host decides. Issue #99.
+TOOL_WRITE_PATH_FIELDS = {
+    "Write": ("file_path",),
+    "Edit": ("file_path",),
+    "MultiEdit": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
+}
+
+
+def tool_input_text(tool_input):
+    """Flatten a tool input to the text the credential scanner reads.
+
+    Every string anywhere in the payload, joined. A credential can ride
+    in a `Write` body, a `WebFetch` url, or an arbitrary MCP argument,
+    and enumerating the field that carries it per tool is the same
+    losing game as enumerating write-target fields — except here the
+    cost of over-reaching is a false warning rather than a false deny,
+    so this one reaches everywhere.
+    """
+    parts = []
+
+    def walk(value):
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(tool_input)
+    retval = "\n".join(parts)
+    return retval
+
+
+def make_gated_response(message, permission_mode, agent_id):
+    """Build the response for a decision YOLT objects to.
+
+    `ask` normally, `deny` inside a subagent — no operator is reachable
+    from a background subagent, so the approval dialog never surfaces and
+    nothing times out; the agent wedges indefinitely (observed at 2h37m
+    in #80). `deny` is strictly more restrictive than `ask` and fails in
+    seconds with a reason the agent can report upward. Issues #76, #77.
+
+    The subagent conversion is skipped in the modes listed in
+    `SUBAGENT_DENY_EXEMPT_MODES`, where the operator pre-authorised and
+    there was no prompt to hang on. Issue #80, gap 1.
+    """
+    if agent_id and permission_mode not in SUBAGENT_DENY_EXEMPT_MODES:
+        retval = make_hook_response("deny", SUBAGENT_DENY_PREFIX + message)
+        return retval
+    retval = make_hook_response("ask", message)
+    return retval
+
+
+def _run_hook_non_bash(tool_name, tool_input, permission_mode, agent_id):
+    """PreToolUse path for every tool that is not Bash. Always exits.
+
+    The matcher covers `*` as of #99, because the wedge #80 observed was
+    a `Write`, not a Bash call — a guard registered on one tool is not a
+    guard. Two things happen here and nothing else:
+
+      1. the agent-steering write check (`classify_tool_input`), and
+      2. the credential advisory, over every string in the payload.
+
+    There is no shell parsing, no rule lookup and no argv: a structured
+    tool has none of those. Anything not covered by (1) falls through to
+    `unknown` so the host decides.
+    """
+    text = tool_input_text(tool_input)
+    advisory = format_secret_advisory(text, tool_name=tool_name or "tool")
+
+    try:
+        hooks_dir = Path(__file__).resolve().parent
+        if str(hooks_dir) not in sys.path:
+            sys.path.insert(0, str(hooks_dir))
+        from grammar_classifier import GrammarClassifier
+        from rule_classifier import DECISION_UNSAFE, load_shell_rules
+        yolt_dir = hooks_dir.parent
+        shell_rules = load_shell_rules(
+            rules_dir=yolt_dir / "rules",
+            user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
+        )
+    except Exception as e:
+        # Broad on purpose. `ShellRulesValidationError` cannot be named
+        # here — it is imported inside this same try, so an ImportError
+        # would leave the except clause itself undefined.
+        # The write-target list lives in the shell rules, so without them
+        # there is no check to make. Carry the advisory if there is one
+        # and let the host decide the rest — never fail the tool call.
+        _log_hook_decision(_tool_log_subject(tool_name, tool_input),
+                           "rules-unavailable", str(e),
+                           permission_mode, agent_id, tool_name=tool_name)
+        _emit_advisory_only(advisory)
+        sys.exit(0)
+
+    classifier = GrammarClassifier(shell_rules)
+    decision, reason = classify_tool_input(
+        tool_name, tool_input, classifier._target_is_unsafe_write,
+    )
+    _log_hook_decision(_tool_log_subject(tool_name, tool_input),
+                       decision, reason, permission_mode, agent_id,
+                       tool_name=tool_name)
+
+    if decision == DECISION_UNSAFE:
+        response = make_gated_response(reason, permission_mode, agent_id)
+        print(json.dumps(attach_secret_advisory(response, advisory)))
+        sys.exit(0)
+
+    _emit_advisory_only(advisory)
+    sys.exit(0)
+
+
+def _emit_advisory_only(advisory):
+    """Emit a response carrying only the advisory, or nothing at all.
+
+    Omitting `permissionDecision` leaves the host's own handling intact,
+    so a warning costs the fallthrough nothing.
+    """
+    if advisory:
+        response = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+        print(json.dumps(attach_secret_advisory(response, advisory)))
+
+
+def _tool_log_subject(tool_name, tool_input):
+    """What goes in the log record's `command` field for a non-Bash call.
+
+    A path when the tool has one, the tool name otherwise. Deliberately
+    not the payload: a `Write` body can be a megabyte, and the log is
+    append-only.
+    """
+    for field in TOOL_WRITE_PATH_FIELDS.get(tool_name, ()):
+        target = tool_input.get(field)
+        if isinstance(target, str) and target.strip():
+            retval = "{} {}".format(tool_name, target)
+            return retval
+    retval = str(tool_name or "(no tool)")
+    return retval
+
+
+def classify_tool_input(tool_name, tool_input, is_unsafe_write):
+    """Decide a non-Bash tool call. Returns `(decision, reason)`.
+
+    Exactly one question is asked: does this write to a path that steers
+    the agent — settings, hooks, skills, commands, agents, memory, MCP
+    config — as listed in `rules/shell.json#unsafe_write_targets`? That
+    is the self-modification shape, and it is the one thing on the
+    non-delegable list that a non-Bash tool can reach today.
+
+    Everything else is `unknown`. This is not a second classifier for
+    structured tools and must not grow into one: the host's own vetting
+    covers the general case, and a rule set that tries to out-guess it
+    per tool is the treadmill this realignment exists to end. Issue #99.
+    """
+    from rule_classifier import DECISION_UNKNOWN, DECISION_UNSAFE
+
+    for field in TOOL_WRITE_PATH_FIELDS.get(tool_name, ()):
+        target = tool_input.get(field)
+        if isinstance(target, str) and target.strip() and is_unsafe_write(target):
+            retval = (
+                DECISION_UNSAFE,
+                "{} writes to protected path '{}'".format(tool_name, target),
+            )
+            return retval
+    retval = (DECISION_UNKNOWN, "no rule: {}".format(tool_name or "(no tool)"))
+    return retval
+
 
 def format_unsafe_reason(reason, allow_hint=None):
     from rule_classifier import UNANALYZABLE_INLINE_PYTHON_PREFIX
@@ -914,6 +1103,16 @@ SECRET_ADVISORY_HEADER = (
     "https://service/endpoint'"
 )
 
+# Non-Bash tools have no argv and no `ps` exposure, so the Bash remedy
+# does not apply and quoting it would be noise. The persistence half of
+# the warning is the half that still holds. Issue #99.
+SECRET_ADVISORY_HEADER_TOOL = (
+    "YOLT: possible credential in this {} call ({}). Not blocked.\n"
+    "It will persist in the transcript and in session memory, which "
+    "outlive the call. Pass it by reference (an env var, a secret-manager "
+    "lookup) rather than by value where the tool allows it."
+)
+
 # Any of these disables the warning. An exact `== "0"` test looks precise
 # and behaves as a trap: a user who reaches for `false` or `off` to
 # silence a noisy control sees no change and concludes it is broken.
@@ -922,8 +1121,14 @@ SECRET_WARN_OFF_VALUES = frozenset(
 )
 
 
-def format_secret_advisory(command):
+def format_secret_advisory(command, tool_name=None):
     """Build the credential warning for `command`, or None if clean.
+
+    `tool_name` selects the wording. Left unset (the Bash path) the
+    message keeps the `argv` / `ps` framing and the shell remedy. Set to
+    a non-Bash tool it drops both, because neither applies and advice
+    that does not apply is how a control earns its way into being
+    ignored. Issue #99.
 
     Advisory only — this never changes YOLT's decision. A control that
     false-positives on legitimate work gets switched off and then
@@ -957,7 +1162,10 @@ def format_secret_advisory(command):
     found = ", ".join(
         "{} at char {}".format(kind, start) for start, _, kind in spans
     )
-    retval = SECRET_ADVISORY_HEADER.format(found)
+    if tool_name:
+        retval = SECRET_ADVISORY_HEADER_TOOL.format(tool_name, found)
+    else:
+        retval = SECRET_ADVISORY_HEADER.format(found)
     return retval
 
 
@@ -1055,7 +1263,8 @@ def _maybe_rotate_log(log_path, max_bytes):
 
 
 def _log_hook_decision(command, decision, reason,
-                       permission_mode=None, agent_id=None):
+                       permission_mode=None, agent_id=None,
+                       tool_name="Bash"):
     """Append a JSON-line record of this hook fire to the resolved log
     path. Logs by default to `~/.claude/yolt.log`; the user can override
     with `YOLT_LOG_FILE=<path>` or opt out with `YOLT_LOG_FILE=""`.
@@ -1098,6 +1307,7 @@ def _log_hook_decision(command, decision, reason,
             "command": _redact_or_withhold(command)[:500] if command else "",
             "permission_mode": permission_mode,
             "agent_id": agent_id,
+            "tool_name": tool_name,
         }
         if REDACTOR_IMPORT_ERROR:
             record["redactor_error"] = REDACTOR_IMPORT_ERROR
@@ -1226,18 +1436,21 @@ def run_hook():
         sys.exit(0)
 
     tool_name = hook_input.get("tool_name", "")
-    if tool_name != "Bash":
-        sys.exit(0)
-
-    command = hook_input.get("tool_input", {}).get("command", "")
-    if not command.strip():
-        sys.exit(0)
+    tool_input = hook_input.get("tool_input") or {}
 
     # `agent_id` is present only when the hook fires inside a subagent
     # call; `permission_mode` is always present. Both are logged, and
     # `agent_id` also flips `ask` -> `deny` below. See issue #76.
     permission_mode = hook_input.get("permission_mode")
     agent_id = hook_input.get("agent_id")
+
+    if tool_name != "Bash":
+        _run_hook_non_bash(tool_name, tool_input, permission_mode, agent_id)
+        return  # unreachable; _run_hook_non_bash always exits
+
+    command = tool_input.get("command", "")
+    if not command.strip():
+        sys.exit(0)
 
     yolt_dir = Path(__file__).resolve().parent.parent
     py_rules = load_rules(
@@ -1288,17 +1501,7 @@ def run_hook():
     if decision == DECISION_UNSAFE:
         allow_hint = classifier.suggest_allow_pattern(command)
         message = format_unsafe_reason(reason, allow_hint)
-        if agent_id:
-            # No operator is reachable from a background subagent: the
-            # `ask` dialog never surfaces and nothing times out, so the
-            # agent wedges indefinitely. `deny` is strictly more
-            # restrictive than `ask` and fails in seconds with a reason
-            # the agent can report upward. Issue #76.
-            response = make_hook_response(
-                "deny", SUBAGENT_DENY_PREFIX + message
-            )
-        else:
-            response = make_hook_response("ask", message)
+        response = make_gated_response(message, permission_mode, agent_id)
         print(json.dumps(attach_secret_advisory(response, advisory)))
         sys.exit(0)
 
