@@ -63,7 +63,13 @@ class RedactorUnavailableTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0,
                          "hook died: {}".format(proc.stderr[:400]))
         # Classification never needed the redactor, so it must survive.
-        self.assertIn("permissionDecision", proc.stdout)
+        # Since issue #98 a safe command produces no stdout, so the proof
+        # that classification ran is the decision in the log record —
+        # anything other than an error sentinel means the classifier was
+        # reached with the redactor missing.
+        self.assertTrue(written, "nothing logged at all")
+        record = json.loads(written.strip().splitlines()[-1])
+        self.assertIn(record["decision"], ("safe", "unsafe", "unknown"))
 
     def test_command_text_is_withheld_not_written_raw(self):
         proc, written = self.run_without_redactor(

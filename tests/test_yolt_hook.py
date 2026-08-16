@@ -66,12 +66,14 @@ class TestHookEndToEnd(unittest.TestCase):
         retval = resp["hookSpecificOutput"]["permissionDecision"]
         return retval
 
-    def test_safe_ls_returns_allow(self):
-        self.assertEqual(self._decision("ls /tmp"), "allow")
+    def test_safe_ls_emits_no_decision(self):
+        # Issue #98: YOLT does not grant. A safe command is silent, which
+        # is indistinguishable to the host from unknown.
+        self.assertIsNone(self._decision("ls /tmp"))
 
     def test_aws_describe_returns_allow(self):
         self.assertEqual(
-            self._decision("aws ec2 describe-instances"), "allow"
+            self._decision("aws ec2 describe-instances"), None
         )
 
     def test_unsafe_rm_returns_ask(self):
@@ -94,18 +96,16 @@ class TestHookEndToEnd(unittest.TestCase):
         # prompt.
         self.assertEqual(self._decision("echo x > /etc/profile"), "ask")
 
-    def test_compound_aws_loop_returns_allow(self):
+    def test_compound_aws_loop_emits_no_decision(self):
         cmd = (
             'for svc in $(aws ecs list-services --cluster X); do '
             'aws ecs describe-services --cluster X --services "$svc"; '
             "done"
         )
-        self.assertEqual(self._decision(cmd), "allow")
+        self.assertIsNone(self._decision(cmd))
 
-    def test_python3_dash_c_safe_returns_allow(self):
-        self.assertEqual(
-            self._decision('python3 -c "print(1+1)"'), "allow"
-        )
+    def test_python3_dash_c_safe_emits_no_decision(self):
+        self.assertIsNone(self._decision('python3 -c "print(1+1)"'))
 
     def test_python3_dash_c_destructive_returns_ask(self):
         self.assertEqual(
@@ -115,24 +115,22 @@ class TestHookEndToEnd(unittest.TestCase):
             "ask",
         )
 
-    def test_heredoc_safe_returns_allow(self):
+    def test_heredoc_safe_emits_no_decision(self):
         cmd = 'python3 <<EOF\nimport os\nprint(os.listdir("/tmp"))\nEOF\n'
-        self.assertEqual(self._decision(cmd), "allow")
+        self.assertIsNone(self._decision(cmd))
 
     def test_heredoc_destructive_returns_ask(self):
         cmd = 'python3 <<EOF\nimport os\nos.system("rm -rf /tmp/x")\nEOF\n'
         self.assertEqual(self._decision(cmd), "ask")
 
-    def test_python3_script_file_safe_returns_allow(self):
+    def test_python3_script_file_safe_emits_no_decision(self):
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
         ) as f:
             f.write("import json\nprint(json.dumps({'ok': True}))\n")
             path = f.name
         try:
-            self.assertEqual(
-                self._decision("python3 {}".format(path)), "allow"
-            )
+            self.assertIsNone(self._decision("python3 {}".format(path)))
         finally:
             os.unlink(path)
 
@@ -244,11 +242,10 @@ class TestHookSubagentDeny(unittest.TestCase):
             resp["hookSpecificOutput"]["permissionDecision"], "ask"
         )
 
-    def test_safe_in_subagent_still_allows(self):
+    def test_safe_in_subagent_exits_silently(self):
+        # Issue #98: safe no longer grants anywhere, subagent included.
         resp = self._run("ls /tmp", agent_id="agent_abc123")
-        self.assertEqual(
-            resp["hookSpecificOutput"]["permissionDecision"], "allow"
-        )
+        self.assertIsNone(resp)
 
     def test_unknown_in_subagent_still_exits_silently(self):
         resp = self._run(
@@ -257,12 +254,18 @@ class TestHookSubagentDeny(unittest.TestCase):
         self.assertIsNone(resp)
 
 
-class TestHookWhitelistDiscovery(unittest.TestCase):
-    """The hook reads the user's settings.json `permissions.allow` Bash()
-    entries and uses them as an explicit override for unknown and unsafe
-    atoms.
-    Tests scope the lookup via the `cwd` field in the hook payload so
-    they don't depend on the real test runner's home directory."""
+class TestHookIgnoresUserAllowPatterns(unittest.TestCase):
+    """Issue #98 removed the `permissions.allow` upgrade path.
+
+    The hook used to read the user's settings and turn a matching unknown
+    or unsafe command into a grant. Under auto mode that is a classifier
+    bypass the host cannot see, so the settings are no longer read at all.
+    These tests pin that: an entry that previously forced `allow` now
+    changes nothing.
+
+    They also keep the suite hermetic (issue #75) — the hook no longer
+    consults the developer's real ~/.claude/settings.json, so a local
+    allowlist cannot flip an expected `ask` into an `allow`."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="yolt-hook-cwd-")
@@ -290,20 +293,19 @@ class TestHookWhitelistDiscovery(unittest.TestCase):
         retval = resp["hookSpecificOutput"]["permissionDecision"]
         return retval
 
-    def test_unknown_atom_upgraded_via_cwd_settings(self):
+    def test_matching_allow_entry_does_not_grant_an_unknown(self):
         self._write_settings(["Bash(yolt_test_mycli *)"])
-        self.assertEqual(self._decision("yolt_test_mycli foo bar"), "allow")
-
-    def test_unknown_atom_without_match_stays_silent(self):
-        self._write_settings(["Bash(yolt_test_othertool *)"])
         self.assertIsNone(self._decision("yolt_test_mycli foo bar"))
 
-    def test_whitelist_overrides_unsafe(self):
+    def test_matching_allow_entry_does_not_downgrade_an_unsafe(self):
         self._write_settings(["Bash(git push origin feature/*)"])
         self.assertEqual(
-            self._decision("git push origin feature/issue-35"),
-            "allow",
+            self._decision("git push origin feature/issue-35"), "ask",
         )
+
+    def test_unknown_without_match_still_silent(self):
+        self._write_settings(["Bash(yolt_test_othertool *)"])
+        self.assertIsNone(self._decision("yolt_test_mycli foo bar"))
 
 
 class TestBootstrapShell(unittest.TestCase):
@@ -593,7 +595,7 @@ class TestHookLogFile(unittest.TestCase):
             [sys.executable, str(HOOKS_DIR / "yolt_analyzer.py"), "--hook"],
             input=json.dumps({
                 "tool_name": "Bash",
-                "tool_input": {"command": "ls /tmp"},
+                "tool_input": {"command": "rm -rf /tmp/foo"},
             }),
             capture_output=True,
             text=True,
@@ -601,7 +603,9 @@ class TestHookLogFile(unittest.TestCase):
             env=env,
         )
         self.assertEqual(result.returncode, 0)
-        # Decision is still emitted on stdout.
+        # Decision is still emitted on stdout. The probe is a mutating
+        # command on purpose: since issue #98 a safe one is silent, so it
+        # could not tell a healthy hook from a broken one.
         self.assertIn("hookSpecificOutput", result.stdout)
 
 

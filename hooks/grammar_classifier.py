@@ -27,9 +27,7 @@ from rule_classifier import (
     SUBSTITUTION_PLACEHOLDER,
     RuleClassifier,
     aggregate_decisions,
-    load_allow_patterns,
     load_shell_rules,
-    match_allow_patterns,
 )
 
 
@@ -51,10 +49,9 @@ class GrammarClassifier:
 
     MAX_RECURSION_DEPTH = 8
 
-    def __init__(self, rules, python_analyzer_factory=None, allow_patterns=None):
+    def __init__(self, rules, python_analyzer_factory=None):
         self.rules = rules
         self.python_analyzer_factory = python_analyzer_factory
-        self.allow_patterns = list(allow_patterns) if allow_patterns else []
         self.safe_write_targets = list(rules.get("safe_write_targets", ["/dev/null"]))
         self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
         self._rules = RuleClassifier(
@@ -160,18 +157,16 @@ class GrammarClassifier:
             None,
         )
         if unsafe_target is not None:
-            seg = self._slice(node, src)
-            decisions.append(self._maybe_allow(
-                seg, (DECISION_UNSAFE,
-                      "writes to protected path '{}' via redirection".format(
-                          unsafe_target)),
-            ))
+            decisions.append(
+                (DECISION_UNSAFE,
+                 "writes to protected path '{}' via redirection".format(
+                     unsafe_target)),
+            )
             return
         if any(not self._target_is_safe_write(t) for t in write_targets):
-            seg = self._slice(node, src)
-            decisions.append(self._maybe_allow(
-                seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
-            ))
+            decisions.append(
+                (DECISION_UNKNOWN, "writes to a file via redirection"),
+            )
             return
         # All write targets safe (or none): fall through and classify the
         # command itself.
@@ -220,9 +215,7 @@ class GrammarClassifier:
         for c in node.children:
             self._collect_substitutions(c, src, sub_decisions, _depth + 1)
 
-        match_string = " ".join(argv)
         result = self._rules.classify_tokens(argv)
-        result = self._maybe_allow(match_string, result)
         if sub_decisions:
             return aggregate_decisions(sub_decisions + [result])
         return result
@@ -373,15 +366,6 @@ class GrammarClassifier:
         """Used by RuleClassifier for `bash -c <script>` interpreters."""
         return self.classify(script, _depth=depth)
 
-    def _maybe_allow(self, match_string, result):
-        decision, reason = result
-        if decision == DECISION_SAFE:
-            return result
-        match = match_allow_patterns(match_string, self.allow_patterns)
-        if match is None:
-            return result
-        return (DECISION_SAFE, "matches user allow pattern '{}'".format(match))
-
     @staticmethod
     def _suggest_allow_pattern_from_argv(argv):
         cmd_name = os.path.basename(argv[0])
@@ -467,12 +451,11 @@ class GrammarClassifier:
         return None
 
 
-def classify_command(command, rules, python_analyzer_factory=None, allow_patterns=None):
+def classify_command(command, rules, python_analyzer_factory=None):
     """Module-level convenience wrapper."""
     classifier = GrammarClassifier(
         rules,
         python_analyzer_factory=python_analyzer_factory,
-        allow_patterns=allow_patterns,
     )
     return classifier.classify(command)
 
@@ -489,13 +472,6 @@ def run_cli():
         rules_dir=yolt_dir / "rules",
         user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
     )
-
-    cwd = Path.cwd()
-    allow_patterns = load_allow_patterns([
-        Path.home() / ".claude" / "settings.json",
-        cwd / ".claude" / "settings.json",
-        cwd / ".claude" / "settings.local.json",
-    ])
 
     # Python analyzer factory — lazy import so this CLI works without
     # the rule data dir for python rules.
@@ -514,7 +490,6 @@ def run_cli():
         command,
         rules,
         python_analyzer_factory=factory,
-        allow_patterns=allow_patterns,
     )
 
     print(json.dumps({"decision": decision, "reason": reason}, indent=2))

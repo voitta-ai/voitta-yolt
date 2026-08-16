@@ -1197,7 +1197,10 @@ def run_hook():
          wrappers, interpreters, heredocs uniformly). The classifier
          delegates python3 inline / script analysis to SafetyAnalyzer.
       3. Map classifier decision -> hook response:
-           safe    -> permissionDecision: allow
+           safe    -> exit silently, same as unknown. YOLT does not
+                      grant permission; see issue #98. The decision is
+                      still recorded in the log, where it is what the
+                      classification is measured from.
            unsafe  -> permissionDecision: ask (with explanation), or
                       deny when the payload carries an `agent_id` (the
                       hook fired inside a subagent, where no operator
@@ -1248,9 +1251,9 @@ def run_hook():
             sys.path.insert(0, str(hooks_dir))
         from grammar_classifier import GrammarClassifier
         from rule_classifier import (
-            DECISION_SAFE, DECISION_UNSAFE,
+            DECISION_UNSAFE,
             ShellRulesValidationError,
-            load_allow_patterns, load_shell_rules,
+            load_shell_rules,
         )
     except ImportError as e:
         _log_hook_decision(command, "import-error", str(e),
@@ -1267,21 +1270,12 @@ def run_hook():
                            permission_mode, agent_id)
         sys.exit(0)
 
-    cwd_str = hook_input.get("cwd") or os.getcwd()
-    cwd = Path(cwd_str)
-    allow_patterns = load_allow_patterns([
-        Path.home() / ".claude" / "settings.json",
-        cwd / ".claude" / "settings.json",
-        cwd / ".claude" / "settings.local.json",
-    ])
-
     def _python_factory():
         return SafetyAnalyzer(py_rules)
 
     classifier = GrammarClassifier(
         shell_rules,
         python_analyzer_factory=_python_factory,
-        allow_patterns=allow_patterns,
     )
     decision, reason = classifier.classify(command)
     _log_hook_decision(command, decision, reason, permission_mode, agent_id)
@@ -1291,10 +1285,6 @@ def run_hook():
     # rides along with whatever decision was reached. Issue #85.
     advisory = format_secret_advisory(command)
 
-    if decision == DECISION_SAFE:
-        response = make_hook_response("allow", "YOLT: {}".format(reason))
-        print(json.dumps(attach_secret_advisory(response, advisory)))
-        sys.exit(0)
     if decision == DECISION_UNSAFE:
         allow_hint = classifier.suggest_allow_pattern(command)
         message = format_unsafe_reason(reason, allow_hint)
@@ -1312,10 +1302,15 @@ def run_hook():
         print(json.dumps(attach_secret_advisory(response, advisory)))
         sys.exit(0)
 
-    # decision == DECISION_UNKNOWN: let Claude Code handle it. Emit a
-    # response only when there is an advisory to carry — omitting
-    # `permissionDecision` leaves Claude Code's default prompt intact,
-    # so the warning costs the fallthrough nothing.
+    # decision is DECISION_SAFE or DECISION_UNKNOWN: say nothing and let
+    # the host decide. `safe` is still recorded in the log — it is a
+    # classification, not a grant — but it no longer produces a
+    # `permissionDecision`, so auto mode's classifier is never
+    # short-circuited by this hook. Issue #98.
+    #
+    # Emit a response only when there is an advisory to carry: omitting
+    # `permissionDecision` leaves the host's own handling intact, so the
+    # warning costs the fallthrough nothing.
     if advisory:
         response = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
         print(json.dumps(attach_secret_advisory(response, advisory)))
