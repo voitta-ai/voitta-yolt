@@ -1,0 +1,92 @@
+{
+  "window": {
+    "first_day": "2025-07-08",
+    "last_day": "2026-08-16",
+    "distinct_days": 53,
+    "transcripts": 132
+  },
+  "totals": {
+    "tool_calls": 13178,
+    "rejections": 10,
+    "rejections_per_100_calls": 0.076
+  },
+  "by_workload": {
+    "infra": {
+      "tool_calls": 9224,
+      "rejections": 7,
+      "rejections_per_100_calls": 0.076
+    },
+    "other": {
+      "tool_calls": 3005,
+      "rejections": 3,
+      "rejections_per_100_calls": 0.1
+    },
+    "yolt-itself": {
+      "tool_calls": 949,
+      "rejections": 0,
+      "rejections_per_100_calls": 0.0
+    }
+  },
+  "top_tools_by_calls": [
+    [
+      "Bash",
+      8902
+    ],
+    [
+      "Edit",
+      1487
+    ],
+    [
+      "Read",
+      764
+    ],
+    [
+      "Write",
+      582
+    ],
+    [
+      "ToolSearch",
+      180
+    ],
+    [
+      "AskUserQuestion",
+      171
+    ],
+    [
+      "mcp__claude-in-chrome__computer",
+      108
+    ],
+    [
+      "Skill",
+      74
+    ],
+    [
+      "WebFetch",
+      72
+    ],
+    [
+      "ScheduleWakeup",
+      68
+    ],
+    [
+      "mcp__mcp-atlassian__jira_transition_issue",
+      63
+    ],
+    [
+      "mcp__mcp-atlassian__jira_get_issue",
+      58
+    ]
+  ],
+  "yolt_log": {
+    "decisions": {
+      "safe": 5377,
+      "unsafe": 2140,
+      "unknown": 1588
+    },
+    "unsafe_share": 23.5,
+    "active_days": 7
+  },
+  "not_measurable": [
+    "prompt volume (approved prompts are indistinguishable from ungated calls in every local artifact)"
+  ]
+}
