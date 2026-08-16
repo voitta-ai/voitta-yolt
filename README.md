@@ -10,6 +10,7 @@
 
 ## Contents
 
+- [Status: Claude Code auto mode changed what this is for](#status-claude-code-auto-mode-changed-what-this-is-for)
 - [Introduction](#introduction)
 - [Example use cases](#example-use-cases)
 - [How it works](#how-it-works)
@@ -35,13 +36,52 @@
 - [Analysis boundaries](#analysis-boundaries)
 - [Design principles](#design-principles)
 
+## Status: Claude Code auto mode changed what this is for
+
+Claude Code now ships **auto mode** as its default permission mode: a
+classifier vets every tool call — not just Bash — and decides whether it
+runs. That is the job the first half of this README describes YOLT doing,
+and the platform now does it for every tool, with no rules to maintain.
+
+**What that means for YOLT.** The auto-allow half is superseded. YOLT is
+being narrowed to two things the platform does not do:
+
+- a **deny-only** guard over a short list of decisions that should not be
+  delegated to a probabilistic classifier — it will withhold approval and
+  never grant it;
+- **credential hygiene** — catching secrets on a command line before they
+  are scattered across transcripts, logs and history, and keeping them out
+  of YOLT's own records. See
+  [Credentials in the command line](#credentials-in-the-command-line-advisory)
+  and [Credential redaction](#credential-redaction).
+
+The realignment is tracked in
+[#102](https://github.com/voitta-ai/voitta-yolt/issues/102) and lands in
+v2.0.0.
+
+> **If you run auto mode today, know this.** This version still returns
+> `allow` for commands it classifies as safe, and Claude Code honors a
+> hook's decision. So on those commands YOLT answers *instead of* auto
+> mode's classifier — the same bypass that `/auto-mode-setup` looks for in
+> your `permissions.allow` and offers to remove, except a hook is invisible
+> to that check. Removing it is the first change in v2.0.0
+> ([#98](https://github.com/voitta-ai/voitta-yolt/issues/98)). Until then,
+> if you want every command vetted by auto mode, uninstall the plugin.
+
+Everything below this section describes the tool as it is **today**, not as
+it will be after v2.0.0.
+
 ## Introduction
 
 A Claude Code hook that statically analyzes script invocations before
 execution, auto-allowing read-only ones and flagging mutating ones for
 review.
 
-YOLT closes two gaps in Claude Code's built-in whitelist matcher:
+> **Superseded framing.** The two gaps below were real when the built-in
+> whitelist matcher was the only thing standing between an agent and a
+> command. Auto mode closes both of them by reading intent rather than
+> matching patterns — there is no whitelist to widen. They are kept here
+> because they explain why the code is shaped the way it is.
 
 1. **Arbitrary-execution wrappers.** Interpreters (`bash`, `python3`,
    `node`, ...) and dual-use CLIs (`gh api`, `curl`, `kubectl`, ...) can't
@@ -51,6 +91,11 @@ YOLT closes two gaps in Claude Code's built-in whitelist matcher:
    (`for`, `while`, `bash -c "..."`, `$(...)`), not the inner commands it
    runs, so loops and command substitutions prompt even when every inner
    command would be whitelisted on its own.
+
+The decomposition those gaps motivated is not going away. Seeing into a
+`bash -c`, a heredoc or a `$(...)` is how a credential hidden inside one
+gets found, so the grammar walker outlives the classification job it was
+built for.
 
 The hook entry is one piece, with two specialized followers:
 
@@ -81,10 +126,16 @@ the same shape and registering it in `rules/shell.json`.
 
 ## Example use cases
 
-- **Stop prompt fatigue on read-only work.** Read-only exploration —
-  `git status`, `ls -la`, `kubectl get pods`, `aws s3 ls` — is auto-allowed
-  and runs without a prompt, while a mutating `git push --force` or
-  `aws s3 rm s3://bucket --recursive` still stops for review.
+> These describe current behavior. The first one is the auto-allow half that
+> v2.0.0 removes — see [Status](#status-claude-code-auto-mode-changed-what-this-is-for).
+> The rest survive, because they are about *seeing into* a command rather
+> than about approving it.
+
+- **Stop prompt fatigue on read-only work.** *(superseded by auto mode.)*
+  Read-only exploration — `git status`, `ls -la`, `kubectl get pods`,
+  `aws s3 ls` — is auto-allowed and runs without a prompt, while a mutating
+  `git push --force` or `aws s3 rm s3://bucket --recursive` still stops for
+  review.
 - **See into wrapper commands the built-in allowlist can't.** A
   `for f in *.log; do rm "$f"; done` loop, a `bash -c "..."`, a piped
   `curl ... | sh`, or a heredoc is decomposed to its inner commands, so the
