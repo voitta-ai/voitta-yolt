@@ -8,9 +8,12 @@ should be added here when their fix lands.
 Every test goes through the same end-to-end path Claude Code uses in
 production: `python3 hooks/yolt_analyzer.py --hook`, fed a synthetic
 `PreToolUse` payload on stdin. The assertion is on the
-`permissionDecision` value (`allow` / `ask`) or on a silent exit
-(`None`) for inputs that intentionally fall through to Claude Code's
-default-prompt path.
+`permissionDecision` value (`ask`) or on a silent exit (`None`) for
+inputs that fall through to Claude Code's own handling. Since issue #98
+the hook never emits `allow`, so repros that assert a command must stay
+*safe* go through `classification_for`, which reads the classifier
+directly — a stricter check than the old `allow`, because it cannot be
+satisfied by an `unknown`.
 
 Catalogue layout:
 
@@ -32,7 +35,7 @@ Catalogue layout:
   routes the path through the same white list redirects use.
 - `TestIssue28UnsafeWriteTargets` -- redirect / command writes to
   dotfile / config / startup paths (closes #28). The headline repro
-  is `echo pwn > ~/.claude/settings.json`, which classified `allow`
+  is `echo pwn > ~/.claude/settings.json`, which classified safe
   before the fix because `~/.claude/*` is a safe-write target even
   though settings.json can disable this hook. The deny list is
   checked before the safe list, so it now asks.
@@ -75,6 +78,26 @@ class _Hook:
         last_line = stdout.splitlines()[-1]
         response = json.loads(last_line)
         retval = response["hookSpecificOutput"]["permissionDecision"]
+        return retval
+
+    @staticmethod
+    def classification_for(command):
+        """Classifier decision (`safe` / `unsafe` / `unknown`).
+
+        Issue #98 stopped the hook emitting `allow`, so a safe command is
+        now silent and indistinguishable at the hook boundary from an
+        unknown one. The safe-side repros in this catalogue care about
+        exactly that distinction — "this must stay classified safe" — so
+        they assert here instead, which is a stricter check than the
+        `allow` they used to make.
+        """
+        result = subprocess.run(
+            [sys.executable, str(HOOKS_DIR / "grammar_classifier.py"), command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        retval = json.loads(result.stdout)["decision"]
         return retval
 
 
@@ -283,21 +306,21 @@ class TestIssue17NestedCliVerbs(unittest.TestCase):
     # Bare reads that must remain safe
 
     def test_bare_git_tag_safe(self):
-        self.assertEqual(_Hook.decision_for("git tag"), "allow")
+        self.assertEqual(_Hook.classification_for("git tag"), "safe")
 
     def test_git_tag_list_safe(self):
-        self.assertEqual(_Hook.decision_for("git tag -l"), "allow")
+        self.assertEqual(_Hook.classification_for("git tag -l"), "safe")
 
     def test_docker_image_ls_safe(self):
-        self.assertEqual(_Hook.decision_for("docker image ls"), "allow")
+        self.assertEqual(_Hook.classification_for("docker image ls"), "safe")
 
     def test_kubectl_config_view_safe(self):
         self.assertEqual(
-            _Hook.decision_for("kubectl config view"), "allow"
+            _Hook.classification_for("kubectl config view"), "safe"
         )
 
     def test_helm_repo_list_safe(self):
-        self.assertEqual(_Hook.decision_for("helm repo list"), "allow")
+        self.assertEqual(_Hook.classification_for("helm repo list"), "safe")
 
 
 class TestIssue27FindWriteFlags(unittest.TestCase):
@@ -316,8 +339,8 @@ class TestIssue27FindWriteFlags(unittest.TestCase):
 
     def test_fprint_to_tmp_is_safe(self):
         self.assertEqual(
-            _Hook.decision_for("find / -fprint /tmp/list.txt"),
-            "allow",
+            _Hook.classification_for("find / -fprint /tmp/list.txt"),
+            "safe",
         )
 
     def test_fprintf_to_etc_is_unsafe(self):
@@ -328,8 +351,8 @@ class TestIssue27FindWriteFlags(unittest.TestCase):
 
     def test_fprintf_to_tmp_is_safe(self):
         self.assertEqual(
-            _Hook.decision_for("find / -fprintf /tmp/list.txt '%p\\n'"),
-            "allow",
+            _Hook.classification_for("find / -fprintf /tmp/list.txt '%p\\n'"),
+            "safe",
         )
 
     def test_fls_to_var_log_is_unsafe(self):
@@ -340,8 +363,8 @@ class TestIssue27FindWriteFlags(unittest.TestCase):
 
     def test_fls0_to_tmp_is_safe(self):
         self.assertEqual(
-            _Hook.decision_for("find / -fls0 /tmp/list.bin"),
-            "allow",
+            _Hook.classification_for("find / -fls0 /tmp/list.bin"),
+            "safe",
         )
 
 
@@ -373,8 +396,8 @@ class TestIssue28UnsafeWriteTargets(unittest.TestCase):
         # The carve-out is settings.json only; the rest of ~/.claude/*
         # stays a safe-write target so legitimate cache writes don't ask.
         self.assertEqual(
-            _Hook.decision_for("echo x > ~/.claude/cache.json"),
-            "allow",
+            _Hook.classification_for("echo x > ~/.claude/cache.json"),
+            "safe",
         )
 
     def test_redirect_to_bashrc_asks(self):
@@ -405,8 +428,8 @@ class TestIssue28UnsafeWriteTargets(unittest.TestCase):
     def test_redirect_to_tmp_still_allowed(self):
         # Control: a benign temp write is unaffected.
         self.assertEqual(
-            _Hook.decision_for("echo x > /tmp/scratch.txt"),
-            "allow",
+            _Hook.classification_for("echo x > /tmp/scratch.txt"),
+            "safe",
         )
 
     def test_safe_first_redirect_does_not_mask_unsafe_second(self):

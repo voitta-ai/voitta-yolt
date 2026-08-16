@@ -19,7 +19,7 @@
   - [Releasing (maintainers)](#releasing-maintainers)
   - [Migrating from manual to plugin install](#migrating-from-manual-to-plugin-install)
   - [Manual install (without the plugin system)](#manual-install-without-the-plugin-system)
-- [User whitelist as a secondary upgrade pass](#user-whitelist-as-a-secondary-upgrade-pass)
+- [User whitelist (removed in the auto-mode realignment)](#user-whitelist-removed-in-the-auto-mode-realignment)
 - [Dependencies](#dependencies)
 - [What the grammar classifier handles](#what-the-grammar-classifier-handles)
 - [SQL CLIs](#sql-clis)
@@ -47,8 +47,8 @@ and the platform now does it for every tool, with no rules to maintain.
 being narrowed to two things the platform does not do:
 
 - a **deny-only** guard over a short list of decisions that should not be
-  delegated to a probabilistic classifier — it will withhold approval and
-  never grant it;
+  delegated to a probabilistic classifier — it withholds approval and
+  never grants it;
 - **credential hygiene** — catching secrets on a command line before they
   are scattered across transcripts, logs and history, and keeping them out
   of YOLT's own records. See
@@ -59,23 +59,25 @@ The realignment is tracked in
 [#102](https://github.com/voitta-ai/voitta-yolt/issues/102) and lands in
 v2.0.0.
 
-> **If you run auto mode today, know this.** This version still returns
-> `allow` for commands it classifies as safe, and Claude Code honors a
-> hook's decision. So on those commands YOLT answers *instead of* auto
-> mode's classifier — the same bypass that `/auto-mode-setup` looks for in
-> your `permissions.allow` and offers to remove, except a hook is invisible
-> to that check. Removing it is the first change in v2.0.0
-> ([#98](https://github.com/voitta-ai/voitta-yolt/issues/98)). Until then,
-> if you want every command vetted by auto mode, uninstall the plugin.
+> **The classifier bypass is gone.** Up to v1.0.1 YOLT returned `allow`
+> for commands it classified as safe, and Claude Code honors a hook's
+> decision — so on those commands YOLT answered *instead of* auto mode's
+> classifier. That is the same bypass `/auto-mode-setup` looks for in your
+> `permissions.allow` and offers to remove, except a hook is invisible to
+> that check. As of
+> [#98](https://github.com/voitta-ai/voitta-yolt/issues/98) YOLT never
+> emits `allow` from any path, and no longer reads your settings files at
+> all. Every command it does not object to is vetted by auto mode.
 
-Everything below this section describes the tool as it is **today**, not as
-it will be after v2.0.0.
+The remaining phases shrink the rule set and widen the guard past `Bash`;
+until they land, the rules documentation below still describes the full
+classifier.
 
 ## Introduction
 
 A Claude Code hook that statically analyzes script invocations before
-execution, auto-allowing read-only ones and flagging mutating ones for
-review.
+execution and flags mutating ones for review. It withholds approval; it
+never grants it.
 
 > **Superseded framing.** The two gaps below were real when the built-in
 > whitelist matcher was the only thing standing between an agent and a
@@ -126,14 +128,14 @@ the same shape and registering it in `rules/shell.json`.
 
 ## Example use cases
 
-> These describe current behavior. The first one is the auto-allow half that
-> v2.0.0 removes — see [Status](#status-claude-code-auto-mode-changed-what-this-is-for).
-> The rest survive, because they are about *seeing into* a command rather
-> than about approving it.
+> The first entry is kept for the record only — it describes what YOLT did
+> before [#98](https://github.com/voitta-ai/voitta-yolt/issues/98). The rest
+> are current, because they are about *seeing into* a command rather than
+> about approving it.
 
-- **Stop prompt fatigue on read-only work.** *(superseded by auto mode.)*
-  Read-only exploration — `git status`, `ls -la`, `kubectl get pods`,
-  `aws s3 ls` — is auto-allowed and runs without a prompt, while a mutating
+- **~~Stop prompt fatigue on read-only work.~~** *(removed in #98 — auto
+  mode does this.)* Read-only exploration used to be auto-allowed by YOLT;
+  it now falls through to the host untouched. A mutating
   `git push --force` or `aws s3 rm s3://bucket --recursive` still stops for
   review.
 - **See into wrapper commands the built-in allowlist can't.** A
@@ -143,11 +145,12 @@ the same shape and registering it in `rules/shell.json`.
   rubber-stamped.
 - **Catch destructive SQL inside CLI flags.** `psql -c "DROP TABLE users"`
   or `athena ... "DELETE FROM ..."` is flagged for review, while a
-  `SELECT ...` query is auto-allowed.
+  `SELECT ...` query classifies safe and passes through silently.
 - **Analyze inline Python by AST, not string match.** `python3 -c "..."`
   and `python3 <<EOF` snippets are walked with the stdlib `ast` module: a
-  read-only `json.load` + `print` is auto-allowed, while a snippet that
-  writes a file, calls `os.system`, or spawns a subprocess prompts.
+  read-only `json.load` + `print` classifies safe and passes through
+  silently, while a snippet that writes a file, calls `os.system`, or
+  spawns a subprocess prompts.
 
 ## How it works
 
@@ -192,7 +195,11 @@ the AST. Visitor dispatch:
 After visiting, decisions are aggregated with precedence
 `unsafe > unknown > safe`, and the hook emits one of:
 
-- `safe` → `permissionDecision: allow` with a short reason.
+- `safe` → **nothing.** The hook exits silently and the host decides,
+  exactly as for `unknown`. YOLT withholds approval; it does not grant it
+  ([#98](https://github.com/voitta-ai/voitta-yolt/issues/98)). The `safe`
+  classification is still written to the decision log, where it is what
+  the classifier's accuracy is measured from.
 - `unsafe` → `permissionDecision: ask` with the specific reason — or
   `deny` when the hook payload carries an `agent_id`, i.e. the call came
   from a background subagent. No operator is reachable there, so an `ask`
@@ -330,34 +337,27 @@ Add to `~/.claude/settings.json`:
 > `Bash(aws ecs list-services*)`) are fine; they just short-circuit YOLT
 > for the matching subset.
 
-## User whitelist as a secondary upgrade pass
+## User whitelist (removed in the auto-mode realignment)
 
-YOLT reads your `permissions.allow` Bash() entries from
-`~/.claude/settings.json`, the project's `.claude/settings.json`, and
-`.claude/settings.local.json`. After the rule classifier runs on each
-AST `command` node, any node that would otherwise be `unknown` or
-`unsafe` is upgraded to `safe` if its reconstructed argv matches one
-of those patterns.
+YOLT used to read your `permissions.allow` Bash() entries from
+`~/.claude/settings.json` and the project settings, and upgrade any
+matching `unknown` or `unsafe` node to `safe`. That was the second way it
+granted approval — sourced from your config rather than its own rules, but
+a grant all the same.
 
-This earns its keep on compound forms. The built-in matcher only sees
-the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
-already whitelisted (`Bash(mycli list*)`) still prompts. YOLT walks
-into the loop body and matches each command against the whitelist.
+It is gone
+([#98](https://github.com/voitta-ai/voitta-yolt/issues/98)). Under auto
+mode a hook that answers on the host's behalf is a classifier bypass the
+host cannot see, and that is as true of a grant you configured as of one
+YOLT decided. **YOLT no longer reads your settings files at all.**
 
-Two rules apply:
+Your `permissions.allow` entries still work — Claude Code honors them
+itself, which is the appropriate place for them.
 
-- The match uses `fnmatch` glob semantics — the same semantics Claude
-  Code's outer matcher uses. `Bash(env)` matches `env` exactly;
-  `Bash(aws s3 ls*)` matches anything that starts with `aws s3 ls`.
-- A match is an explicit user override. Keep patterns narrow:
-  `Bash(aws ecs list-services*)` is fine; `Bash(git *)` or
-  `Bash(gh *)` will allow matching mutating commands anywhere YOLT
-  reconstructs the same argv, including inside compound forms.
-
-For common self-PR workflow writes (`git push`, `git commit`,
-`gh issue create`, `gh pr comment`, ...), YOLT's `ask` message now
-includes a paste-ready `Bash(...)` suggestion when no allow pattern
-matched yet.
+For common workflow writes (`git push`, `git commit`, `gh issue create`,
+`gh pr comment`, ...), YOLT's `ask` message still includes a paste-ready
+`Bash(...)` suggestion. It is advice to you, not a grant: nothing happens
+until you add it yourself, and Claude Code — not YOLT — is what acts on it.
 
 ## Dependencies
 

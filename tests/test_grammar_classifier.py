@@ -10,7 +10,6 @@ calls in production. Coverage targets:
   - Quoting: bash `'\\''` close-escape-open idiom, `$'...'` ANSI-C strings,
     concatenated strings.
   - Heredocs (with python body), redirects, process substitution.
-  - User whitelist upgrade, including explicit overrides of unsafe atoms.
 
 Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 
@@ -38,7 +37,7 @@ from rule_classifier import (  # noqa: E402
 from yolt_analyzer import SafetyAnalyzer, load_rules as load_py_rules  # noqa: E402
 
 
-def _make_classifier(allow_patterns=None):
+def _make_classifier():
     shell_rules = load_shell_rules(REPO_ROOT / "rules")
     py_rules = load_py_rules(REPO_ROOT / "rules")
 
@@ -48,7 +47,6 @@ def _make_classifier(allow_patterns=None):
     return GrammarClassifier(
         shell_rules,
         python_analyzer_factory=factory,
-        allow_patterns=allow_patterns or [],
     )
 
 
@@ -890,12 +888,12 @@ class TestUnsafeWriteTargets(unittest.TestCase):
         self.assertIn("~/.bashrc", reason)
         self.assertIn("protected", reason)
 
-    def test_whitelist_still_overrides_unsafe_redirect(self):
-        # Consistent with every other unsafe atom: an explicit user allow
-        # pattern upgrades the deny-path write to safe.
-        clf = _make_classifier(allow_patterns=["echo *"])
-        d, _ = clf.classify("echo x > /etc/profile")
-        self.assertEqual(d, DECISION_SAFE)
+    def test_protected_redirect_is_not_overridable(self):
+        # Issue #98 removed the user-allow-pattern upgrade, so nothing in
+        # the user's settings can talk a protected-path write back down
+        # to safe. This used to be the one deny-path escape hatch.
+        d, _ = _make_classifier().classify("echo x > /etc/profile")
+        self.assertEqual(d, DECISION_UNSAFE)
 
     def test_safe_first_redirect_does_not_mask_unsafe_second(self):
         # Every write redirect is evaluated, not just the first: a safe
@@ -921,53 +919,12 @@ class TestUnsafeWriteTargets(unittest.TestCase):
         self.assertDecision("echo x > /tmp/a > /tmp/b", DECISION_SAFE)
 
 
-class TestClassifierAllowPatterns(unittest.TestCase):
-    """Whitelist upgrades unknown and unsafe matches to safe."""
+class TestAllowHintSuggestions(unittest.TestCase):
+    """`suggest_allow_pattern` still produces the hint shown alongside an
+    `ask`, even though issue #98 removed the classifier's own honoring of
+    user allow patterns. The hint is advice to the operator, not a grant."""
 
-    def test_unknown_command_upgraded_to_safe(self):
-        clf = _make_classifier(allow_patterns=["mycli *"])
-        d, r = clf.classify("mycli foo --bar")
-        self.assertEqual(d, DECISION_SAFE)
-        self.assertIn("mycli *", r)
-
-    def test_unknown_aws_op_upgraded(self):
-        clf = _make_classifier(allow_patterns=["aws * weird-op*"])
-        d, _ = clf.classify("aws ec2 weird-op --flag")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_unsafe_overridden_by_whitelist(self):
-        clf = _make_classifier(allow_patterns=["aws *"])
-        d, _ = clf.classify("aws iam delete-user --user-name foo")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_unsafe_in_compound_overridden(self):
-        clf = _make_classifier(allow_patterns=["aws *", "rm *"])
-        d, _ = clf.classify("aws s3 ls && rm -rf /etc")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_no_whitelist_match_stays_unknown(self):
-        clf = _make_classifier(allow_patterns=["aws *"])
-        d, _ = clf.classify("somecommand_unknown")
-        self.assertEqual(d, DECISION_UNKNOWN)
-
-    def test_decomposed_atoms_match_whitelist(self):
-        # The outer `for` wrapper would not match `Bash(aws s3 ls*)`, but
-        # the grammar walker classifies each iteration body separately.
-        clf = _make_classifier(allow_patterns=["aws s3 ls*"])
-        d, _ = clf.classify("for b in foo bar; do aws s3 ls s3://$b/; done")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_writes_to_file_upgraded_when_whitelisted(self):
-        clf = _make_classifier(allow_patterns=["echo *"])
-        d, _ = clf.classify("echo x > /etc/profile")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_empty_allow_patterns_unchanged_behavior(self):
-        clf = _make_classifier(allow_patterns=[])
-        d, _ = clf.classify("somecommand_unknown")
-        self.assertEqual(d, DECISION_UNKNOWN)
-
-    def test_suggested_allow_hints_round_trip(self):
+    def test_suggested_allow_hints(self):
         cases = [
             ("git -C /tmp/wt add file.txt", "Bash(git -C * add*)"),
             (
@@ -978,9 +935,17 @@ class TestClassifierAllowPatterns(unittest.TestCase):
         for command, expected_hint in cases:
             hint = _make_classifier().suggest_allow_pattern(command)
             self.assertEqual(hint, expected_hint)
-            inner = hint[len("Bash("):-1]
-            d, _ = _make_classifier(allow_patterns=[inner]).classify(command)
-            self.assertEqual(d, DECISION_SAFE, command)
+
+    def test_allow_pattern_no_longer_upgrades_a_decision(self):
+        # The whole point of #98: whatever the user has in
+        # permissions.allow, this classifier does not read it and does
+        # not turn an unsafe or unknown command into a safe one.
+        clf = _make_classifier()
+        self.assertEqual(clf.classify("mycli foo --bar")[0], DECISION_UNKNOWN)
+        self.assertEqual(
+            clf.classify("aws iam delete-user --user-name foo")[0],
+            DECISION_UNSAFE,
+        )
 
 
 class TestSqlCli(unittest.TestCase):
