@@ -27,7 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_DIR = REPO_ROOT / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
 
-from grammar_classifier import GrammarClassifier  # noqa: E402
+from grammar_classifier import (  # noqa: E402
+    GrammarClassifier,
+    classify_command,
+)
 from rule_classifier import (  # noqa: E402
     DECISION_SAFE,
     DECISION_UNKNOWN,
@@ -888,10 +891,14 @@ class TestUnsafeWriteTargets(unittest.TestCase):
         self.assertIn("~/.bashrc", reason)
         self.assertIn("protected", reason)
 
-    def test_protected_redirect_is_not_overridable(self):
-        # Issue #98 removed the user-allow-pattern upgrade, so nothing in
-        # the user's settings can talk a protected-path write back down
-        # to safe. This used to be the one deny-path escape hatch.
+    def test_protected_redirect_is_unsafe(self):
+        # Pre-existing behaviour, restated after #98 removed the one
+        # escape hatch that could override it. Deliberately NOT claiming
+        # to pin the removal: with no patterns supplied this assertion
+        # holds on the old code too. The removal is pinned end-to-end in
+        # test_yolt_hook.TestHookIgnoresUserAllowPatterns, which writes a
+        # real settings file, and structurally by
+        # TestAllowHintSuggestions.test_classifier_refuses_allow_patterns_outright.
         d, _ = _make_classifier().classify("echo x > /etc/profile")
         self.assertEqual(d, DECISION_UNSAFE)
 
@@ -936,16 +943,17 @@ class TestAllowHintSuggestions(unittest.TestCase):
             hint = _make_classifier().suggest_allow_pattern(command)
             self.assertEqual(hint, expected_hint)
 
-    def test_allow_pattern_no_longer_upgrades_a_decision(self):
-        # The whole point of #98: whatever the user has in
-        # permissions.allow, this classifier does not read it and does
-        # not turn an unsafe or unknown command into a safe one.
-        clf = _make_classifier()
-        self.assertEqual(clf.classify("mycli foo --bar")[0], DECISION_UNKNOWN)
-        self.assertEqual(
-            clf.classify("aws iam delete-user --user-name foo")[0],
-            DECISION_UNSAFE,
-        )
+    def test_classifier_refuses_allow_patterns_outright(self):
+        # The classifier-level pin for #98. Asserting "an unknown stays
+        # unknown" here would be vacuous — it passes on the old code too,
+        # because the old constructor defaulted to no patterns. The
+        # non-vacuous statement is that the parameter is gone, so no
+        # caller can reintroduce the upgrade by passing one.
+        shell_rules = load_shell_rules(REPO_ROOT / "rules")
+        with self.assertRaises(TypeError):
+            GrammarClassifier(shell_rules, allow_patterns=["aws *"])
+        with self.assertRaises(TypeError):
+            classify_command("aws s3 ls", shell_rules, allow_patterns=["aws *"])
 
 
 class TestSqlCli(unittest.TestCase):
