@@ -16,8 +16,11 @@ on:
     paths-ignore:
       - '.github/**'
       - 'tests/**'
+      - 'docs/**'
+      - 'scripts/**'
       - 'HANDOFF.md'
       - 'CLAUDE.md'
+      - '.gitignore'
 
 permissions:
   contents: read

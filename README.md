@@ -263,11 +263,11 @@ re-extracts nothing: users keep running the old code. Not hypothetical —
 the version sat at `0.1.0` from the initial ship through issue #78 and
 every change in between was invisible to installed copies.
 
-`CLAUDE.md` has the full convention: which semver part to bump for what,
-and how to tag under this repo's squash-merge policy (edit the version in
-the PR; tag master's squash commit after the merge). `scripts/release.sh
-<version>` rewrites and validates the field, but its commit-and-tag half
-does not fit squash merges — see `CLAUDE.md`.
+`CLAUDE.md` has the full convention: which semver part to bump for what.
+Tagging and release notes are automatic — a workflow fails any PR into
+master whose version does not advance, then tags and cuts the release
+from master's squash commit. The only manual step is editing the version
+field inside the PR.
 
 **One-time — to list on Anthropic's community marketplace.** Validate
 (the same check Anthropic runs on submit), then submit the repo once:
