@@ -1,6 +1,6 @@
 {
   "name": "yolt",
-  "version": "0.1.0",
+  "version": "1.0.4",
   "description": "Deterministic pre-execution guard for Bash: decomposes compound commands, heredocs and command substitutions with tree-sitter, analyzes inline Python by AST, flags credentials on the command line, and redacts them from its own logs. Narrowing to deny-only in v2.0.0 now that Claude Code auto mode vets tool calls.",
   "author": {
     "name": "voitta-ai"

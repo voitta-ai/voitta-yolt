@@ -27,6 +27,12 @@ permissions:
 
 env:
   VERSION_FILE: .claude-plugin/plugin.json
+  # Codex pins on its own manifest's version string exactly as Claude Code does,
+  # so the two must move together or Codex installs freeze on a cached copy.
+  # Nothing guarded this before, which is how .codex-plugin drifted to 0.1.0
+  # while .claude-plugin was at 1.0.3. See claude-code-codex-plugin-parity in
+  # voitta-ai/skillz.
+  CODEX_VERSION_FILE: .codex-plugin/plugin.json
 
 jobs:
   # PR side. Nothing ships without a version bump: the version is the cache
@@ -39,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version must advance
+      - name: Version must advance, and both manifests must agree
         env:
           BASE: ${{ github.base_ref }}
         run: |
@@ -54,7 +60,12 @@ jobs:
             echo "::error::$new does not advance past $old."
             exit 1
           fi
-          echo "$old -> $new"
+          codex=$(jq -r .version "$CODEX_VERSION_FILE")
+          if [ "$codex" != "$new" ]; then
+            echo "::error::$CODEX_VERSION_FILE is $codex, expected $new - bump both manifests."
+            exit 1
+          fi
+          echo "$old -> $new (claude + codex in sync)"
 
   # master side. The version is new by the time we get here, so cut the tag
   # and the release. Notes come from the merged PR titles since the previous
