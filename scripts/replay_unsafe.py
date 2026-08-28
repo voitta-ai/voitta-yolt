@@ -157,6 +157,30 @@ def unsafe_by_reason(results):
     return retval
 
 
+def exit_code(args, pct, lost):
+    """Non-zero only where a non-zero actually means something.
+
+    Low agreement is a hard failure: the replay reproduced its own corpus
+    badly, so every number the run produced describes some other build, and a
+    caller that consumes them is consuming noise.
+
+    A non-empty `lost_unsafe` is NOT a failure by default, and this asymmetry
+    is deliberate. Phase 3 exists in order to delegate commands to the host,
+    so every legitimate `--diff` run is expected to list some. Failing on it
+    would mean the tool reports failure on success, and the review step it
+    feeds (#100: "ships when each shape has been read and accepted as
+    delegable") is a human judgement that an exit code cannot stand in for.
+    `--fail-on-lost` is there for a caller that genuinely wants a
+    zero-tolerance gate.
+    """
+    retval = 0
+    if pct < args.min_agreement:
+        retval = 2
+    elif args.fail_on_lost and lost:
+        retval = 3
+    return retval
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -182,6 +206,19 @@ def main():
         "--diff",
         metavar="BASELINE.json",
         help="report commands that were unsafe in BASELINE and are not now",
+    )
+    parser.add_argument(
+        "--min-agreement",
+        type=float,
+        default=99.0,
+        help="exit 2 if agreement with the logged decisions falls below this "
+             "percentage; a run below it is measuring the wrong build",
+    )
+    parser.add_argument(
+        "--fail-on-lost",
+        action="store_true",
+        help="with --diff, exit 3 if any command lost its unsafe "
+             "classification. OFF by default -- see the note in --help",
     )
     parser.add_argument(
         "--truncation-cap",
@@ -245,8 +282,9 @@ def main():
         }
         if lost is not None:
             payload["lost_unsafe"] = lost
+            payload["lost_unsafe_count"] = len(lost)
         print(json.dumps(payload, indent=2))
-        return 0
+        return exit_code(args, pct, lost)
 
     pct = 100.0 * matched / total if total else 0.0
     kept = "including" if args.include_truncated else "excluding"
@@ -256,9 +294,9 @@ def main():
     print(f"classifier: {hooks_dir}")
     print(f"rules:      {rules_dir}")
     print(f"agreement with logged decision: {matched}/{total} ({pct:.1f}%)")
-    if pct < 99.0:
-        print("  WARNING: low agreement -- is --hooks-dir the build that "
-              "produced this log?")
+    if pct < args.min_agreement:
+        print(f"  FAIL: agreement below --min-agreement ({args.min_agreement}%)"
+              " -- is --hooks-dir the build that produced this log?")
     print()
     print(f"unsafe: {len(unsafe_commands)} commands across "
           f"{len(grouped)} distinct reasons")
@@ -282,7 +320,7 @@ def main():
             print(f"  {flat[:110]}")
         if len(lost) > 40:
             print(f"  ... {len(lost) - 40} more (use --json for the full set)")
-    return 0
+    return exit_code(args, pct, lost)
 
 
 if __name__ == "__main__":
