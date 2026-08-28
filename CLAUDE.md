@@ -2,13 +2,21 @@
 
 ## Bump the plugin version on every merge that ships
 
-`.claude-plugin/plugin.json#version` is the single source of truth for the
-plugin version, and Claude Code caches an extracted copy of the plugin under
-`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`. That path is
-keyed by the version string, so `claude plugin update` compares installed
-version against available version and stops there. **If the version did not
-change, it reports "up to date" and re-extracts nothing — the user keeps
-running the old code no matter how many commits landed on master.**
+The version lives in **two** manifests that must always carry the same
+string: `.claude-plugin/plugin.json#version` and
+`.codex-plugin/plugin.json#version`. Claude Code caches an extracted copy of
+the plugin under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`,
+Codex does the same against its own manifest, and both paths are keyed by the
+version string — so `claude plugin update` compares installed version against
+available version and stops there. **If the version did not change, it reports
+"up to date" and re-extracts nothing — the user keeps running the old code no
+matter how many commits landed on master.**
+
+Bumping only one manifest fails the PR gate. Bumping only `.claude-plugin`
+and merging past the gate would leave every Codex install frozen on the
+cached old version with nothing reported anywhere, which is how
+`.codex-plugin` once drifted to `0.1.0` while `.claude-plugin` was at
+`1.0.3`.
 
 This is not theoretical: the version sat at `0.1.0` from the initial ship
 until issue #78, and every behavior change in between was invisible to
@@ -55,7 +63,8 @@ When a single PR mixes levels, take the highest one.
 Do not tag by hand. `.github/workflows/release.yml` owns both halves:
 
 1. On a PR into master, the `version-bumped` job fails the PR unless
-   `.claude-plugin/plugin.json#version` advances past master's. That is the
+   `.claude-plugin/plugin.json#version` advances past master's *and*
+   `.codex-plugin/plugin.json#version` matches it exactly. That is the
    enforcement behind "every shipping merge bumps" above. The exemption
    above is a `paths-ignore` on the workflow's `pull_request` trigger: a PR
    touching only `.github/`, `tests/`, `docs/`, `scripts/`, `.gitignore`,
@@ -65,8 +74,11 @@ Do not tag by hand. `.github/workflows/release.yml` owns both halves:
    GitHub release at master's squash commit with `--generate-notes`.
 
 So the only manual step is editing the version field inside the PR.
-Edit `.claude-plugin/plugin.json#version` by hand; the `version-bumped`
-job is what validates it.
+Edit it by hand in **both** `.claude-plugin/plugin.json` and
+`.codex-plugin/plugin.json`; the `version-bumped` job is what validates the
+pair. The tag and release read `.claude-plugin` alone, which is why a
+forgotten `.codex-plugin` is invisible after the merge and has to be caught
+on the PR.
 
 Two consequences worth knowing:
 
