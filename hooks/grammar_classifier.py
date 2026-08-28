@@ -289,8 +289,30 @@ class GrammarClassifier:
         return self._slice(node, src)
 
     def _reconstruct_string(self, node, src):
+        """Rebuild the value of a double-quoted string from its children.
+
+        The bytes between two adjacent children are part of the string and
+        have to be carried across (#115). tree-sitter-bash ends a
+        `string_content` run at a newline and starts a fresh one after it,
+        so a multi-line `"..."` arrives as one child per line with the
+        newlines belonging to no child at all. Concatenating only the
+        children welds every line onto the next: a multi-line
+        `python3 -c "..."` reached the Python analyzer as a single line,
+        `ast.parse` raised on it, and the inline path turned that into
+        "could not statically analyze inline python3 -c script (parser
+        bailed at line 1)" -- for every such command, since after the weld
+        there is only ever a line 1. The gate then parked read-only scripts
+        for a human, which is the safe direction but the wrong answer.
+
+        Gap bytes are copied verbatim rather than normalized to "\n": what
+        is uncovered is literal string text, and the analyzer downstream
+        wants it exactly as the shell would pass it."""
         out = []
+        prev_end = None
         for c in node.children:
+            if prev_end is not None and c.start_byte > prev_end:
+                out.append(src[prev_end:c.start_byte].decode("utf-8", "replace"))
+            prev_end = c.end_byte
             if c.type == '"':
                 continue
             if c.type in ("command_substitution", "process_substitution",

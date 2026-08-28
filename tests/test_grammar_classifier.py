@@ -415,6 +415,81 @@ class TestMultilineHandling(unittest.TestCase):
         self.assertDecision("# nothing to do", DECISION_SAFE)
 
 
+class TestMultilineDoubleQuotedString(unittest.TestCase):
+    """A double-quoted argument spanning lines keeps its newlines (#115).
+
+    tree-sitter-bash ends a `string_content` run at each newline, and the
+    newline itself is covered by no child -- so rebuilding the string from
+    its children alone welds the lines together. Nothing noticed for a long
+    time because the multi-line arguments already under test were SQL, where
+    a lost newline is still valid SQL. Python is where it shows: the welded
+    source raises in `ast.parse`, the inline `-c` path reports "parser bailed
+    at line 1" (always line 1 -- after the weld there is no other line), and
+    a read-only script is parked for a human to approve.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, r = self.clf.classify(cmd)
+        self.assertEqual(d, expected, msg="cmd={!r}, reason={}".format(cmd, r))
+
+    def test_read_only_inline_python_is_classified_by_content(self):
+        cmd = (
+            'python3 -c "\n'
+            "import json,sys\n"
+            "d=json.load(sys.stdin)\n"
+            "for m in d.get('messages',[]):\n"
+            "    print(m.get('ts'))\n"
+            '"'
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_destructive_inline_python_still_unsafe(self):
+        cmd = (
+            'python3 -c "\n'
+            "import shutil\n"
+            "shutil.rmtree('/Users/x/project')\n"
+            '"'
+        )
+        self.assertDecision(cmd, DECISION_UNSAFE)
+
+    def test_pipeline_into_multiline_python(self):
+        cmd = (
+            'curl -s "https://example.com/x.json" | python3 -c "\n'
+            "import json,sys\n"
+            "print(json.load(sys.stdin))\n"
+            '"'
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_newlines_survive_reconstruction_verbatim(self):
+        """The bytes between children are copied as they are, not normalized.
+
+        Asserted on the rebuilt argv rather than on a decision, because a
+        decision only shows that the source parsed -- it would still pass if
+        the newlines came back as a space or as an escape."""
+        cmd = 'python3 -c "\nimport os\nprint(os.getcwd())\n"'
+        src = cmd.encode("utf-8")
+        tree = self.clf._parser.parse(src)
+        commands = []
+        self.clf._collect_primary_command_nodes(tree.root_node, commands)
+        argv = self.clf._argv_from_command(commands[0], src)
+        self.assertEqual(argv[-1], "\nimport os\nprint(os.getcwd())\n")
+
+    def test_substitution_inside_multiline_string_is_still_masked(self):
+        """Gap-filling must not hand a command substitution back as text."""
+        cmd = 'echo "line one\n$(rm -rf /tmp/x)\nline three"'
+        src = cmd.encode("utf-8")
+        tree = self.clf._parser.parse(src)
+        commands = []
+        self.clf._collect_primary_command_nodes(tree.root_node, commands)
+        argv = self.clf._argv_from_command(commands[0], src)
+        self.assertNotIn("rm -rf", argv[-1])
+        self.assertEqual(argv[-1].count("\n"), 2)
+
 class TestValuelessGlobalFlags(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
