@@ -334,6 +334,10 @@ class GitDenyPolicy:
             targets = _push_targets(argv, state.get("branch"))
             if not targets:
                 return None
+            if "*" in targets:
+                return ("pushes every branch (--all/--mirror), which "
+                        "includes the default branch ({})".format(
+                            default_branch))
             if default_branch in targets:
                 return "would push to the default branch ({})".format(
                     default_branch
@@ -371,21 +375,27 @@ def _push_targets(argv, current_branch):
     """Every branch a `git push` would land on, or None if argv cannot say.
 
     Returns a set. A push can name several refspecs at once, and taking only
-    the last one -- as an earlier version of this did -- lets
-    `git push origin master feature/x` slip past the default-branch guard,
-    because the guard only ever looked at `feature/x`.
+    the last one -- as the first version of this did -- let
+    `git push origin master feature/x` slip past the default-branch guard.
 
-    With no refspec, git pushes the current branch, so the answer comes from
-    repository state rather than the command. None means unresolvable, which
-    denies nothing:
+    The bulk flags are not interchangeable and must not be handled as one
+    group, which was the second bug here:
 
-    - `--all` / `--mirror` / `--tags` push a whole namespace rather than a
-      named branch, so the destination set is not derivable from argv.
-    - a variable, a glob, or a `refs/` ref outside `refs/heads/`.
+    - `--all` and `--mirror` push every branch, so they necessarily include
+      the default branch when it exists. They are a target, not an unknown.
+    - `--tags` pushes tags *in addition to* whatever refspecs are given. It
+      says nothing about branches, so it must not suppress parsing of an
+      explicit `master` sitting next to it -- `git push origin master --tags`
+      is still a push at the default branch.
+
+    With no refspec and no bulk flag, git pushes the current branch, so the
+    answer comes from repository state rather than the command. None means
+    unresolvable, which denies nothing.
     """
-    for bulk in ("--all", "--mirror", "--tags"):
-        if bulk in argv:
-            return None
+    if "--all" in argv or "--mirror" in argv:
+        # Pushes every branch. The default branch is in that set by
+        # definition, so this resolves rather than being unknown.
+        return {current_branch, "*"} if current_branch else {"*"}
 
     positionals = [
         tok for tok in argv[1:]
@@ -393,6 +403,9 @@ def _push_targets(argv, current_branch):
     ]
     refspecs = positionals[1:]
     if not refspecs:
+        if "--tags" in argv:
+            # Tags only, no branch touched.
+            return None
         return {current_branch} if current_branch else None
 
     targets = set()
@@ -473,23 +486,3 @@ def _resolve_directory(c_target, directory):
 
 def _has_expansion(token):
     return "$" in token or "`" in token or "*" in token
-
-
-def _pushes_elsewhere(argv, branch):
-    """True when a `git push` names a ref other than the current branch.
-
-    `git push` and `git push origin <current-branch>` stay inside the
-    policy; `git push origin master` or any `src:dst` refspec is a push at
-    something the predicates never examined, so it falls back to `ask`.
-    """
-    positionals = [
-        tok for tok in argv[1:]
-        if not tok.startswith("-") and tok != "push"
-    ]
-    # positionals[0] is the remote; anything after it is a refspec.
-    for refspec in positionals[1:]:
-        if ":" in refspec:
-            return True
-        if refspec != branch:
-            return True
-    return False

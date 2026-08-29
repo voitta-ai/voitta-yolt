@@ -155,6 +155,17 @@ class DeniesWhenItShould(unittest.TestCase):
         self.assertIsNotNone(
             p.evaluate(["git", "push", "origin", "master"], HERE))
 
+    def test_push_all_denies_because_it_includes_the_default_branch(self):
+        p = policy(PUSH_DEFAULT, branch="feature/x")
+        reason = p.evaluate(["git", "push", "--all", "origin"], HERE)
+        self.assertIsNotNone(reason)
+        self.assertIn("every branch", reason)
+
+    def test_explicit_default_branch_alongside_tags(self):
+        p = policy(PUSH_DEFAULT, branch="feature/x")
+        self.assertIsNotNone(
+            p.evaluate(["git", "push", "origin", "master", "--tags"], HERE))
+
     def test_force_push_over_someone_elses_commits(self):
         p = policy(PUSH_FORCE_SHARED,
                    log_authors="me@example.com\nsomeone@else.org")
@@ -216,10 +227,22 @@ class PushTargetResolution(unittest.TestCase):
         self.assertIsNone(
             _push_targets(["git", "push", "origin", "refs/tags/v1"], "feat"))
 
-    def test_bulk_flags_are_unresolvable(self):
-        for flag in ("--all", "--mirror", "--tags"):
-            self.assertIsNone(
-                _push_targets(["git", "push", flag, "origin"], "feat"), flag)
+    def test_tags_does_not_suppress_an_explicit_refspec(self):
+        # From the re-review on #122, and a bug the *previous* fix
+        # introduced: lumping --tags in with --all made
+        # `git push origin master --tags` unresolvable, so the
+        # default-branch guard stopped seeing the explicit `master`.
+        for argv in (["git", "push", "origin", "master", "--tags"],
+                     ["git", "push", "--tags", "origin", "master"]):
+            self.assertEqual(_push_targets(argv, "feat"), {"master"}, argv)
+
+    def test_tags_alone_touches_no_branch(self):
+        self.assertIsNone(_push_targets(["git", "push", "--tags"], "feat"))
+
+    def test_all_and_mirror_include_every_branch(self):
+        for flag in ("--all", "--mirror"):
+            targets = _push_targets(["git", "push", flag, "origin"], "feat")
+            self.assertIn("*", targets, flag)
 
     def test_expansion_is_unresolvable(self):
         self.assertIsNone(
