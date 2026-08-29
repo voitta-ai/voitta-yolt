@@ -331,10 +331,10 @@ class GitDenyPolicy:
             default_branch = state.get("default_branch")
             if not default_branch:
                 return None
-            target = _push_target(argv, state.get("branch"))
-            if target is None:
+            targets = _push_targets(argv, state.get("branch"))
+            if not targets:
                 return None
-            if target == default_branch:
+            if default_branch in targets:
                 return "would push to the default branch ({})".format(
                     default_branch
                 )
@@ -367,30 +367,46 @@ class GitDenyPolicy:
         return retval
 
 
-def _push_target(argv, current_branch):
-    """The branch a `git push` would land on, or None if argv cannot say.
+def _push_targets(argv, current_branch):
+    """Every branch a `git push` would land on, or None if argv cannot say.
 
-    With no refspec, git pushes the current branch -- so the answer comes
-    from repository state, not from the command. With an explicit refspec,
-    the destination is its right-hand side. Anything this cannot resolve
-    (a variable, a glob, a tag ref) returns None and therefore never denies.
+    Returns a set. A push can name several refspecs at once, and taking only
+    the last one -- as an earlier version of this did -- lets
+    `git push origin master feature/x` slip past the default-branch guard,
+    because the guard only ever looked at `feature/x`.
+
+    With no refspec, git pushes the current branch, so the answer comes from
+    repository state rather than the command. None means unresolvable, which
+    denies nothing:
+
+    - `--all` / `--mirror` / `--tags` push a whole namespace rather than a
+      named branch, so the destination set is not derivable from argv.
+    - a variable, a glob, or a `refs/` ref outside `refs/heads/`.
     """
+    for bulk in ("--all", "--mirror", "--tags"):
+        if bulk in argv:
+            return None
+
     positionals = [
         tok for tok in argv[1:]
         if not tok.startswith("-") and tok != "push"
     ]
     refspecs = positionals[1:]
     if not refspecs:
-        return current_branch
-    retval = None
+        return {current_branch} if current_branch else None
+
+    targets = set()
     for refspec in refspecs:
         if _has_expansion(refspec):
             return None
         candidate = refspec.split(":")[-1] if ":" in refspec else refspec
-        candidate = candidate.replace("refs/heads/", "")
-        if candidate.startswith("refs/"):
-            return None
-        retval = candidate
+        if candidate.startswith("refs/heads/"):
+            candidate = candidate[len("refs/heads/"):]
+        elif candidate.startswith("refs/"):
+            # A tag or notes ref is not a branch; nothing to compare.
+            continue
+        targets.add(candidate)
+    retval = targets or None
     return retval
 
 

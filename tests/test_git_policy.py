@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from git_policy import (  # noqa: E402
-    SHARED, SOLO, UNDETERMINED, GitDenyPolicy, GitProbe, _push_target,
+    SHARED, SOLO, UNDETERMINED, GitDenyPolicy, GitProbe, _push_targets,
 )
 
 
@@ -184,19 +184,46 @@ class LeavesAloneWhatItShould(unittest.TestCase):
 
 class PushTargetResolution(unittest.TestCase):
     def test_no_refspec_uses_current_branch(self):
-        self.assertEqual(_push_target(["git", "push", "-f"], "master"), "master")
+        self.assertEqual(_push_targets(["git", "push", "-f"], "master"),
+                         {"master"})
 
-    def test_explicit_refspec_wins(self):
+    def test_explicit_refspec(self):
         self.assertEqual(
-            _push_target(["git", "push", "origin", "master"], "feat"), "master")
+            _push_targets(["git", "push", "origin", "master"], "feat"),
+            {"master"})
 
     def test_src_colon_dst_uses_the_destination(self):
         self.assertEqual(
-            _push_target(["git", "push", "origin", "HEAD:master"], "feat"),
-            "master")
+            _push_targets(["git", "push", "origin", "HEAD:master"], "feat"),
+            {"master"})
+
+    def test_every_refspec_counts_not_just_the_last(self):
+        # From the adversarial review on #122. Taking only the last refspec
+        # let `git push origin master feature/x` past the default-branch
+        # guard, because the guard only ever saw `feature/x`.
+        self.assertEqual(
+            _push_targets(["git", "push", "origin", "master", "feature/x"],
+                          "feature/x"),
+            {"master", "feature/x"})
+
+    def test_refs_heads_is_normalised(self):
+        self.assertEqual(
+            _push_targets(["git", "push", "origin", "refs/heads/master"],
+                          "feat"),
+            {"master"})
+
+    def test_tag_ref_is_not_a_branch(self):
+        self.assertIsNone(
+            _push_targets(["git", "push", "origin", "refs/tags/v1"], "feat"))
+
+    def test_bulk_flags_are_unresolvable(self):
+        for flag in ("--all", "--mirror", "--tags"):
+            self.assertIsNone(
+                _push_targets(["git", "push", flag, "origin"], "feat"), flag)
 
     def test_expansion_is_unresolvable(self):
-        self.assertIsNone(_push_target(["git", "push", "origin", "$B"], "feat"))
+        self.assertIsNone(
+            _push_targets(["git", "push", "origin", "$B"], "feat"))
 
 
 if __name__ == "__main__":
