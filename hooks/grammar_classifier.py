@@ -23,7 +23,7 @@ import tree_sitter_bash as _tsb
 from tree_sitter import Language, Parser
 
 from rule_classifier import (
-    DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN,
+    DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
     SUBSTITUTION_PLACEHOLDER,
     RuleClassifier,
     aggregate_decisions,
@@ -49,9 +49,16 @@ class GrammarClassifier:
 
     MAX_RECURSION_DEPTH = 8
 
-    def __init__(self, rules, python_analyzer_factory=None):
+    def __init__(self, rules, python_analyzer_factory=None, cwd=None,
+                 policy=None):
         self.rules = rules
         self.python_analyzer_factory = python_analyzer_factory
+        # The shell's directory when the command starts, and the deny
+        # policy that may consult git state there. `_cwd` is re-derived per
+        # `classify()` call because a leading `cd` moves it.
+        self.cwd = cwd
+        self.policy = policy
+        self._cwd = cwd
         self.safe_write_targets = list(rules.get("safe_write_targets", ["/dev/null"]))
         self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
         self._rules = RuleClassifier(
@@ -75,6 +82,9 @@ class GrammarClassifier:
 
         if root.has_error:
             return (DECISION_UNKNOWN, "tree-sitter parse error")
+
+        if _depth == 0:
+            self._cwd = self.cwd
 
         decisions = []
         self._walk(root, src, decisions, _depth)
@@ -215,10 +225,57 @@ class GrammarClassifier:
         for c in node.children:
             self._collect_substitutions(c, src, sub_decisions, _depth + 1)
 
+        # A literal `cd` moves the directory the policy layer will judge,
+        # and it has to be tracked before the sibling commands are
+        # classified: `cd <repo> && git push` is the whole reason this
+        # exists.
+        if cmd_name == "cd":
+            self._track_cd(argv)
+
         result = self._rules.classify_tokens(argv)
+        result = self._maybe_deny_by_policy(argv, result)
         if sub_decisions:
             return aggregate_decisions(sub_decisions + [result])
         return result
+
+    def _track_cd(self, argv):
+        """Follow a literal `cd` so the policy layer judges the directory
+        the later commands actually run in.
+
+        `cd /path/to/worktree && git push --force` is the shape this exists
+        for. Anything the walker cannot resolve statically -- an expansion,
+        `cd -`, a substitution -- sets the tracked directory to None, which
+        disables the policy for the rest of the invocation rather than
+        letting it judge the wrong tree.
+        """
+        args = [a for a in argv[1:] if not a.startswith("-")]
+        if not args:
+            self._cwd = os.path.expanduser("~")
+            return
+        target = args[0]
+        if target == "-" or "$" in target or "`" in target or "*" in target:
+            self._cwd = None
+            return
+        target = os.path.expanduser(target)
+        if os.path.isabs(target):
+            self._cwd = target
+        elif self._cwd is not None:
+            self._cwd = os.path.normpath(os.path.join(self._cwd, target))
+
+    def _maybe_deny_by_policy(self, argv, result):
+        """Give the policy layer a chance to upgrade `unsafe` -> `deny`.
+
+        Only `unsafe` is offered. The policy exists to refuse a narrow set
+        of writes the static rules already flagged; it must never be able
+        to reach something the rules cleared, so `safe` and `unknown` are
+        not routed through it.
+        """
+        if self.policy is None or result[0] != DECISION_UNSAFE:
+            return result
+        reason = self.policy.evaluate(argv, self._cwd)
+        if reason is None:
+            return result
+        return (DECISION_DENY, reason)
 
     def _collect_substitutions(self, node, src, decisions, _depth):
         if node.type in ("command_substitution", "process_substitution"):

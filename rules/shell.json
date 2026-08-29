@@ -727,5 +727,57 @@
       ],
       "_note": "duckdb CLI mirrors sqlite3 surface: DB [SQL], plus -c/-cmd flags."
     }
+  },
+
+  "_policies_note": "Deny policies. A policy runs only when the static rules already classified the command 'unsafe' and its argv matches an entry, and it can only upgrade 'unsafe' to 'deny'. Each name in 'refuse_when' is a condition under which the command is refused; a condition that cannot be established never fires, so no probe failure can produce a deny. Valid predicates: default_branch_target, shared_history, primary_checkout. Set YOLT_NO_POLICIES=1 to disable the layer.",
+
+  "policies": {
+    "git": {
+      "enabled": true,
+      "deny": [
+        {
+          "_note": "Pushing at the default branch. Over 12 days of dogfooding this fired zero times -- every observed push targeted a feature branch -- so it is a net safety guard with no measured friction. 24 of 76 observed pushes carried no refspec, so argv alone cannot tell what they target; that is why it needs a probe.",
+          "argv": [
+            "git",
+            "push"
+          ],
+          "refuse_when": [
+            "default_branch_target"
+          ]
+        },
+        {
+          "_note": "Force-pushing or deleting a branch carrying commits somebody else authored. --force-with-lease is deliberately included: it protects against a moved remote, not against overwriting a coauthor whose commits you already have.",
+          "argv": [
+            "git",
+            "push"
+          ],
+          "only_flags": [
+            "--force",
+            "-f",
+            "-qf",
+            "--delete",
+            "-d"
+          ],
+          "refuse_when": [
+            "shared_history"
+          ]
+        }
+      ]
+    },
+    "git_worktree_convention": {
+      "_note": "House convention, off by default: commits belong in a linked worktree, not the primary checkout. A local preference, not a universal truth, which is why it ships disabled.",
+      "enabled": false,
+      "deny": [
+        {
+          "argv": [
+            "git",
+            "commit"
+          ],
+          "refuse_when": [
+            "primary_checkout"
+          ]
+        }
+      ]
+    }
   }
 }
