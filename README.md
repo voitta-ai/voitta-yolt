@@ -339,6 +339,21 @@ AST `command` node, any node that would otherwise be `unknown` or
 `unsafe` is upgraded to `safe` if its reconstructed argv matches one
 of those patterns.
 
+`--no-user-allow` turns that pass off for one invocation:
+
+    python3 hooks/grammar_classifier.py --no-user-allow 'gh pr merge 1 --squash'
+    {"decision": "unsafe", "reason": "gh pr merge: mutating", "allow_patterns": 0}
+
+without it, the same command on a machine whose settings allow `Bash(gh pr
+merge*)` comes back `safe`. The flag exists for consumers that are **not** the
+interactive terminal those settings were written for -- a service that
+classifies commands on behalf of whoever can message it inherits the operator's
+personal permissions otherwise, and its auto-run set becomes whatever that
+person once allowed themselves. Only the consumer knows which it is, so the
+Claude Code hook keeps the default. The `allow_patterns` count in the output is
+there so a consumer can log the size of that surface at startup instead of
+guessing at it.
+
 This earns its keep on compound forms. The built-in matcher only sees
 the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
 already whitelisted (`Bash(mycli list*)`) still prompts. YOLT walks

@@ -500,12 +500,26 @@ def classify_command(command, rules, python_analyzer_factory=None, allow_pattern
 
 
 def run_cli():
-    """CLI: read a shell command from argv and print its classification."""
-    if len(sys.argv) < 2:
-        print("Usage: grammar_classifier.py '<shell command>'", file=sys.stderr)
+    """CLI: read a shell command from argv and print its classification.
+
+    `--no-user-allow` drops the Claude Code settings files from the allow-pattern
+    sources. They are permissions a human wrote for an interactive terminal, and
+    a consumer that is not that terminal -- a service classifying commands on
+    behalf of whoever can talk to it -- inherits them silently otherwise, so its
+    auto-run set is whatever the operator once allowed themselves. That is a
+    confused deputy, and only the consumer knows which it is; the Claude Code
+    hook keeps the default.
+    """
+    argv = [a for a in sys.argv[1:] if a != "--no-user-allow"]
+    no_user_allow = len(argv) != len(sys.argv) - 1
+    if not argv:
+        print(
+            "Usage: grammar_classifier.py [--no-user-allow] '<shell command>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    command = sys.argv[1]
+    command = argv[0]
     yolt_dir = Path(__file__).resolve().parent.parent
     rules = load_shell_rules(
         rules_dir=yolt_dir / "rules",
@@ -513,7 +527,7 @@ def run_cli():
     )
 
     cwd = Path.cwd()
-    allow_patterns = load_allow_patterns([
+    allow_patterns = [] if no_user_allow else load_allow_patterns([
         Path.home() / ".claude" / "settings.json",
         cwd / ".claude" / "settings.json",
         cwd / ".claude" / "settings.local.json",
@@ -539,7 +553,14 @@ def run_cli():
         allow_patterns=allow_patterns,
     )
 
-    print(json.dumps({"decision": decision, "reason": reason}, indent=2))
+    # How many allow patterns were in play is part of the verdict's meaning: the
+    # same command classifies differently under a different settings file, and
+    # without this a consumer cannot see -- or log at startup -- how large the
+    # inherited auto-run surface is.
+    print(json.dumps(
+        {"decision": decision, "reason": reason, "allow_patterns": len(allow_patterns)},
+        indent=2,
+    ))
     sys.exit(0)
 
 

@@ -19,7 +19,9 @@ Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 """
 
 import json
+import os
 import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -1216,15 +1218,27 @@ class TestSqlCli(unittest.TestCase):
 class TestClassifierCLI(unittest.TestCase):
     """grammar_classifier.py is also runnable as a standalone CLI."""
 
-    def _run(self, command):
+    def _run(self, command, *flags):
         script = REPO_ROOT / "hooks" / "grammar_classifier.py"
         result = subprocess.run(
-            [sys.executable, str(script), command],
+            [sys.executable, str(script), *flags, command],
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=tempfile.gettempdir(),  # no project .claude/ under it
+            env={**os.environ, "HOME": self.home},
         )
         return json.loads(result.stdout)
+
+    def setUp(self):
+        # A settings file the CLI would inherit, so the flag has something to
+        # refuse. Written under a temp HOME: the real one is the developer's.
+        self.home = tempfile.mkdtemp()
+        claude = Path(self.home) / ".claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(gh pr merge*)"]}})
+        )
 
     def test_cli_reports_safe(self):
         self.assertEqual(self._run("ls /tmp")["decision"], "safe")
@@ -1234,6 +1248,23 @@ class TestClassifierCLI(unittest.TestCase):
 
     def test_cli_reports_unknown(self):
         self.assertEqual(self._run("somecommand_unknown --flag")["decision"], "unknown")
+
+    def test_cli_inherits_user_allow_patterns_by_default(self):
+        # the Claude Code hook's own behavior: a pattern the user allowed
+        # upgrades a mutating command to safe
+        out = self._run("gh pr merge 1 --squash")
+        self.assertEqual(out["decision"], "safe")
+        self.assertIn("allow pattern", out["reason"])
+        self.assertEqual(out["allow_patterns"], 1)
+
+    def test_no_user_allow_drops_them(self):
+        # a consumer that is not that terminal gets the rules' own verdict
+        out = self._run("gh pr merge 1 --squash", "--no-user-allow")
+        self.assertEqual(out["decision"], "unsafe")
+        self.assertEqual(out["allow_patterns"], 0)
+
+    def test_no_user_allow_leaves_read_only_alone(self):
+        self.assertEqual(self._run("ls /tmp", "--no-user-allow")["decision"], "safe")
 
 
 if __name__ == "__main__":
