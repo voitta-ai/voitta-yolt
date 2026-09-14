@@ -246,11 +246,19 @@ def _run_git(directory, args):
     A failed probe must never read as evidence. On the deny side that means
     None propagates to UNDETERMINED and the command is not denied.
     """
+    # stderr is discarded by default: a probe failure is a normal, expected
+    # outcome here, and git chatter on the hook's stderr would land in the
+    # operator's session for something that is not an error. But discarding
+    # it unconditionally makes a misbehaving probe invisible, and in a tool
+    # whose failure mode is "silently stops guarding" (#123) that is the
+    # wrong default to have no escape from. YOLT_POLICY_DEBUG=1 lets it
+    # through. Read at call time, not import time, so it can be set per run.
+    show_stderr = bool(os.environ.get("YOLT_POLICY_DEBUG"))
     try:
         proc = subprocess.run(
             ["git", "-C", directory, "--no-pager"] + args,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=None if show_stderr else subprocess.DEVNULL,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):

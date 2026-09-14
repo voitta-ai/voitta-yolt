@@ -248,12 +248,26 @@ class GrammarClassifier:
         disables the policy for the rest of the invocation rather than
         letting it judge the wrong tree.
         """
-        args = [a for a in argv[1:] if not a.startswith("-")]
+        # `cd -` is the previous directory, which no static walk can know.
+        # It has to be tested BEFORE flags are filtered out, or it is
+        # discarded as a flag and `cd -` silently resolves to $HOME -- which
+        # is both wrong and the opposite of unresolvable.
+        raw = argv[1:]
+        if "-" in raw:
+            self._cwd = None
+            return
+        args = [a for a in raw if not a.startswith("-")]
         if not args:
             self._cwd = os.path.expanduser("~")
             return
         target = args[0]
-        if target == "-" or "$" in target or "`" in target or "*" in target:
+        # Anything the walker cannot resolve to one literal path. Brace
+        # expansion and `?` are here for completeness rather than risk:
+        # an unexpanded `{a,b}` would not exist on disk, so the probe would
+        # fail and deny nothing either way. Marking it explicitly keeps the
+        # unresolvable set a statement of intent instead of a list of the
+        # cases someone happened to think of.
+        if any(ch in target for ch in "$`*{}?"):
             self._cwd = None
             return
         target = os.path.expanduser(target)

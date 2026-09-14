@@ -297,6 +297,16 @@ class ThroughTheClassifier(unittest.TestCase):
         c = self._classifier(HERE, branch="master")
         self.assertEqual(c.classify("cd $D && git push")[0], "unsafe")
 
+    def test_every_unresolvable_cd_shape_disables_the_policy(self):
+        # Brace expansion was the one shape missing from the set. None of
+        # these can deny, because an unexpanded path does not exist and the
+        # probe fails -- this pins the intent rather than the accident.
+        for target in ("$D", "`pwd`", "/tmp/*", "/tmp/{a,b}", "/tmp/?", "-"):
+            c = self._classifier(HERE, branch="master")
+            self.assertEqual(
+                c.classify("cd {} && git push".format(target))[0],
+                "unsafe", target)
+
     def test_deny_outranks_unsafe_siblings(self):
         c = self._classifier(HERE, branch="master")
         self.assertEqual(c.classify("rm -rf /tmp/x && git push")[0], "deny")
@@ -414,6 +424,28 @@ class RunGitConvertsFailuresToNone(unittest.TestCase):
             stdout = b"fatal: not a git repository"
         self._with_subprocess_run(lambda *a, **kw: Proc())
         self.assertIsNone(git_policy._run_git(HERE, ["status"]))
+
+    def test_stderr_is_discarded_by_default_and_shown_under_debug(self):
+        import os
+        import git_policy
+        seen = {}
+
+        class Proc:
+            returncode = 0
+            stdout = b"ok\n"
+
+        def capture(*a, **kw):
+            seen["stderr"] = kw.get("stderr")
+            return Proc()
+        self._with_subprocess_run(capture)
+
+        git_policy._run_git(HERE, ["status"])
+        self.assertEqual(seen["stderr"], git_policy.subprocess.DEVNULL)
+
+        os.environ["YOLT_POLICY_DEBUG"] = "1"
+        self.addCleanup(os.environ.pop, "YOLT_POLICY_DEBUG", None)
+        git_policy._run_git(HERE, ["status"])
+        self.assertIsNone(seen["stderr"])
 
     def test_success_returns_stdout(self):
         import git_policy
