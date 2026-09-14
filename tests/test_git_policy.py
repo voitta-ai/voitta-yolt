@@ -212,10 +212,13 @@ class PushTargetResolution(unittest.TestCase):
         # From the adversarial review on #122. Taking only the last refspec
         # let `git push origin master feature/x` past the default-branch
         # guard, because the guard only ever saw `feature/x`.
-        self.assertEqual(
-            _push_targets(["git", "push", "origin", "master", "feature/x"],
-                          "feature/x"),
-            {"master", "feature/x"})
+        # Asserted in BOTH orders: the original bug returned the last
+        # refspec, so a single-order test passes for the wrong reason
+        # whenever the default branch happens to be last.
+        for argv in (["git", "push", "origin", "master", "feature/x"],
+                     ["git", "push", "origin", "feature/x", "master"]):
+            self.assertEqual(_push_targets(argv, "feature/x"),
+                             {"master", "feature/x"}, argv)
 
     def test_refs_heads_is_normalised(self):
         self.assertEqual(
@@ -297,3 +300,126 @@ class ThroughTheClassifier(unittest.TestCase):
     def test_deny_outranks_unsafe_siblings(self):
         c = self._classifier(HERE, branch="master")
         self.assertEqual(c.classify("rm -rf /tmp/x && git push")[0], "deny")
+
+    def test_mixed_refspec_order_denies_either_way(self):
+        for argv in ("git push origin master feature/x",
+                     "git push origin feature/x master"):
+            c = self._classifier(HERE, branch="feature/x")
+            self.assertEqual(c.classify(argv)[0], "deny", argv)
+
+
+class ProbeFailureNeverDeniesThroughTheClassifier(unittest.TestCase):
+    """The blocking ask from review r1 on #122, and a fair one.
+
+    `FailedProbeNeverDenies` asserts the invariant against GitDenyPolicy
+    directly. That is the layer that cannot see the wiring -- three separate
+    wiring bugs passed every one of those tests while the hook crashed. So
+    the invariant is re-asserted here at the boundary the hook actually
+    uses: a full classify() call, with the failure injected at the probe.
+
+    Expected result in every case is `unsafe`, not `deny` and not silence:
+    the static rules already flagged `git push` as mutating, and a failed
+    probe leaves that standing.
+    """
+
+    def _classify(self, command, **kw):
+        from grammar_classifier import GrammarClassifier
+        from rule_classifier import load_shell_rules
+        rules_dir = Path(__file__).resolve().parent.parent / "rules"
+        rules = load_shell_rules(rules_dir=rules_dir)
+        probe = GitProbe(runner=fake_runner(**kw))
+        policy = GitDenyPolicy(rules["policies"]["git"], probe=probe)
+        classifier = GrammarClassifier(rules, cwd=HERE, policy=policy)
+        retval = classifier.classify(command)
+        return retval
+
+    def test_state_probe_fails(self):
+        # On the default branch, so this would deny if the probe worked.
+        self.assertEqual(
+            self._classify("git push", branch="master", fail=("state",))[0],
+            "unsafe")
+
+    def test_user_email_unset(self):
+        self.assertEqual(
+            self._classify("git push --force", branch="master",
+                           fail=("email", "default_branch"))[0],
+            "unsafe")
+
+    def test_unreadable_history(self):
+        self.assertEqual(
+            self._classify("git push --force", branch="master",
+                           fail=("history", "default_branch"))[0],
+            "unsafe")
+
+    def test_garbled_probe_output(self):
+        def garbled(directory, args):
+            return "not\nenough"
+        probe = GitProbe(runner=garbled)
+        from grammar_classifier import GrammarClassifier
+        from rule_classifier import load_shell_rules
+        rules_dir = Path(__file__).resolve().parent.parent / "rules"
+        rules = load_shell_rules(rules_dir=rules_dir)
+        policy = GitDenyPolicy(rules["policies"]["git"], probe=probe)
+        c = GrammarClassifier(rules, cwd=HERE, policy=policy)
+        self.assertEqual(c.classify("git push")[0], "unsafe")
+
+    def test_empty_probe_output(self):
+        probe = GitProbe(runner=lambda d, a: "")
+        from grammar_classifier import GrammarClassifier
+        from rule_classifier import load_shell_rules
+        rules_dir = Path(__file__).resolve().parent.parent / "rules"
+        rules = load_shell_rules(rules_dir=rules_dir)
+        policy = GitDenyPolicy(rules["policies"]["git"], probe=probe)
+        c = GrammarClassifier(rules, cwd=HERE, policy=policy)
+        self.assertEqual(c.classify("git push")[0], "unsafe")
+
+
+class RunGitConvertsFailuresToNone(unittest.TestCase):
+    """The link the fake runner bypasses.
+
+    Every other test injects a runner that already returns None. Nothing
+    asserted that the real `_run_git` turns a timeout, an OSError or a
+    non-zero exit INTO that None -- which is the step the whole fail-open
+    invariant rests on.
+    """
+
+    def _with_subprocess_run(self, replacement):
+        import git_policy
+        original = git_policy.subprocess.run
+        git_policy.subprocess.run = replacement
+        self.addCleanup(setattr, git_policy.subprocess, "run", original)
+
+    def test_timeout(self):
+        import git_policy
+        import subprocess as sp
+
+        def boom(*a, **kw):
+            raise sp.TimeoutExpired(cmd="git", timeout=3)
+        self._with_subprocess_run(boom)
+        self.assertIsNone(git_policy._run_git(HERE, ["status"]))
+
+    def test_oserror(self):
+        import git_policy
+
+        def boom(*a, **kw):
+            raise OSError("git not found")
+        self._with_subprocess_run(boom)
+        self.assertIsNone(git_policy._run_git(HERE, ["status"]))
+
+    def test_nonzero_exit(self):
+        import git_policy
+
+        class Proc:
+            returncode = 1
+            stdout = b"fatal: not a git repository"
+        self._with_subprocess_run(lambda *a, **kw: Proc())
+        self.assertIsNone(git_policy._run_git(HERE, ["status"]))
+
+    def test_success_returns_stdout(self):
+        import git_policy
+
+        class Proc:
+            returncode = 0
+            stdout = b"ok\n"
+        self._with_subprocess_run(lambda *a, **kw: Proc())
+        self.assertEqual(git_policy._run_git(HERE, ["status"]), "ok\n")

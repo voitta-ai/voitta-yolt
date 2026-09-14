@@ -269,6 +269,26 @@ class GrammarClassifier:
         of writes the static rules already flagged; it must never be able
         to reach something the rules cleared, so `safe` and `unknown` are
         not routed through it.
+
+        What a `None` from the policy means, since it is the common case
+        and the reason this is safe:
+
+            SOLO          -> no deny; `unsafe` stands, operator is asked
+            UNDETERMINED  -> no deny; `unsafe` stands, operator is asked
+            SHARED        -> deny
+
+        `UNDETERMINED` is not a pessimistic default or a retry signal. It
+        is every probe failure -- git missing, `user.email` unset, remote
+        never fetched, timeout, garbled output -- and it deliberately lands
+        in the same bucket as SOLO. The ancestor of this policy (#82) used
+        the same probes to *grant*, where collapsing "definitely not" into
+        "cannot tell" was safe. Inverted it is not: an unset `user.email`
+        read as SHARED would deny every force push in the repository.
+
+        See `git_policy.authorship`, and the tests in
+        `tests/test_git_policy.py` -- `FailedProbeNeverDenies` at the
+        policy layer, `ProbeFailureNeverDeniesThroughTheClassifier` at this
+        one.
         """
         if self.policy is None or result[0] != DECISION_UNSAFE:
             return result
