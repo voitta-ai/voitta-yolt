@@ -23,6 +23,7 @@ import tree_sitter_bash as _tsb
 from tree_sitter import Language, Parser
 
 from rule_classifier import (
+    _expand_home,
     DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN,
     SUBSTITUTION_PLACEHOLDER,
     RuleClassifier,
@@ -34,6 +35,15 @@ from rule_classifier import (
 
 
 _BASH_LANG = Language(_tsb.language())
+
+# Redirect-target node types that carry readable surface text. A
+# `concatenation` is the `$HOME/path` shape; the expansions are a bare
+# `$VAR` target, which resolves to no known-safe glob and so costs a prompt.
+_REDIR_TARGET_NODES = ("concatenation", "simple_expansion", "expansion")
+
+# A write redirect whose target could not be read. Distinct from None, which
+# means "not a write redirect at all" -- see #128.
+UNEXTRACTABLE_WRITE_TARGET = object()
 
 _PYTHON_INTERPRETERS = {
     "python", "python3",
@@ -143,10 +153,13 @@ class GrammarClassifier:
 
     def _walk_redirected(self, node, src, decisions, _depth):
         write_targets = []
+        unreadable_target = False
         for c in node.children:
             if c.type == "file_redirect":
                 t = self._redirect_write_target(c, src)
-                if t is not None:
+                if t is UNEXTRACTABLE_WRITE_TARGET:
+                    unreadable_target = True
+                elif t is not None:
                     write_targets.append(t)
         # Evaluate EVERY write redirect with unsafe > unknown > safe
         # precedence. A safe first redirect must not mask a later unsafe or
@@ -167,7 +180,9 @@ class GrammarClassifier:
                           unsafe_target)),
             ))
             return
-        if any(not self._target_is_safe_write(t) for t in write_targets):
+        if unreadable_target or any(
+            not self._target_is_safe_write(t) for t in write_targets
+        ):
             seg = self._slice(node, src)
             decisions.append(self._maybe_allow(
                 seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
@@ -333,12 +348,28 @@ class GrammarClassifier:
         for c in redirect_node.children:
             if c.type in _WRITE_REDIR_OPS:
                 op = c.type
-            elif c.type == "word" and target is None:
+            elif target is not None:
+                continue
+            elif c.type == "word":
                 target = self._slice(c, src)
-            elif c.type == "string" and target is None:
+            elif c.type == "string":
                 target = self._reconstruct_string(c, src)
-        if op is None or target is None:
+            elif c.type in _REDIR_TARGET_NODES:
+                # `> $HOME/.ssh/authorized_keys` parses as a `concatenation`,
+                # not a `word`. Before #128 neither branch matched, the
+                # target stayed None, and the caller read that as "not a
+                # write redirect" -- so the redirect was dropped entirely and
+                # the line was judged on `echo` alone. Take the surface text
+                # and let `_expand_home` resolve it.
+                target = self._slice(c, src)
+        if op is None:
             return None
+        if target is None:
+            # A write redirect whose target this cannot read. NOT the same as
+            # "no write redirect", and that conflation is what made #128 a
+            # grant rather than a prompt. Any node shape nobody anticipated
+            # lands here and must cost friction, never silence.
+            return UNEXTRACTABLE_WRITE_TARGET
         return target
 
     def _target_is_safe_write(self, target):
@@ -367,12 +398,10 @@ class GrammarClassifier:
                 return True
         return False
 
-    @staticmethod
-    def _expand_home(path):
-        home = os.environ.get("HOME")
-        if home and path.startswith("~/"):
-            return home + path[1:]
-        return path
+    # The rule layer's function, not a copy of it. These two had identical
+    # bodies and identical blind spots, so #128 was open in both places and
+    # fixing either alone would have left the other.
+    _expand_home = staticmethod(_expand_home)
 
     def _heredoc_body(self, heredoc_node, src):
         for c in heredoc_node.children:
