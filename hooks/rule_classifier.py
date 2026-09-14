@@ -32,6 +32,10 @@ from pathlib import Path
 DECISION_SAFE = "safe"
 DECISION_UNSAFE = "unsafe"
 DECISION_UNKNOWN = "unknown"
+# Refused outright rather than asked about. Only the git policy layer
+# produces this, and only by upgrading a decision that was already
+# `unsafe` -- nothing can go straight from safe or unknown to deny.
+DECISION_DENY = "deny"
 
 SUBSTITUTION_PLACEHOLDER = "__YOLT_SUB__"
 
@@ -446,9 +450,18 @@ def match_allow_patterns(command, patterns):
 
 
 def aggregate_decisions(decisions):
-    """Combine (decision, reason) results. Precedence: unsafe > unknown > safe."""
+    """Combine (decision, reason) results.
+
+    Precedence: deny > unsafe > unknown > safe. `deny` outranks everything
+    because one refused segment condemns the whole command line -- there is
+    no way to run `A && B` with B refused.
+    """
     if not decisions:
         return (DECISION_SAFE, "nothing to classify")
+
+    deny_reasons = [r for d, r in decisions if d == DECISION_DENY]
+    if deny_reasons:
+        return (DECISION_DENY, "; ".join(deny_reasons))
 
     unsafe_reasons = [r for d, r in decisions if d == DECISION_UNSAFE]
     unknown_reasons = [r for d, r in decisions if d == DECISION_UNKNOWN]
@@ -619,6 +632,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "shell_builtins_safe", "shell_keywords",
     "safe_write_targets", "unsafe_write_targets",
     "commands", "interpreters",
+    "policies", "_policies_note",
 })
 
 _ALLOWED_COMMAND_KEYS = frozenset({
@@ -667,6 +681,68 @@ _ALLOWED_NESTED_MODULE_KEYS = frozenset({
 # value silently degrades to `unknown` at classify time, which is exactly
 # the drift this validator exists to catch.
 _ALLOWED_NESTED_MODULE_DEFAULTS = frozenset({"safe", "unsafe"})
+
+
+_ALLOWED_POLICY_KEYS = frozenset({"_note", "enabled", "deny"})
+_ALLOWED_POLICY_ENTRY_KEYS = frozenset({
+    "_note", "argv", "refuse_when", "only_flags",
+})
+
+
+def _validate_policies(policies, errors):
+    """Schema-check the `policies` block.
+
+    A deny policy can only turn `unsafe` into `deny`, so a typo here costs
+    a refusal that should not have happened -- the loud failure, not the
+    silent one. It is still a hard error, because a policy the classifier
+    silently ignores is a guard the operator believes they have and does
+    not.
+    """
+    from git_policy import PREDICATES
+
+    if not isinstance(policies, dict):
+        errors.append("policies: must be a dict")
+        return
+
+    for name, spec in policies.items():
+        if name.startswith("_"):
+            continue
+        path = "policies.{}".format(name)
+        if not isinstance(spec, dict):
+            errors.append("{}: must be a dict".format(path))
+            continue
+        for key in spec:
+            if key not in _ALLOWED_POLICY_KEYS:
+                errors.append("{}: unknown key '{}'".format(path, key))
+
+        entries = spec.get("deny", [])
+        if not isinstance(entries, list):
+            errors.append("{}.deny: must be a list".format(path))
+            continue
+        for i, entry in enumerate(entries):
+            entry_path = "{}.deny[{}]".format(path, i)
+            if not isinstance(entry, dict):
+                errors.append("{}: must be a dict".format(entry_path))
+                continue
+            for key in entry:
+                if key not in _ALLOWED_POLICY_ENTRY_KEYS:
+                    errors.append(
+                        "{}: unknown key '{}'".format(entry_path, key))
+            argv = entry.get("argv")
+            if not isinstance(argv, list) or not argv:
+                errors.append(
+                    "{}.argv: must be a non-empty list".format(entry_path))
+            predicates = entry.get("refuse_when", [])
+            if not isinstance(predicates, list):
+                errors.append(
+                    "{}.refuse_when: must be a list".format(entry_path))
+                continue
+            for predicate in predicates:
+                if predicate not in PREDICATES:
+                    errors.append(
+                        "{}.refuse_when: unknown predicate '{}' "
+                        "(valid: {})".format(
+                            entry_path, predicate, ", ".join(PREDICATES)))
 
 
 def validate_shell_rules(rules):
@@ -729,6 +805,8 @@ def validate_shell_rules(rules):
                         "interpreters.{}.nested_modules.{}: unknown default '{}'"
                         .format(name, mod, mod_default)
                     )
+
+    _validate_policies(rules.get("policies", {}), errors)
 
     return errors
 

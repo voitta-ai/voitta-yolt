@@ -1250,8 +1250,10 @@ def run_hook():
         if str(hooks_dir) not in sys.path:
             sys.path.insert(0, str(hooks_dir))
         from grammar_classifier import GrammarClassifier
+        from git_policy import load_policies
         from rule_classifier import (
             DECISION_UNSAFE,
+            DECISION_DENY,
             ShellRulesValidationError,
             load_shell_rules,
         )
@@ -1276,6 +1278,8 @@ def run_hook():
     classifier = GrammarClassifier(
         shell_rules,
         python_analyzer_factory=_python_factory,
+        cwd=hook_input.get("cwd"),
+        policy=load_policies(shell_rules),
     )
     decision, reason = classifier.classify(command)
     _log_hook_decision(command, decision, reason, permission_mode, agent_id)
@@ -1284,6 +1288,17 @@ def run_hook():
     # and still be carrying a credential into argv. Advisory only — it
     # rides along with whatever decision was reached. Issue #85.
     advisory = format_secret_advisory(command)
+
+    if decision == DECISION_DENY:
+        # The git policy layer refused this outright. Unlike `unsafe` this
+        # does not become `ask` for an operator: the whole point of the
+        # non-delegable list is that these are not questions we want
+        # answered per-prompt, by a person or by a classifier. Issue #97.
+        response = make_hook_response(
+            "deny", "YOLT refuses this outright: {}".format(reason)
+        )
+        print(json.dumps(attach_secret_advisory(response, advisory)))
+        sys.exit(0)
 
     if decision == DECISION_UNSAFE:
         allow_hint = classifier.suggest_allow_pattern(command)
