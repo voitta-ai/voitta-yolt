@@ -85,6 +85,58 @@ class SteeringWritesAreRefused(unittest.TestCase):
             classify("echo x > ~/.claude/settings.json"), "unsafe")
 
 
+class BothHostsAreCoveredSymmetrically(unittest.TestCase):
+    """The Claude side and the Codex side must protect the same shapes.
+
+    The first draft of this list protected `agents/`, `commands/`, `hooks/`
+    and `plugins/` under `~/.claude` but only four files under `~/.codex`.
+    An agent definition steers whichever host reads it, so a list that
+    protects one and not the other is not a policy, it is an oversight with
+    a plausible shape.
+    """
+
+    def test_codex_agents(self):
+        self.assertEqual(
+            classify("echo x > ~/.codex/agents/thing.md"), "unsafe")
+
+    def test_codex_prompts(self):
+        self.assertEqual(
+            classify("echo x > ~/.codex/prompts/p.md"), "unsafe")
+
+    def test_codex_plugins(self):
+        self.assertEqual(
+            classify("echo x > ~/.codex/plugins/p/hook.sh"), "unsafe")
+
+    def test_codex_rules(self):
+        self.assertEqual(
+            classify("echo x > ~/.codex/rules/r.json"), "unsafe")
+
+    def test_codex_memories(self):
+        self.assertEqual(
+            classify("echo x > ~/.codex/memories/m.json"), "unsafe")
+
+    def test_codex_auth_matches_the_other_credential_stores(self):
+        # Listed on the same grounds as ~/.aws/credentials and ~/.netrc,
+        # which were already here. Omitting it would be the same asymmetry
+        # one category over.
+        self.assertEqual(classify("echo x > ~/.codex/auth.json"), "unsafe")
+
+
+class HostExecutedFilesAreCovered(unittest.TestCase):
+    """Anything the host runs is a hook by another name."""
+
+    def test_statusline_command(self):
+        # settings.json points `statusLine.command` at this file and the
+        # host executes it on every render. Same execution surface as
+        # ~/.claude/hooks/, and it was not on the first draft of the list.
+        self.assertEqual(
+            classify("echo x > ~/.claude/statusline-command.sh"), "unsafe")
+
+    def test_mcp_server_definitions(self):
+        self.assertEqual(
+            classify("echo x > ~/.claude/mcp-servers/s.json"), "unsafe")
+
+
 class OrdinaryWritesAreUntouched(unittest.TestCase):
     """The other half. A guard that flips all of ~/.claude is not a guard."""
 
@@ -97,6 +149,16 @@ class OrdinaryWritesAreUntouched(unittest.TestCase):
 
     def test_tmp_stays_safe(self):
         self.assertEqual(classify("echo x > /tmp/scratch"), "safe")
+
+    def test_agent_state_and_logs_stay_safe(self):
+        # The half that keeps this a policy rather than a blanket. If every
+        # path under the two agent roots carded, ordinary agent operation
+        # would card.
+        for path in ("~/.claude/history.jsonl",
+                     "~/.codex/logs_2.sqlite",
+                     "~/.codex/sessions/s.jsonl"):
+            self.assertEqual(classify("echo x > {}".format(path)), "safe",
+                             path)
 
     def test_reading_a_skill_is_not_a_write(self):
         self.assertEqual(
