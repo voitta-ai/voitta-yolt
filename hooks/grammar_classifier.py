@@ -192,8 +192,17 @@ class GrammarClassifier:
             # never a security gap, but the reason is not decoration:
             # `scripts/replay_unsafe.py` groups the corpus BY reason and #100
             # drafts the non-delegable list from that grouping.
+        # A target already reported as unsafe must not ALSO be reported as
+        # unclassifiable: an unsafe target is not a safe one, so the bare
+        # `not safe` test fired for it too and one redirect recorded two
+        # decisions. Aggregation picked the right verdict either way, which
+        # is why it was invisible, but "writes to a protected path" and
+        # "could not be classified" are contradictory claims about the same
+        # token.
         if unreadable_target or any(
-            not self._target_is_safe_write(t) for t in write_targets
+            not self._target_is_safe_write(t)
+            and not self._target_is_unsafe_write(t)
+            for t in write_targets
         ):
             decisions.append(
                 (DECISION_UNKNOWN, "writes to a file via redirection"),
