@@ -18,7 +18,9 @@ Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 """
 
 import json
+import os
 import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -415,6 +417,81 @@ class TestMultilineHandling(unittest.TestCase):
     def test_standalone_comment_safe(self):
         self.assertDecision("# nothing to do", DECISION_SAFE)
 
+
+class TestMultilineDoubleQuotedString(unittest.TestCase):
+    """A double-quoted argument spanning lines keeps its newlines (#115).
+
+    tree-sitter-bash ends a `string_content` run at each newline, and the
+    newline itself is covered by no child -- so rebuilding the string from
+    its children alone welds the lines together. Nothing noticed for a long
+    time because the multi-line arguments already under test were SQL, where
+    a lost newline is still valid SQL. Python is where it shows: the welded
+    source raises in `ast.parse`, the inline `-c` path reports "parser bailed
+    at line 1" (always line 1 -- after the weld there is no other line), and
+    a read-only script is parked for a human to approve.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.clf = _make_classifier()
+
+    def assertDecision(self, cmd, expected):
+        d, r = self.clf.classify(cmd)
+        self.assertEqual(d, expected, msg="cmd={!r}, reason={}".format(cmd, r))
+
+    def test_read_only_inline_python_is_classified_by_content(self):
+        cmd = (
+            'python3 -c "\n'
+            "import json,sys\n"
+            "d=json.load(sys.stdin)\n"
+            "for m in d.get('messages',[]):\n"
+            "    print(m.get('ts'))\n"
+            '"'
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_destructive_inline_python_still_unsafe(self):
+        cmd = (
+            'python3 -c "\n'
+            "import shutil\n"
+            "shutil.rmtree('/Users/x/project')\n"
+            '"'
+        )
+        self.assertDecision(cmd, DECISION_UNSAFE)
+
+    def test_pipeline_into_multiline_python(self):
+        cmd = (
+            'curl -s "https://example.com/x.json" | python3 -c "\n'
+            "import json,sys\n"
+            "print(json.load(sys.stdin))\n"
+            '"'
+        )
+        self.assertDecision(cmd, DECISION_SAFE)
+
+    def test_newlines_survive_reconstruction_verbatim(self):
+        """The bytes between children are copied as they are, not normalized.
+
+        Asserted on the rebuilt argv rather than on a decision, because a
+        decision only shows that the source parsed -- it would still pass if
+        the newlines came back as a space or as an escape."""
+        cmd = 'python3 -c "\nimport os\nprint(os.getcwd())\n"'
+        src = cmd.encode("utf-8")
+        tree = self.clf._parser.parse(src)
+        commands = []
+        self.clf._collect_primary_command_nodes(tree.root_node, commands)
+        argv = self.clf._argv_from_command(commands[0], src)
+        self.assertEqual(argv[-1], "\nimport os\nprint(os.getcwd())\n")
+
+    def test_substitution_inside_multiline_string_is_still_masked(self):
+        """Gap-filling must not hand a command substitution back as text."""
+        cmd = 'echo "line one\n$(rm -rf /tmp/x)\nline three"'
+        src = cmd.encode("utf-8")
+        tree = self.clf._parser.parse(src)
+        commands = []
+        self.clf._collect_primary_command_nodes(tree.root_node, commands)
+        argv = self.clf._argv_from_command(commands[0], src)
+        self.assertNotIn("rm -rf", argv[-1])
+        self.assertEqual(argv[-1].count("\n"), 2)
 
 class TestValuelessGlobalFlags(unittest.TestCase):
     @classmethod
@@ -1114,15 +1191,27 @@ class TestSqlCli(unittest.TestCase):
 class TestClassifierCLI(unittest.TestCase):
     """grammar_classifier.py is also runnable as a standalone CLI."""
 
-    def _run(self, command):
+    def _run(self, command, *flags):
         script = REPO_ROOT / "hooks" / "grammar_classifier.py"
         result = subprocess.run(
-            [sys.executable, str(script), command],
+            [sys.executable, str(script), *flags, command],
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=tempfile.gettempdir(),  # no project .claude/ under it
+            env={**os.environ, "HOME": self.home},
         )
         return json.loads(result.stdout)
+
+    def setUp(self):
+        # A settings file the CLI would inherit, so the flag has something to
+        # refuse. Written under a temp HOME: the real one is the developer's.
+        self.home = tempfile.mkdtemp()
+        claude = Path(self.home) / ".claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(gh pr merge*)"]}})
+        )
 
     def test_cli_reports_safe(self):
         self.assertEqual(self._run("ls /tmp")["decision"], "safe")
@@ -1132,6 +1221,33 @@ class TestClassifierCLI(unittest.TestCase):
 
     def test_cli_reports_unknown(self):
         self.assertEqual(self._run("somecommand_unknown --flag")["decision"], "unknown")
+
+    def test_cli_no_longer_inherits_user_allow_patterns(self):
+        """2.0.0 removed the allow path, so settings files change nothing.
+
+        Until 1.2.0 this asserted the opposite: a pattern the operator had
+        allowed upgraded a mutating command to `safe`, and `--no-user-allow`
+        existed to switch that off for consumers that were not the terminal
+        those settings were written for.
+
+        Phase 1 (#98) removed the inheritance entirely, so the behaviour the
+        flag asked for is now unconditional and the verdict is the same with
+        or without it. Kept as a test rather than deleted because it is the
+        assertion that would catch the allow path being reintroduced.
+        """
+        out = self._run("gh pr merge 1 --squash")
+        self.assertEqual(out["decision"], "unsafe")
+        self.assertEqual(out["allow_patterns"], 0)
+        self.assertNotIn("allow pattern", out["reason"])
+
+    def test_no_user_allow_drops_them(self):
+        # a consumer that is not that terminal gets the rules' own verdict
+        out = self._run("gh pr merge 1 --squash", "--no-user-allow")
+        self.assertEqual(out["decision"], "unsafe")
+        self.assertEqual(out["allow_patterns"], 0)
+
+    def test_no_user_allow_leaves_read_only_alone(self):
+        self.assertEqual(self._run("ls /tmp", "--no-user-allow")["decision"], "safe")
 
 
 if __name__ == "__main__":

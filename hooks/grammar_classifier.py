@@ -23,6 +23,7 @@ import tree_sitter_bash as _tsb
 from tree_sitter import Language, Parser
 
 from rule_classifier import (
+    _expand_home,
     DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
     SUBSTITUTION_PLACEHOLDER,
     RuleClassifier,
@@ -32,6 +33,15 @@ from rule_classifier import (
 
 
 _BASH_LANG = Language(_tsb.language())
+
+# Redirect-target node types that carry readable surface text. A
+# `concatenation` is the `$HOME/path` shape; the expansions are a bare
+# `$VAR` target, which resolves to no known-safe glob and so costs a prompt.
+_REDIR_TARGET_NODES = ("concatenation", "simple_expansion", "expansion")
+
+# A write redirect whose target could not be read. Distinct from None, which
+# means "not a write redirect at all" -- see #128.
+UNEXTRACTABLE_WRITE_TARGET = object()
 
 _PYTHON_INTERPRETERS = {
     "python", "python3",
@@ -150,10 +160,13 @@ class GrammarClassifier:
 
     def _walk_redirected(self, node, src, decisions, _depth):
         write_targets = []
+        unreadable_target = False
         for c in node.children:
             if c.type == "file_redirect":
                 t = self._redirect_write_target(c, src)
-                if t is not None:
+                if t is UNEXTRACTABLE_WRITE_TARGET:
+                    unreadable_target = True
+                elif t is not None:
                     write_targets.append(t)
         # Evaluate EVERY write redirect with unsafe > unknown > safe
         # precedence. A safe first redirect must not mask a later unsafe or
@@ -172,12 +185,25 @@ class GrammarClassifier:
                  "writes to protected path '{}' via redirection".format(
                      unsafe_target)),
             )
-            return
-        if any(not self._target_is_safe_write(t) for t in write_targets):
+            # Symmetric with the unknown branch below: record and continue.
+            # Returning here masked the command's own reason --
+            # `rm -rf /tmp/x > ~/.bashrc` reported only the redirect, never
+            # `rm: mutating`. The verdict is unsafe either way, so this was
+            # never a security gap, but the reason is not decoration:
+            # `scripts/replay_unsafe.py` groups the corpus BY reason and #100
+            # drafts the non-delegable list from that grouping.
+        if unreadable_target or any(
+            not self._target_is_safe_write(t) for t in write_targets
+        ):
             decisions.append(
                 (DECISION_UNKNOWN, "writes to a file via redirection"),
             )
-            return
+            # Deliberately NOT returning. An unknown redirect target must not
+            # mask the command's own verdict: `terraform destroy ... > $LOG`
+            # is `terraform destroy: mutating` first and an unclassifiable
+            # redirect second. Aggregation already ranks unsafe above unknown,
+            # so falling through yields the stricter of the two rather than
+            # whichever was noticed first.
         # All write targets safe (or none): fall through and classify the
         # command itself.
 
@@ -373,8 +399,30 @@ class GrammarClassifier:
         return self._slice(node, src)
 
     def _reconstruct_string(self, node, src):
+        """Rebuild the value of a double-quoted string from its children.
+
+        The bytes between two adjacent children are part of the string and
+        have to be carried across (#115). tree-sitter-bash ends a
+        `string_content` run at a newline and starts a fresh one after it,
+        so a multi-line `"..."` arrives as one child per line with the
+        newlines belonging to no child at all. Concatenating only the
+        children welds every line onto the next: a multi-line
+        `python3 -c "..."` reached the Python analyzer as a single line,
+        `ast.parse` raised on it, and the inline path turned that into
+        "could not statically analyze inline python3 -c script (parser
+        bailed at line 1)" -- for every such command, since after the weld
+        there is only ever a line 1. The gate then parked read-only scripts
+        for a human, which is the safe direction but the wrong answer.
+
+        Gap bytes are copied verbatim rather than normalized to "\n": what
+        is uncovered is literal string text, and the analyzer downstream
+        wants it exactly as the shell would pass it."""
         out = []
+        prev_end = None
         for c in node.children:
+            if prev_end is not None and c.start_byte > prev_end:
+                out.append(src[prev_end:c.start_byte].decode("utf-8", "replace"))
+            prev_end = c.end_byte
             if c.type == '"':
                 continue
             if c.type in ("command_substitution", "process_substitution",
@@ -395,12 +443,28 @@ class GrammarClassifier:
         for c in redirect_node.children:
             if c.type in _WRITE_REDIR_OPS:
                 op = c.type
-            elif c.type == "word" and target is None:
+            elif target is not None:
+                continue
+            elif c.type == "word":
                 target = self._slice(c, src)
-            elif c.type == "string" and target is None:
+            elif c.type == "string":
                 target = self._reconstruct_string(c, src)
-        if op is None or target is None:
+            elif c.type in _REDIR_TARGET_NODES:
+                # `> $HOME/.ssh/authorized_keys` parses as a `concatenation`,
+                # not a `word`. Before #128 neither branch matched, the
+                # target stayed None, and the caller read that as "not a
+                # write redirect" -- so the redirect was dropped entirely and
+                # the line was judged on `echo` alone. Take the surface text
+                # and let `_expand_home` resolve it.
+                target = self._slice(c, src)
+        if op is None:
             return None
+        if target is None:
+            # A write redirect whose target this cannot read. NOT the same as
+            # "no write redirect", and that conflation is what made #128 a
+            # grant rather than a prompt. Any node shape nobody anticipated
+            # lands here and must cost friction, never silence.
+            return UNEXTRACTABLE_WRITE_TARGET
         return target
 
     def _target_is_safe_write(self, target):
@@ -429,12 +493,10 @@ class GrammarClassifier:
                 return True
         return False
 
-    @staticmethod
-    def _expand_home(path):
-        home = os.environ.get("HOME")
-        if home and path.startswith("~/"):
-            return home + path[1:]
-        return path
+    # The rule layer's function, not a copy of it. These two had identical
+    # bodies and identical blind spots, so #128 was open in both places and
+    # fixing either alone would have left the other.
+    _expand_home = staticmethod(_expand_home)
 
     def _heredoc_body(self, heredoc_node, src):
         for c in heredoc_node.children:
@@ -552,17 +614,40 @@ def classify_command(command, rules, python_analyzer_factory=None):
 
 
 def run_cli():
-    """CLI: read a shell command from argv and print its classification."""
-    if len(sys.argv) < 2:
-        print("Usage: grammar_classifier.py '<shell command>'", file=sys.stderr)
+    """CLI: read a shell command from argv and print its classification.
+
+    `--no-user-allow` drops the Claude Code settings files from the allow-pattern
+    sources. They are permissions a human wrote for an interactive terminal, and
+    a consumer that is not that terminal -- a service classifying commands on
+    behalf of whoever can talk to it -- inherits them silently otherwise, so its
+    auto-run set is whatever the operator once allowed themselves. That is a
+    confused deputy, and only the consumer knows which it is; the Claude Code
+    hook keeps the default.
+    """
+    argv = [a for a in sys.argv[1:] if a != "--no-user-allow"]
+    no_user_allow = len(argv) != len(sys.argv) - 1
+    if not argv:
+        print(
+            "Usage: grammar_classifier.py [--no-user-allow] '<shell command>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    command = sys.argv[1]
+    command = argv[0]
     yolt_dir = Path(__file__).resolve().parent.parent
     rules = load_shell_rules(
         rules_dir=yolt_dir / "rules",
         user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
     )
+
+    # `--no-user-allow` is accepted and does nothing, deliberately. Phase 1
+    # removed the allow path entirely, so there is no inherited allow-pattern
+    # surface left for it to switch off -- the behaviour it asked for is now
+    # unconditional. It stays in the signature because consumers pass it
+    # unconditionally, and a removed flag would be read as the command,
+    # turning every verdict into a verdict about the string
+    # "--no-user-allow". See the 2.0.0 compatibility note.
+    _ = no_user_allow
 
     # Python analyzer factory — lazy import so this CLI works without
     # the rule data dir for python rules.
@@ -583,7 +668,19 @@ def run_cli():
         python_analyzer_factory=factory,
     )
 
-    print(json.dumps({"decision": decision, "reason": reason}, indent=2))
+    # How many allow patterns were in play is part of the verdict's meaning: the
+    # same command classifies differently under a different settings file, and
+    # without this a consumer cannot see -- or log at startup -- how large the
+    # inherited auto-run surface is.
+    print(json.dumps(
+        # `allow_patterns` is retained and is honestly 0: Phase 1 removed the
+        # allow path, so no allow pattern is ever in play for any verdict.
+        # Kept because a consumer asserting it is 0 at startup is asserting
+        # something true about 2.0.0, which is a better contract than trusting
+        # a flag to stay a no-op. See the 2.0.0 compatibility note.
+        {"decision": decision, "reason": reason, "allow_patterns": 0},
+        indent=2,
+    ))
     sys.exit(0)
 
 

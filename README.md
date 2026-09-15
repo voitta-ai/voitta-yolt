@@ -270,11 +270,11 @@ re-extracts nothing: users keep running the old code. Not hypothetical —
 the version sat at `0.1.0` from the initial ship through issue #78 and
 every change in between was invisible to installed copies.
 
-`CLAUDE.md` has the full convention: which semver part to bump for what,
-and how to tag under this repo's squash-merge policy (edit the version in
-the PR; tag master's squash commit after the merge). `scripts/release.sh
-<version>` rewrites and validates the field, but its commit-and-tag half
-does not fit squash merges — see `CLAUDE.md`.
+`CLAUDE.md` has the full convention: which semver part to bump for what.
+Tagging and release notes are automatic — a workflow fails any PR into
+master whose version does not advance, then tags and cuts the release
+from master's squash commit. The only manual step is editing the version
+field inside the PR.
 
 **One-time — to list on Anthropic's community marketplace.** Validate
 (the same check Anthropic runs on submit), then submit the repo once:
@@ -350,6 +350,30 @@ It is gone
 mode a hook that answers on the host's behalf is a classifier bypass the
 host cannot see, and that is as true of a grant you configured as of one
 YOLT decided. **YOLT no longer reads your settings files at all.**
+
+### Compatibility for consumers that passed `--no-user-allow`
+
+`--no-user-allow` was added in 1.2.0 for consumers that are not the
+interactive terminal those settings were written for -- a service classifying
+commands on behalf of whoever can message it inherited the operator's personal
+permissions otherwise.
+
+**2.0.0 still accepts the flag, and it now does nothing**, because the
+behaviour it asked for is unconditional: there is no allow path left to switch
+off. It is retained rather than removed because consumers pass it
+unconditionally, and a rejected flag would be read as the command itself,
+turning every verdict into a verdict about the string `--no-user-allow`.
+
+The `allow_patterns` key is likewise retained in the JSON output and is
+always `0`:
+
+    python3 hooks/grammar_classifier.py --no-user-allow 'gh pr merge 1 --squash'
+    {"decision": "unsafe", "reason": "gh pr merge: mutating", "allow_patterns": 0}
+
+That `0` is true rather than a placeholder. A consumer asserting it at startup
+is asserting something real about 2.0.0, which is a better contract than
+trusting a flag to remain a no-op.
+
 
 Your `permissions.allow` entries still work — Claude Code honors them
 itself, which is the appropriate place for them.
