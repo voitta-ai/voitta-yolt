@@ -39,7 +39,7 @@
     "~/.claude/*"
   ],
 
-  "_unsafe_write_targets_note": "Write targets dangerous enough to classify 'unsafe' (ask with a specific reason) rather than 'unknown' (contextless default prompt). Checked BEFORE safe_write_targets, so an entry here overrides a broader safe glob -- e.g. '~/.claude/settings.json' is unsafe even though '~/.claude/*' is a safe-write target, because settings.json can disable this hook. Applies to redirect targets and to the write-target arguments of tee/cp/mv/install/dd/find. Glob semantics are fnmatch; '~/' is expanded before matching.",
+  "_unsafe_write_targets_note": "Write targets dangerous enough to classify 'unsafe' (ask with a specific reason) rather than 'unknown' (contextless default prompt). Checked BEFORE safe_write_targets, so an entry here overrides a broader safe glob -- e.g. '~/.claude/settings.json' is unsafe even though '~/.claude/*' is a safe-write target, because settings.json can disable this hook. That reasoning is not specific to settings.json: a skill file is read into the model's context on every later turn, an agent definition carries tool grants, files under hooks/ are executed by the host, and an MCP config names servers the agent will trust. Each one steers the agent, so each one is listed. Note the asymmetry this corrects: '~/.bashrc' was already unsafe for steering a shell while '~/.claude/skills/*' was safe for steering the agent. '~/.claude/*' stays a safe-write target for everything else under it -- logs, caches and '~/.claude/yolt/*' state -- because this list is checked first and the specific entries win. Applies to redirect targets and to the write-target arguments of tee/cp/mv/install/dd/find. Glob semantics are fnmatch; '~/' is expanded before matching.",
   "unsafe_write_targets": [
     "~/.bashrc",
     "~/.zshrc",
@@ -66,7 +66,27 @@
     "/etc/*",
     "/usr/local/etc/*",
     "~/.claude/settings.json",
-    "~/.claude/settings.local.json"
+    "~/.claude/settings.local.json",
+    "~/.claude/CLAUDE.md",
+    "~/.claude/skills/*",
+    "~/.claude/commands/*",
+    "~/.claude/agents/*",
+    "~/.claude/hooks/*",
+    "~/.claude/plugins/*",
+    "~/.claude/mcp-servers/*",
+    "~/.claude/statusline-command.sh",
+    "~/.codex/config.toml",
+    "~/.codex/hooks.json",
+    "~/.codex/AGENTS.md",
+    "~/.codex/auth.json",
+    "~/.codex/skills/*",
+    "~/.codex/agents/*",
+    "~/.codex/prompts/*",
+    "~/.codex/plugins/*",
+    "~/.codex/rules/*",
+    "~/.codex/memories/*",
+    ".mcp.json",
+    "*/.mcp.json"
   ],
 
   "interpreters": {

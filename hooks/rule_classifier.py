@@ -459,13 +459,25 @@ def aggregate_decisions(decisions):
     if not decisions:
         return (DECISION_SAFE, "nothing to classify")
 
-    deny_reasons = [r for d, r in decisions if d == DECISION_DENY]
+    # De-duplicated, order preserved. A statement can contribute the same
+    # reason more than once -- `echo a > $X; echo b > $Y` produced
+    # "writes to a file via redirection; writes to a file via redirection" --
+    # and repeating it tells the reader nothing the first one did not.
+    def _reasons(level):
+        seen = {}
+        for decision, reason in decisions:
+            if decision == level and reason not in seen:
+                seen[reason] = None
+        retval = list(seen)
+        return retval
+
+    deny_reasons = _reasons(DECISION_DENY)
     if deny_reasons:
         return (DECISION_DENY, "; ".join(deny_reasons))
 
-    unsafe_reasons = [r for d, r in decisions if d == DECISION_UNSAFE]
-    unknown_reasons = [r for d, r in decisions if d == DECISION_UNKNOWN]
-    safe_reasons = [r for d, r in decisions if d == DECISION_SAFE]
+    unsafe_reasons = _reasons(DECISION_UNSAFE)
+    unknown_reasons = _reasons(DECISION_UNKNOWN)
+    safe_reasons = _reasons(DECISION_SAFE)
 
     if unsafe_reasons:
         return (DECISION_UNSAFE, "; ".join(unsafe_reasons))
@@ -475,10 +487,34 @@ def aggregate_decisions(decisions):
 
 
 def _expand_home(path):
+    """Resolve a write target to one canonical spelling before matching.
+
+    A deny list matched with fnmatch is only as good as the spelling handed
+    to it. Three spellings of one file used to reach two different verdicts:
+
+        ~/.claude/settings.json       -> unsafe
+        $HOME/.claude/settings.json   -> safe      (#128)
+        ~/.claude//settings.json      -> safe      (#128)
+
+    The shell expands $HOME before the command runs, but the classifier never
+    sees that -- tree-sitter hands it the literal token. So the expansion has
+    to happen here, or the deny list is one keystroke from optional.
+
+    normpath collapses duplicate slashes and resolves `..`, which closes the
+    third spelling and makes `~/.claude/skills/../../.bashrc` land on the
+    `~/.bashrc` entry rather than escaping both.
+    """
     home = os.environ.get("HOME")
-    if home and path.startswith("~/"):
-        return home + path[1:]
-    return path
+    if home:
+        for prefix in ("~/", "$HOME/", "${HOME}/"):
+            if path.startswith(prefix):
+                path = home + "/" + path[len(prefix):]
+                break
+    # A trailing slash distinguishes a directory target from a file, and
+    # `~/.claude/skills/` should still match `~/.claude/skills/*`.
+    trailing = "/" if path.endswith("/") and len(path) > 1 else ""
+    retval = os.path.normpath(path) + trailing
+    return retval
 
 
 def _path_matches_target_list(target, patterns):
