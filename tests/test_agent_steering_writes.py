@@ -150,15 +150,35 @@ class OrdinaryWritesAreUntouched(unittest.TestCase):
     def test_tmp_stays_safe(self):
         self.assertEqual(classify("echo x > /tmp/scratch"), "safe")
 
-    def test_agent_state_and_logs_stay_safe(self):
-        # The half that keeps this a policy rather than a blanket. If every
-        # path under the two agent roots carded, ordinary agent operation
-        # would card.
+    def test_agent_state_and_logs_are_never_carded(self):
+        """Ordinary agent state must not be flipped to `unsafe` by this list.
+
+        Asserts `!= unsafe`, not `== safe`, and the difference is the point.
+        `~/.claude/*` is a safe-write target so paths under it are `safe`,
+        but `~/.codex/*` is not, so paths under it are `unknown` -- which
+        also does not card. Asserting `== safe` here would be asserting an
+        accident of which host's tree the file is in.
+
+        An earlier revision did assert `== safe` and passed locally while
+        failing CI. Cause worth recording: `mktemp -d` on macOS returns a
+        path under `/var/folders`, and `/var/folders/*` is itself in
+        `safe_write_targets`, so running the suite with
+        `HOME=$(mktemp -d)` makes EVERY path under HOME classify `safe`.
+        The local run was measuring the temp directory's location, not the
+        rules.
+        """
         for path in ("~/.claude/history.jsonl",
                      "~/.codex/logs_2.sqlite",
                      "~/.codex/sessions/s.jsonl"):
-            self.assertEqual(classify("echo x > {}".format(path)), "safe",
-                             path)
+            self.assertNotEqual(
+                classify("echo x > {}".format(path)), "unsafe", path)
+
+    def test_claude_tree_state_is_positively_safe(self):
+        # `~/.claude/*` IS a safe-write target, so this one is `safe` rather
+        # than merely not-unsafe, and the specific entries added by this PR
+        # must not have swallowed the broader glob.
+        self.assertEqual(classify("echo x > ~/.claude/history.jsonl"), "safe")
+        self.assertEqual(classify("echo x > ~/.claude/yolt/cache.json"), "safe")
 
     def test_reading_a_skill_is_not_a_write(self):
         self.assertEqual(
