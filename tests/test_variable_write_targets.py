@@ -139,6 +139,54 @@ class RedirectMustNotMaskTheCommand(unittest.TestCase):
             classify("echo x > $HOME/.ssh/authorized_keys"), "unsafe")
 
 
+class RedirectAndCommandBothReport(unittest.TestCase):
+    """Neither branch of the redirect walk may mask the other's reason.
+
+    Raised by review r2 on #129: the unsafe branch still returned early
+    while the unknown branch had been fixed to fall through, so
+    `rm -rf /tmp/x > ~/.bashrc` reported only the redirect and never
+    `rm: mutating`.
+
+    The verdict was `unsafe` either way, so this was never a security gap.
+    The reason is not decoration though: `scripts/replay_unsafe.py` groups
+    the corpus BY reason and #100 drafts the non-delegable list from that
+    grouping, so a masked `rm: mutating` under-counts rm in the measurement
+    that decides what Phase 3 deletes.
+    """
+
+    def _reason(self, command):
+        rules = load_shell_rules(rules_dir=RULES)
+        py_rules = load_rules(rules_dir=RULES)
+        c = GrammarClassifier(
+            rules, python_analyzer_factory=lambda: SafetyAnalyzer(py_rules))
+        retval = c.classify(command)
+        return retval
+
+    def test_destructive_command_survives_a_protected_redirect(self):
+        decision, reason = self._reason("rm -rf /tmp/x > ~/.bashrc")
+        self.assertEqual(decision, "unsafe")
+        self.assertIn("~/.bashrc", reason)
+        self.assertIn("rm: mutating", reason)
+
+    def test_destroy_survives_a_protected_redirect(self):
+        decision, reason = self._reason(
+            "terraform destroy -auto-approve > ~/.ssh/authorized_keys")
+        self.assertEqual(decision, "unsafe")
+        self.assertIn("authorized_keys", reason)
+        self.assertIn("terraform destroy", reason)
+
+    def test_safe_command_contributes_no_extra_reason(self):
+        decision, reason = self._reason("echo hi > ~/.bashrc")
+        self.assertEqual(decision, "unsafe")
+        self.assertNotIn(";", reason)
+
+    def test_identical_reasons_are_not_repeated(self):
+        # `echo a > $X; echo b > $Y` produced the same sentence twice.
+        decision, reason = self._reason("echo a > $X; echo b > $Y")
+        self.assertEqual(decision, "unknown")
+        self.assertEqual(reason.count("writes to a file via redirection"), 1)
+
+
 class NormaliserKeepsOrdinaryPathsAlone(unittest.TestCase):
     def test_tmp_stays_safe(self):
         self.assertEqual(classify("echo x > /tmp/scratch"), "safe")

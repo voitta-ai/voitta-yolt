@@ -450,9 +450,21 @@ def aggregate_decisions(decisions):
     if not decisions:
         return (DECISION_SAFE, "nothing to classify")
 
-    unsafe_reasons = [r for d, r in decisions if d == DECISION_UNSAFE]
-    unknown_reasons = [r for d, r in decisions if d == DECISION_UNKNOWN]
-    safe_reasons = [r for d, r in decisions if d == DECISION_SAFE]
+    # De-duplicated, order preserved. A statement can contribute the same
+    # reason more than once -- `echo a > $X; echo b > $Y` produced
+    # "writes to a file via redirection; writes to a file via redirection" --
+    # and repeating it tells the reader nothing the first one did not.
+    def _reasons(level):
+        seen = {}
+        for decision, reason in decisions:
+            if decision == level and reason not in seen:
+                seen[reason] = None
+        retval = list(seen)
+        return retval
+
+    unsafe_reasons = _reasons(DECISION_UNSAFE)
+    unknown_reasons = _reasons(DECISION_UNKNOWN)
+    safe_reasons = _reasons(DECISION_SAFE)
 
     if unsafe_reasons:
         return (DECISION_UNSAFE, "; ".join(unsafe_reasons))

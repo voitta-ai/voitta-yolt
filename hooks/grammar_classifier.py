@@ -179,7 +179,15 @@ class GrammarClassifier:
                       "writes to protected path '{}' via redirection".format(
                           unsafe_target)),
             ))
-            return
+            # Symmetric with the unknown branch below: record and continue.
+            # Returning here masked the command's own reason --
+            # `rm -rf /tmp/x > ~/.bashrc` reported only the redirect, never
+            # `rm: mutating`. The verdict was unsafe either way, so this was
+            # never a security gap, but the reason is not decoration:
+            # `scripts/replay_unsafe.py` groups the corpus BY reason, and
+            # #100 drafts the non-delegable list from that grouping. A masked
+            # `rm: mutating` under-counts rm in the measurement that decides
+            # what Phase 3 deletes.
         if unreadable_target or any(
             not self._target_is_safe_write(t) for t in write_targets
         ):
