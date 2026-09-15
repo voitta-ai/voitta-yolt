@@ -187,7 +187,17 @@ class GrammarClassifier:
             decisions.append(self._maybe_allow(
                 seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
             ))
-            return
+            # Deliberately NOT returning. An unknown redirect target must not
+            # mask the command's own verdict: `terraform destroy ... > $LOG`
+            # is `terraform destroy: mutating` first and an unclassifiable
+            # redirect second. Returning here dropped the destroy entirely,
+            # and aggregation already ranks unsafe above unknown, so falling
+            # through yields the stricter of the two rather than whichever
+            # was noticed first.
+            #
+            # This was latent before #128: an unreadable target was dropped,
+            # write_targets came back empty, and the command got classified
+            # by accident. Reading the target correctly is what exposed it.
         # All write targets safe (or none): fall through and classify the
         # command itself.
 

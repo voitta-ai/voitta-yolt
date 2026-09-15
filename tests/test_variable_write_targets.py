@@ -107,6 +107,38 @@ class UnreadableTargetCostsFriction(unittest.TestCase):
             classifier._redirect_write_target = original
 
 
+class RedirectMustNotMaskTheCommand(unittest.TestCase):
+    """An unclassifiable redirect target must not hide a dangerous command.
+
+    `_walk_redirected` returned as soon as a write target was not known-safe,
+    so the command itself was never classified. That was latent: before #128
+    an unreadable target was dropped, `write_targets` came back empty, and the
+    command got classified by accident. Reading the target correctly exposed
+    it -- measured on the dogfood corpus, two real
+    `terraform destroy -auto-approve > $LOG` lines went from `unsafe` to
+    `unknown`, which is a destructive command losing its prompt.
+
+    Aggregation already ranks unsafe above unknown. The bug was the early
+    return, not the precedence.
+    """
+
+    def test_destroy_survives_an_unreadable_redirect(self):
+        self.assertEqual(
+            classify("terraform destroy -auto-approve > $SC/run.log 2>&1"),
+            "unsafe")
+
+    def test_rm_survives_an_unreadable_redirect(self):
+        self.assertEqual(classify("rm -rf /tmp/x > $LOG"), "unsafe")
+
+    def test_harmless_command_still_reports_the_redirect(self):
+        # The unknown verdict is still produced when nothing outranks it.
+        self.assertEqual(classify("echo hi > $LOG"), "unknown")
+
+    def test_protected_target_still_wins_over_a_safe_command(self):
+        self.assertEqual(
+            classify("echo x > $HOME/.ssh/authorized_keys"), "unsafe")
+
+
 class NormaliserKeepsOrdinaryPathsAlone(unittest.TestCase):
     def test_tmp_stays_safe(self):
         self.assertEqual(classify("echo x > /tmp/scratch"), "safe")
