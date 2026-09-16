@@ -345,33 +345,11 @@ matching `unknown` or `unsafe` node to `safe`. That was the second way it
 granted approval — sourced from your config rather than its own rules, but
 a grant all the same.
 
-<<<<<<< HEAD
 It is gone
 ([#98](https://github.com/voitta-ai/voitta-yolt/issues/98)). Under auto
 mode a hook that answers on the host's behalf is a classifier bypass the
 host cannot see, and that is as true of a grant you configured as of one
 YOLT decided. **YOLT no longer reads your settings files at all.**
-=======
-`--no-user-allow` turns that pass off for one invocation:
-
-    python3 hooks/grammar_classifier.py --no-user-allow 'gh pr merge 1 --squash'
-    {"decision": "unsafe", "reason": "gh pr merge: mutating", "allow_patterns": 0}
-
-without it, the same command on a machine whose settings allow `Bash(gh pr
-merge*)` comes back `safe`. The flag exists for consumers that are **not** the
-interactive terminal those settings were written for -- a service that
-classifies commands on behalf of whoever can message it inherits the operator's
-personal permissions otherwise, and its auto-run set becomes whatever that
-person once allowed themselves. Only the consumer knows which it is, so the
-Claude Code hook keeps the default. The `allow_patterns` count in the output is
-there so a consumer can log the size of that surface at startup instead of
-guessing at it.
-
-This earns its keep on compound forms. The built-in matcher only sees
-the outer wrapper, so a `for ... do CMD; done` whose `CMD` you've
-already whitelisted (`Bash(mycli list*)`) still prompts. YOLT walks
-into the loop body and matches each command against the whitelist.
->>>>>>> origin/master
 
 ### Compatibility for consumers that passed `--no-user-allow`
 
