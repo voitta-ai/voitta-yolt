@@ -421,13 +421,62 @@ is asserting something real about 2.0.0, which is a better contract than
 trusting a flag to remain a no-op.
 
 
-Your `permissions.allow` entries still work — Claude Code honors them
-itself, which is the appropriate place for them.
+Your `permissions.allow` entries are Claude Code's to honor, which is the
+appropriate place for them — but **under auto mode it does not honor the
+Bash ones.** Auto mode runs with `classifyAllShell` active, and it then
+ignores every `Bash(...)` and PowerShell allow rule at runtime; outside auto
+mode those same rules apply normally. So a standing `Bash(gh pr merge*)` is
+authoritative in one mode and inert in the other, with nothing at the prompt
+saying which mode you are in.
+
+Two consequences worth stating plainly, because both have been hit:
+
+- A rule you added to stop being asked about a command will stop working the
+  moment you turn auto mode on, and the denial you get will not mention the
+  rule.
+- YOLT's paste-ready `Bash(...)` suggestion below is subject to the same
+  thing. Adding it fixes the prompt outside auto mode and changes nothing
+  inside it.
 
 For common workflow writes (`git push`, `git commit`, `gh issue create`,
 `gh pr comment`, ...), YOLT's `ask` message still includes a paste-ready
 `Bash(...)` suggestion. It is advice to you, not a grant: nothing happens
-until you add it yourself, and Claude Code — not YOLT — is what acts on it.
+until you add it yourself, and Claude Code — not YOLT — is what acts on it,
+subject to the auto-mode caveat above.
+
+## One verdict, two consumers that read it oppositely
+
+YOLT has two kinds of caller, and they disagree about what a non-`safe`
+verdict means. The realignment was designed against both, so the difference
+is worth stating before reading any decision table.
+
+**The Claude Code `PreToolUse` hook.** `safe` and `unknown` are the same
+event: YOLT exits 0 with no `permissionDecision` and the host decides.
+Delegating a command to the host is therefore free — indistinguishable, on
+the wire, from judging it safe.
+
+**A fail-closed programmatic consumer.**
+[shmobster](https://github.com/voitta-ai/shmobster) — a self-hosted Slack
+agent — runs `grammar_classifier.py` as a subprocess and compares
+`== "safe"`, never `== "unsafe"`, so that a verdict it does not recognize
+lands on the restrictive side. For it, `safe` and `unknown` are *opposites*.
+Anything not literally `safe` ends the model's turn and parks the command on
+a Slack approval card until a trusted human returns, which may be hours.
+Delegating a command costs one asynchronous human interrupt.
+
+This is the whole of
+[#144](https://github.com/voitta-ai/voitta-yolt/issues/144): 2.0.0 collapses
+*we deliberately delegate this* and *we could not classify this* into a
+single `unknown`. The hook cannot tell those apart and does not need to. A
+consumer that must fail closed on the second has no way to avoid failing
+closed on the first, so ordinary reads — `cat`, `ls`, `grep`, `git status`,
+`gh pr list` — park. shmobster pins `>= 1.6.0, < 2.0.0` at startup for this
+reason, and the pin lifts when the two are distinguishable.
+
+The general rule, for anyone writing a consumer: **decide what an
+unrecognized verdict means before you add one.** Comparing against `safe` is
+what makes a new verdict fail safely; comparing against `unsafe` is what
+makes a new verdict fail open.
 
 ## Dependencies
 
