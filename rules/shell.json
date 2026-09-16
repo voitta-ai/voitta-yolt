@@ -69,7 +69,7 @@
     "~/.cache/*",
     "~/.claude/*"
   ],
-  "_unsafe_write_targets_note": "Write targets dangerous enough to classify 'unsafe' (ask with a specific reason) rather than 'unknown' (contextless default prompt). Checked BEFORE safe_write_targets, so an entry here overrides a broader safe glob -- e.g. '~/.claude/settings.json' is unsafe even though '~/.claude/*' is a safe-write target, because settings.json can disable this hook. That reasoning is not specific to settings.json: a skill file is read into the model's context on every later turn, an agent definition carries tool grants, files under hooks/ are executed by the host, and an MCP config names servers the agent will trust. Each one steers the agent, so each one is listed. Note the asymmetry this corrects: '~/.bashrc' was already unsafe for steering a shell while '~/.claude/skills/*' was safe for steering the agent. '~/.claude/*' stays a safe-write target for everything else under it -- logs, caches and '~/.claude/yolt/*' state -- because this list is checked first and the specific entries win. Applies to redirect targets and to the write-target arguments of tee/cp/mv/install/dd/find. Glob semantics are fnmatch; '~/' is expanded before matching.",
+  "_unsafe_write_targets_note": "Write targets dangerous enough to classify 'unsafe' (ask with a specific reason) rather than 'unknown' (contextless default prompt). Checked BEFORE safe_write_targets, so an entry here overrides a broader safe glob -- e.g. '~/.claude/settings.json' is unsafe even though '~/.claude/*' is a safe-write target, because settings.json can disable this hook. That reasoning is not specific to settings.json: a skill file is read into the model's context on every later turn, an agent definition carries tool grants, files under hooks/ are executed by the host, and an MCP config names servers the agent will trust. Each one steers the agent, so each one is listed. Note the asymmetry this corrects: '~/.bashrc' was already unsafe for steering a shell while '~/.claude/skills/*' was safe for steering the agent. '~/.claude/*' stays a safe-write target for everything else under it -- logs, caches and '~/.claude/yolt/*' state -- because this list is checked first and the specific entries win. The same steering argument reaches two families the list previously missed. A file written into a PATH directory BECOMES the next 'gh', 'git' or 'aws' the agent runs, which steers it at least as directly as a hook does by hijacking a tool it already trusts -- hence '/usr/local/bin/*', '/opt/homebrew/bin/*', '~/.local/bin/*', '~/bin/*' and the system bin and sbin dirs. Note '~/.local/bin' is where the Claude Code binary itself is installed, so a write there can replace the agent's own host. And '.git/hooks/*' executes on the next commit or push, which is the exact analogue of '~/.claude/hooks/*' already listed; it is relative rather than absolute, so it carries a '*/' twin like '.mcp.json' does. Deliberately NOT listed: '/usr/local/lib/python3.*/site-packages/*' and friends, because an import path is dynamic and package installs write there routinely, which would cost false positives without closing a steering route the PATH entries leave open. Note '/usr/local/etc/*' was already here while '/usr/local/bin/*' was not -- protecting a tool's config but not the tool. Applies to redirect targets and to the write-target arguments of tee/cp/mv/install/dd/find. Glob semantics are fnmatch; '~/' is expanded before matching.",
   "unsafe_write_targets": [
     "~/.bashrc",
     "~/.zshrc",
@@ -116,7 +116,17 @@
     "~/.codex/rules/*",
     "~/.codex/memories/*",
     ".mcp.json",
-    "*/.mcp.json"
+    "*/.mcp.json",
+    ".git/hooks/*",
+    "*/.git/hooks/*",
+    "~/.local/bin/*",
+    "~/bin/*",
+    "/usr/local/bin/*",
+    "/opt/homebrew/bin/*",
+    "/usr/bin/*",
+    "/bin/*",
+    "/usr/sbin/*",
+    "/sbin/*"
   ],
   "interpreters": {
     "python3": {
