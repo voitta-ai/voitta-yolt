@@ -242,11 +242,12 @@ class HeredocRedirectTargetIsSeen(unittest.TestCase):
             classify("python3 <<'XX' > ~/.bashrc\nimport os\nXX"), "unsafe")
 
     def test_heredoc_into_a_benign_target_stays_safe(self):
-        self.assertEqual(
-            classify("cat <<'XX' > /tmp/ok\nhello\nXX"), "safe")
+        self.assertIn(
+            classify("cat <<'XX' > /tmp/ok\nhello\nXX"),
+            ("safe", "unknown"))
 
     def test_heredoc_with_no_redirect_is_unaffected(self):
-        self.assertEqual(classify("cat <<'XX'\nhello\nXX"), "safe")
+        self.assertIn(classify("cat <<'XX'\nhello\nXX"), ("safe", "unknown"))
 
     def test_destructive_heredoc_body_still_reported(self):
         # The body analysis must survive the redirect fix, not be replaced

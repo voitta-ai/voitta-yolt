@@ -24,13 +24,11 @@ from tree_sitter import Language, Parser
 
 from rule_classifier import (
     _expand_home,
-    DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN,
+    DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
     SUBSTITUTION_PLACEHOLDER,
     RuleClassifier,
     aggregate_decisions,
-    load_allow_patterns,
     load_shell_rules,
-    match_allow_patterns,
 )
 
 
@@ -61,10 +59,16 @@ class GrammarClassifier:
 
     MAX_RECURSION_DEPTH = 8
 
-    def __init__(self, rules, python_analyzer_factory=None, allow_patterns=None):
+    def __init__(self, rules, python_analyzer_factory=None, cwd=None,
+                 policy=None):
         self.rules = rules
         self.python_analyzer_factory = python_analyzer_factory
-        self.allow_patterns = list(allow_patterns) if allow_patterns else []
+        # The shell's directory when the command starts, and the deny
+        # policy that may consult git state there. `_cwd` is re-derived per
+        # `classify()` call because a leading `cd` moves it.
+        self.cwd = cwd
+        self.policy = policy
+        self._cwd = cwd
         self.safe_write_targets = list(rules.get("safe_write_targets", ["/dev/null"]))
         self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
         self._rules = RuleClassifier(
@@ -88,6 +92,9 @@ class GrammarClassifier:
 
         if root.has_error:
             return (DECISION_UNKNOWN, "tree-sitter parse error")
+
+        if _depth == 0:
+            self._cwd = self.cwd
 
         decisions = []
         self._walk(root, src, decisions, _depth)
@@ -172,39 +179,39 @@ class GrammarClassifier:
             None,
         )
         if unsafe_target is not None:
-            seg = self._slice(node, src)
-            decisions.append(self._maybe_allow(
-                seg, (DECISION_UNSAFE,
-                      "writes to protected path '{}' via redirection".format(
-                          unsafe_target)),
-            ))
+            decisions.append(
+                (DECISION_UNSAFE,
+                 "writes to protected path '{}' via redirection".format(
+                     unsafe_target)),
+            )
             # Symmetric with the unknown branch below: record and continue.
             # Returning here masked the command's own reason --
             # `rm -rf /tmp/x > ~/.bashrc` reported only the redirect, never
-            # `rm: mutating`. The verdict was unsafe either way, so this was
+            # `rm: mutating`. The verdict is unsafe either way, so this was
             # never a security gap, but the reason is not decoration:
-            # `scripts/replay_unsafe.py` groups the corpus BY reason, and
-            # #100 drafts the non-delegable list from that grouping. A masked
-            # `rm: mutating` under-counts rm in the measurement that decides
-            # what Phase 3 deletes.
+            # `scripts/replay_unsafe.py` groups the corpus BY reason and #100
+            # drafts the non-delegable list from that grouping.
+        # A target already reported as unsafe must not ALSO be reported as
+        # unclassifiable: an unsafe target is not a safe one, so the bare
+        # `not safe` test fired for it too and one redirect recorded two
+        # decisions. Aggregation picked the right verdict either way, which
+        # is why it was invisible, but "writes to a protected path" and
+        # "could not be classified" are contradictory claims about the same
+        # token.
         if unreadable_target or any(
-            not self._target_is_safe_write(t) for t in write_targets
+            not self._target_is_safe_write(t)
+            and not self._target_is_unsafe_write(t)
+            for t in write_targets
         ):
-            seg = self._slice(node, src)
-            decisions.append(self._maybe_allow(
-                seg, (DECISION_UNKNOWN, "writes to a file via redirection"),
-            ))
+            decisions.append(
+                (DECISION_UNKNOWN, "writes to a file via redirection"),
+            )
             # Deliberately NOT returning. An unknown redirect target must not
             # mask the command's own verdict: `terraform destroy ... > $LOG`
             # is `terraform destroy: mutating` first and an unclassifiable
-            # redirect second. Returning here dropped the destroy entirely,
-            # and aggregation already ranks unsafe above unknown, so falling
-            # through yields the stricter of the two rather than whichever
-            # was noticed first.
-            #
-            # This was latent before #128: an unreadable target was dropped,
-            # write_targets came back empty, and the command got classified
-            # by accident. Reading the target correctly is what exposed it.
+            # redirect second. Aggregation already ranks unsafe above unknown,
+            # so falling through yields the stricter of the two rather than
+            # whichever was noticed first.
         # All write targets safe (or none): fall through and classify the
         # command itself.
 
@@ -252,12 +259,91 @@ class GrammarClassifier:
         for c in node.children:
             self._collect_substitutions(c, src, sub_decisions, _depth + 1)
 
-        match_string = " ".join(argv)
+        # A literal `cd` moves the directory the policy layer will judge,
+        # and it has to be tracked before the sibling commands are
+        # classified: `cd <repo> && git push` is the whole reason this
+        # exists.
+        if cmd_name == "cd":
+            self._track_cd(argv)
+
         result = self._rules.classify_tokens(argv)
-        result = self._maybe_allow(match_string, result)
+        result = self._maybe_deny_by_policy(argv, result)
         if sub_decisions:
             return aggregate_decisions(sub_decisions + [result])
         return result
+
+    def _track_cd(self, argv):
+        """Follow a literal `cd` so the policy layer judges the directory
+        the later commands actually run in.
+
+        `cd /path/to/worktree && git push --force` is the shape this exists
+        for. Anything the walker cannot resolve statically -- an expansion,
+        `cd -`, a substitution -- sets the tracked directory to None, which
+        disables the policy for the rest of the invocation rather than
+        letting it judge the wrong tree.
+        """
+        # `cd -` is the previous directory, which no static walk can know.
+        # It has to be tested BEFORE flags are filtered out, or it is
+        # discarded as a flag and `cd -` silently resolves to $HOME -- which
+        # is both wrong and the opposite of unresolvable.
+        raw = argv[1:]
+        if "-" in raw:
+            self._cwd = None
+            return
+        args = [a for a in raw if not a.startswith("-")]
+        if not args:
+            self._cwd = os.path.expanduser("~")
+            return
+        target = args[0]
+        # Anything the walker cannot resolve to one literal path. Brace
+        # expansion and `?` are here for completeness rather than risk:
+        # an unexpanded `{a,b}` would not exist on disk, so the probe would
+        # fail and deny nothing either way. Marking it explicitly keeps the
+        # unresolvable set a statement of intent instead of a list of the
+        # cases someone happened to think of.
+        if any(ch in target for ch in "$`*{}?"):
+            self._cwd = None
+            return
+        target = os.path.expanduser(target)
+        if os.path.isabs(target):
+            self._cwd = target
+        elif self._cwd is not None:
+            self._cwd = os.path.normpath(os.path.join(self._cwd, target))
+
+    def _maybe_deny_by_policy(self, argv, result):
+        """Give the policy layer a chance to upgrade `unsafe` -> `deny`.
+
+        Only `unsafe` is offered. The policy exists to refuse a narrow set
+        of writes the static rules already flagged; it must never be able
+        to reach something the rules cleared, so `safe` and `unknown` are
+        not routed through it.
+
+        What a `None` from the policy means, since it is the common case
+        and the reason this is safe:
+
+            SOLO          -> no deny; `unsafe` stands, operator is asked
+            UNDETERMINED  -> no deny; `unsafe` stands, operator is asked
+            SHARED        -> deny
+
+        `UNDETERMINED` is not a pessimistic default or a retry signal. It
+        is every probe failure -- git missing, `user.email` unset, remote
+        never fetched, timeout, garbled output -- and it deliberately lands
+        in the same bucket as SOLO. The ancestor of this policy (#82) used
+        the same probes to *grant*, where collapsing "definitely not" into
+        "cannot tell" was safe. Inverted it is not: an unset `user.email`
+        read as SHARED would deny every force push in the repository.
+
+        See `git_policy.authorship`, and the tests in
+        `tests/test_git_policy.py` -- `FailedProbeNeverDenies` at the
+        policy layer, `ProbeFailureNeverDeniesThroughTheClassifier` at this
+        one.
+        """
+        if self.policy is None or result[0] != DECISION_UNSAFE:
+            return result
+        reason = self.policy.evaluate(argv, self._cwd)
+        if reason is None:
+            return result
+        return (DECISION_DENY, reason)
 
     def _collect_substitutions(self, node, src, decisions, _depth):
         if node.type in ("command_substitution", "process_substitution"):
@@ -403,8 +489,8 @@ class GrammarClassifier:
                 # quotes suppress every expansion, so unlike a `string` the
                 # content needs no reconstruction -- only the quotes come
                 # off. Until #132 this matched no branch, the target stayed
-                # None, and quoting a protected path was enough to turn an
-                # `ask` into silence.
+                # None, and quoting a protected path turned an `ask` into
+                # silence.
                 target = self._slice(c, src).strip("'")
             elif c.type in _REDIR_TARGET_NODES:
                 # `> $HOME/.ssh/authorized_keys` parses as a `concatenation`,
@@ -476,15 +562,6 @@ class GrammarClassifier:
         """Used by RuleClassifier for `bash -c <script>` interpreters."""
         return self.classify(script, _depth=depth)
 
-    def _maybe_allow(self, match_string, result):
-        decision, reason = result
-        if decision == DECISION_SAFE:
-            return result
-        match = match_allow_patterns(match_string, self.allow_patterns)
-        if match is None:
-            return result
-        return (DECISION_SAFE, "matches user allow pattern '{}'".format(match))
-
     @staticmethod
     def _suggest_allow_pattern_from_argv(argv):
         cmd_name = os.path.basename(argv[0])
@@ -549,10 +626,14 @@ class GrammarClassifier:
 
         namespace = argv[1]
         action = argv[2]
+        # The gh surface that still classifies after Phase 3 (#100). This
+        # map used to hold `pr` and `issue`, which that phase delegated to
+        # auto mode -- leaving a hint generator that could only fire for
+        # commands the hook no longer has an opinion about.
         allowed = {
-            "pr": {"create", "comment", "edit", "merge", "ready",
-                   "review", "update-branch"},
-            "issue": {"create", "comment", "edit", "close", "reopen"},
+            "release": {"create", "delete"},
+            "repo": {"fork"},
+            "run": {"cancel"},
         }
         if action in allowed.get(namespace, set()):
             return "Bash(gh {} {}*)".format(namespace, action)
@@ -570,12 +651,11 @@ class GrammarClassifier:
         return None
 
 
-def classify_command(command, rules, python_analyzer_factory=None, allow_patterns=None):
+def classify_command(command, rules, python_analyzer_factory=None):
     """Module-level convenience wrapper."""
     classifier = GrammarClassifier(
         rules,
         python_analyzer_factory=python_analyzer_factory,
-        allow_patterns=allow_patterns,
     )
     return classifier.classify(command)
 
@@ -607,12 +687,14 @@ def run_cli():
         user_overrides_path=Path.home() / ".claude" / "yolt" / "shell.json",
     )
 
-    cwd = Path.cwd()
-    allow_patterns = [] if no_user_allow else load_allow_patterns([
-        Path.home() / ".claude" / "settings.json",
-        cwd / ".claude" / "settings.json",
-        cwd / ".claude" / "settings.local.json",
-    ])
+    # `--no-user-allow` is accepted and does nothing, deliberately. Phase 1
+    # removed the allow path entirely, so there is no inherited allow-pattern
+    # surface left for it to switch off -- the behaviour it asked for is now
+    # unconditional. It stays in the signature because consumers pass it
+    # unconditionally, and a removed flag would be read as the command,
+    # turning every verdict into a verdict about the string
+    # "--no-user-allow". See the 2.0.0 compatibility note.
+    _ = no_user_allow
 
     # Python analyzer factory — lazy import so this CLI works without
     # the rule data dir for python rules.
@@ -631,7 +713,6 @@ def run_cli():
         command,
         rules,
         python_analyzer_factory=factory,
-        allow_patterns=allow_patterns,
     )
 
     # How many allow patterns were in play is part of the verdict's meaning: the
@@ -639,7 +720,12 @@ def run_cli():
     # without this a consumer cannot see -- or log at startup -- how large the
     # inherited auto-run surface is.
     print(json.dumps(
-        {"decision": decision, "reason": reason, "allow_patterns": len(allow_patterns)},
+        # `allow_patterns` is retained and is honestly 0: Phase 1 removed the
+        # allow path, so no allow pattern is ever in play for any verdict.
+        # Kept because a consumer asserting it is 0 at startup is asserting
+        # something true about 2.0.0, which is a better contract than trusting
+        # a flag to stay a no-op. See the 2.0.0 compatibility note.
+        {"decision": decision, "reason": reason, "allow_patterns": 0},
         indent=2,
     ))
     sys.exit(0)

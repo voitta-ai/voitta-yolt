@@ -10,7 +10,6 @@ calls in production. Coverage targets:
   - Quoting: bash `'\\''` close-escape-open idiom, `$'...'` ANSI-C strings,
     concatenated strings.
   - Heredocs (with python body), redirects, process substitution.
-  - User whitelist upgrade, including explicit overrides of unsafe atoms.
 
 Runs with stdlib unittest plus tree-sitter / tree-sitter-bash:
 
@@ -30,7 +29,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_DIR = REPO_ROOT / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
 
-from grammar_classifier import GrammarClassifier  # noqa: E402
+from grammar_classifier import (  # noqa: E402
+    GrammarClassifier,
+    classify_command,
+)
 from rule_classifier import (  # noqa: E402
     DECISION_SAFE,
     DECISION_UNKNOWN,
@@ -40,7 +42,7 @@ from rule_classifier import (  # noqa: E402
 from yolt_analyzer import SafetyAnalyzer, load_rules as load_py_rules  # noqa: E402
 
 
-def _make_classifier(allow_patterns=None):
+def _make_classifier():
     shell_rules = load_shell_rules(REPO_ROOT / "rules")
     py_rules = load_py_rules(REPO_ROOT / "rules")
 
@@ -50,8 +52,42 @@ def _make_classifier(allow_patterns=None):
     return GrammarClassifier(
         shell_rules,
         python_analyzer_factory=factory,
-        allow_patterns=allow_patterns or [],
     )
+
+
+
+_SAFE_DECISION = DECISION_SAFE
+
+
+class _NotFlagged:
+    """Stands in for DECISION_SAFE in this module.
+
+    Phase 3 (#100) deleted the rules that modelled which commands are SAFE,
+    so a command that used to classify `safe` now classifies `unknown`.
+    Post-Phase-1 (#98) those are the same thing to Claude Code -- both exit
+    silently, emitting no permission decision -- so a case written as
+    "expect safe" is asserting the absence of a flag, and that is what this
+    compares. DECISION_UNSAFE and DECISION_DENY assertions are untouched and
+    stay exact.
+    """
+
+    def __eq__(self, other):
+        retval = other in (_SAFE_DECISION, DECISION_UNKNOWN)
+        return retval
+
+    def __ne__(self, other):
+        retval = not self.__eq__(other)
+        return retval
+
+    def __hash__(self):
+        retval = hash(_SAFE_DECISION)
+        return retval
+
+    def __repr__(self):
+        return "<not flagged: 'safe' or 'unknown'>"
+
+
+DECISION_SAFE = _NotFlagged()
 
 
 class TestClassifyScenarios(unittest.TestCase):
@@ -121,18 +157,21 @@ class TestClassifyScenarios(unittest.TestCase):
         self.assertDecision("istioctl analyze", DECISION_SAFE)
 
     def test_istioctl_mutating_subcommands_unsafe(self):
-        self.assertDecision("istioctl install --set x=y", DECISION_UNSAFE)
-        self.assertDecision("istioctl uninstall --purge", DECISION_UNSAFE)
+        # Phase 3: istioctl delegated to auto mode (#100)
+        self.assertDecision("istioctl install --set x=y", DECISION_UNKNOWN)
+        self.assertDecision("istioctl uninstall --purge", DECISION_UNKNOWN)
 
     def test_istioctl_manifest_nested(self):
+        # Phase 3: istioctl delegated to auto mode (#100)
         self.assertDecision("istioctl manifest generate", DECISION_SAFE)
-        self.assertDecision("istioctl manifest install", DECISION_UNSAFE)
+        self.assertDecision("istioctl manifest install", DECISION_UNKNOWN)
 
     def test_eksctl_get_safe_create_unsafe(self):
+        # Phase 3: eksctl delegated to auto mode (#100)
         self.assertDecision("eksctl get cluster", DECISION_SAFE)
         self.assertDecision("eksctl version", DECISION_SAFE)
-        self.assertDecision("eksctl create cluster -f c.yaml", DECISION_UNSAFE)
-        self.assertDecision("eksctl delete nodegroup ng", DECISION_UNSAFE)
+        self.assertDecision("eksctl create cluster -f c.yaml", DECISION_UNKNOWN)
+        self.assertDecision("eksctl delete nodegroup ng", DECISION_UNKNOWN)
 
     def test_python3_c_inline_safe(self):
         self.assertDecision('python3 -c "print(1+1)"', DECISION_SAFE)
@@ -207,27 +246,31 @@ class TestClassifyScenarios(unittest.TestCase):
         self.assertDecision("rm -rf /tmp/foo", DECISION_UNSAFE)
 
     def test_aws_terminate_unsafe(self):
+        # Phase 3: aws verb patterns retired; only iam is non-delegable (#100)
         self.assertDecision(
             "aws ec2 terminate-instances --instance-ids i-abc",
-            DECISION_UNSAFE,
+            DECISION_UNKNOWN,
         )
 
     def test_aws_s3_rm_unsafe(self):
-        self.assertDecision("aws s3 rm s3://bucket/key", DECISION_UNSAFE)
+        # Phase 3: aws s3 delegated; only iam is non-delegable (#100)
+        self.assertDecision("aws s3 rm s3://bucket/key", DECISION_UNKNOWN)
 
     def test_aws_timestream_query_delete_is_payload_unsafe(self):
+        # Phase 3: aws SQL-payload rules retired (#100)
         # Issue #29: the SQL payload escalates an otherwise-unknown verb.
         self.assertDecision(
             'aws timestream-query query --query-string "DELETE FROM db.t"',
-            DECISION_UNSAFE,
+            DECISION_UNKNOWN,
         )
 
     def test_aws_athena_start_query_select_stays_unsafe_floor(self):
+        # Phase 3: aws SQL-payload rules retired (#100)
         # Issue #29: start-* is a write verb; with no user override the SQL
         # payload cannot weaken it, so a read-only query still asks.
         self.assertDecision(
             'aws athena start-query-execution --query-string "SELECT 1"',
-            DECISION_UNSAFE,
+            DECISION_UNKNOWN,
         )
 
     def test_gh_api_post_unsafe(self):
@@ -253,8 +296,9 @@ class TestClassifyScenarios(unittest.TestCase):
         )
 
     def test_kubectl_exec_unsafe(self):
+        # Phase 3: only kubectl delete is non-delegable (#100)
         self.assertDecision(
-            "kubectl exec -it pod -- bash", DECISION_UNSAFE,
+            "kubectl exec -it pod -- bash", DECISION_UNKNOWN,
         )
 
     def test_git_push_unsafe(self):
@@ -264,7 +308,8 @@ class TestClassifyScenarios(unittest.TestCase):
         self.assertDecision("terraform apply", DECISION_UNSAFE)
 
     def test_terraform_state_rm_unsafe(self):
-        self.assertDecision("terraform state rm foo.bar", DECISION_UNSAFE)
+        # Phase 3: only terraform apply/destroy are non-delegable (#100)
+        self.assertDecision("terraform state rm foo.bar", DECISION_UNKNOWN)
 
     def test_find_delete_unsafe(self):
         self.assertDecision("find . -name '*.py' -delete", DECISION_UNSAFE)
@@ -300,7 +345,8 @@ class TestClassifyScenarios(unittest.TestCase):
         )
 
     def test_sed_inplace_unsafe(self):
-        self.assertDecision("sed -i 's/a/b/' file.txt", DECISION_UNSAFE)
+        # Phase 3: sed -i delegated to auto mode (#100)
+        self.assertDecision("sed -i 's/a/b/' file.txt", DECISION_UNKNOWN)
 
     def test_python3_c_os_system_unsafe(self):
         self.assertDecision(
@@ -522,199 +568,6 @@ class TestValuelessGlobalFlags(unittest.TestCase):
     def test_gh_no_pager_pr_list(self):
         self.assertDecision("gh --no-pager pr list", DECISION_SAFE)
 
-
-class TestNestedSubcommandPaths(unittest.TestCase):
-    """Issue #17: path-aware classification for nested mutating verbs that
-    previously stopped at the first subcommand and were treated as safe."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.clf = _make_classifier()
-
-    def assertDecision(self, cmd, expected):
-        d, r = self.clf.classify(cmd)
-        self.assertEqual(
-            d, expected,
-            "cmd={!r}: got {}, reason={}".format(cmd, d, r),
-        )
-
-    # --- Acceptance criteria from issue #17 ---
-
-    def test_git_tag_create_not_safe(self):
-        # 'git tag v1.2.3' creates a lightweight tag. Was silently safe.
-        d, _ = self.clf.classify("git tag v1.2.3")
-        self.assertNotEqual(d, DECISION_SAFE)
-
-    def test_docker_image_rm_unsafe(self):
-        self.assertDecision("docker image rm alpine", DECISION_UNSAFE)
-
-    def test_kubectl_config_set_context_unsafe(self):
-        self.assertDecision("kubectl config set-context prod", DECISION_UNSAFE)
-
-    def test_helm_repo_add_unsafe(self):
-        self.assertDecision(
-            "helm repo add foo https://example.com",
-            DECISION_UNSAFE,
-        )
-
-    # --- git tag: positional means create, flag-based deletes/annotates ---
-
-    def test_git_tag_bare_lists_safe(self):
-        self.assertDecision("git tag", DECISION_SAFE)
-
-    def test_git_tag_dash_l_lists_safe(self):
-        self.assertDecision("git tag -l", DECISION_SAFE)
-
-    def test_git_tag_delete_unsafe(self):
-        self.assertDecision("git tag -d v1.2.3", DECISION_UNSAFE)
-
-    def test_git_tag_annotated_unsafe(self):
-        d, _ = self.clf.classify('git tag -a v1.2.3 -m "release"')
-        self.assertEqual(d, DECISION_UNSAFE)
-
-    # --- docker.image / container / volume / network / system ---
-
-    def test_docker_image_ls_safe(self):
-        self.assertDecision("docker image ls", DECISION_SAFE)
-
-    def test_docker_image_prune_unsafe(self):
-        self.assertDecision("docker image prune", DECISION_UNSAFE)
-
-    def test_docker_container_ls_safe(self):
-        self.assertDecision("docker container ls", DECISION_SAFE)
-
-    def test_docker_container_rm_unsafe(self):
-        self.assertDecision("docker container rm myctr", DECISION_UNSAFE)
-
-    def test_docker_volume_create_unsafe(self):
-        self.assertDecision("docker volume create vol1", DECISION_UNSAFE)
-
-    def test_docker_volume_ls_safe(self):
-        self.assertDecision("docker volume ls", DECISION_SAFE)
-
-    def test_docker_network_connect_unsafe(self):
-        self.assertDecision(
-            "docker network connect bridge myctr", DECISION_UNSAFE,
-        )
-
-    def test_docker_system_prune_unsafe(self):
-        self.assertDecision("docker system prune", DECISION_UNSAFE)
-
-    def test_docker_system_df_safe(self):
-        self.assertDecision("docker system df", DECISION_SAFE)
-
-    def test_bare_docker_image_no_longer_silently_safe(self):
-        # Was safe pre-issue-17. Now a partially-modeled namespace without
-        # a sub-subcommand should not auto-allow.
-        d, _ = self.clf.classify("docker image")
-        self.assertNotEqual(d, DECISION_SAFE)
-
-    # --- kubectl.config ---
-
-    def test_kubectl_config_view_safe(self):
-        self.assertDecision("kubectl config view", DECISION_SAFE)
-
-    def test_kubectl_config_use_context_unsafe(self):
-        self.assertDecision(
-            "kubectl config use-context prod", DECISION_UNSAFE,
-        )
-
-    def test_kubectl_config_delete_context_unsafe(self):
-        self.assertDecision(
-            "kubectl config delete-context prod", DECISION_UNSAFE,
-        )
-
-    # --- helm.repo ---
-
-    def test_helm_repo_list_safe(self):
-        self.assertDecision("helm repo list", DECISION_SAFE)
-
-    def test_helm_repo_update_unsafe(self):
-        # `helm repo update` refreshes the local repo cache - mutation.
-        self.assertDecision("helm repo update", DECISION_UNSAFE)
-
-    def test_helm_repo_index_unsafe(self):
-        # `helm repo index ./charts` writes / merges an index.yaml.
-        self.assertDecision("helm repo index ./charts", DECISION_UNSAFE)
-
-    def test_helm_repo_remove_unsafe(self):
-        self.assertDecision("helm repo remove foo", DECISION_UNSAFE)
-
-
-class TestPrismaDestructiveOps(unittest.TestCase):
-    """Issue #61: gate destructive Prisma schema/DDL/migration ops as unsafe
-    while keeping read-only / codegen subcommands safe. Destructive verbs are
-    nested under 'db' and 'migrate', matching the docker nested_subcommand
-    shape."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.clf = _make_classifier()
-
-    def assertDecision(self, cmd, expected):
-        d, r = self.clf.classify(cmd)
-        self.assertEqual(
-            d, expected,
-            "cmd={!r}: got {}, reason={}".format(cmd, d, r),
-        )
-
-    # --- prisma db: destructive ---
-
-    def test_prisma_db_push_unsafe(self):
-        self.assertDecision("prisma db push", DECISION_UNSAFE)
-
-    def test_prisma_db_push_accept_data_loss_unsafe(self):
-        # Trailing destructive flags must not downgrade the nested unsafe verb
-        # (this is the data-loss case gate #15 / issue #61 exists for).
-        self.assertDecision(
-            "prisma db push --accept-data-loss", DECISION_UNSAFE,
-        )
-
-    def test_prisma_db_execute_unsafe(self):
-        self.assertDecision(
-            "prisma db execute --file ./migration.sql", DECISION_UNSAFE,
-        )
-
-    def test_prisma_db_seed_unsafe(self):
-        self.assertDecision("prisma db seed", DECISION_UNSAFE)
-
-    # --- prisma migrate: destructive vs read-only ---
-
-    def test_prisma_migrate_reset_unsafe(self):
-        self.assertDecision("prisma migrate reset", DECISION_UNSAFE)
-
-    def test_prisma_migrate_deploy_unsafe(self):
-        self.assertDecision("prisma migrate deploy", DECISION_UNSAFE)
-
-    def test_prisma_migrate_dev_unsafe(self):
-        self.assertDecision("prisma migrate dev", DECISION_UNSAFE)
-
-    def test_prisma_migrate_status_safe(self):
-        self.assertDecision("prisma migrate status", DECISION_SAFE)
-
-    def test_prisma_migrate_diff_safe(self):
-        self.assertDecision("prisma migrate diff", DECISION_SAFE)
-
-    # --- top-level read-only / codegen subcommands ---
-
-    def test_prisma_generate_safe(self):
-        self.assertDecision("prisma generate", DECISION_SAFE)
-
-    def test_prisma_validate_safe(self):
-        self.assertDecision("prisma validate", DECISION_SAFE)
-
-    def test_prisma_studio_safe(self):
-        self.assertDecision("prisma studio", DECISION_SAFE)
-
-    # --- partially-modeled namespaces should not auto-allow ---
-
-    def test_bare_prisma_db_not_safe(self):
-        d, _ = self.clf.classify("prisma db")
-        self.assertNotEqual(d, DECISION_SAFE)
-
-    def test_bare_prisma_migrate_not_safe(self):
-        d, _ = self.clf.classify("prisma migrate")
-        self.assertNotEqual(d, DECISION_SAFE)
 
 
 class TestPythonHeredoc(unittest.TestCase):
@@ -967,12 +820,16 @@ class TestUnsafeWriteTargets(unittest.TestCase):
         self.assertIn("~/.bashrc", reason)
         self.assertIn("protected", reason)
 
-    def test_whitelist_still_overrides_unsafe_redirect(self):
-        # Consistent with every other unsafe atom: an explicit user allow
-        # pattern upgrades the deny-path write to safe.
-        clf = _make_classifier(allow_patterns=["echo *"])
-        d, _ = clf.classify("echo x > /etc/profile")
-        self.assertEqual(d, DECISION_SAFE)
+    def test_protected_redirect_is_unsafe(self):
+        # Pre-existing behaviour, restated after #98 removed the one
+        # escape hatch that could override it. Deliberately NOT claiming
+        # to pin the removal: with no patterns supplied this assertion
+        # holds on the old code too. The removal is pinned end-to-end in
+        # test_yolt_hook.TestHookIgnoresUserAllowPatterns, which writes a
+        # real settings file, and structurally by
+        # TestAllowHintSuggestions.test_classifier_refuses_allow_patterns_outright.
+        d, _ = _make_classifier().classify("echo x > /etc/profile")
+        self.assertEqual(d, DECISION_UNSAFE)
 
     def test_safe_first_redirect_does_not_mask_unsafe_second(self):
         # Every write redirect is evaluated, not just the first: a safe
@@ -998,221 +855,36 @@ class TestUnsafeWriteTargets(unittest.TestCase):
         self.assertDecision("echo x > /tmp/a > /tmp/b", DECISION_SAFE)
 
 
-class TestClassifierAllowPatterns(unittest.TestCase):
-    """Whitelist upgrades unknown and unsafe matches to safe."""
+class TestAllowHintSuggestions(unittest.TestCase):
+    """`suggest_allow_pattern` still produces the hint shown alongside an
+    `ask`, even though issue #98 removed the classifier's own honoring of
+    user allow patterns. The hint is advice to the operator, not a grant."""
 
-    def test_unknown_command_upgraded_to_safe(self):
-        clf = _make_classifier(allow_patterns=["mycli *"])
-        d, r = clf.classify("mycli foo --bar")
-        self.assertEqual(d, DECISION_SAFE)
-        self.assertIn("mycli *", r)
-
-    def test_unknown_aws_op_upgraded(self):
-        clf = _make_classifier(allow_patterns=["aws * weird-op*"])
-        d, _ = clf.classify("aws ec2 weird-op --flag")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_unsafe_overridden_by_whitelist(self):
-        clf = _make_classifier(allow_patterns=["aws *"])
-        d, _ = clf.classify("aws iam delete-user --user-name foo")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_unsafe_in_compound_overridden(self):
-        clf = _make_classifier(allow_patterns=["aws *", "rm *"])
-        d, _ = clf.classify("aws s3 ls && rm -rf /etc")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_no_whitelist_match_stays_unknown(self):
-        clf = _make_classifier(allow_patterns=["aws *"])
-        d, _ = clf.classify("somecommand_unknown")
-        self.assertEqual(d, DECISION_UNKNOWN)
-
-    def test_decomposed_atoms_match_whitelist(self):
-        # The outer `for` wrapper would not match `Bash(aws s3 ls*)`, but
-        # the grammar walker classifies each iteration body separately.
-        clf = _make_classifier(allow_patterns=["aws s3 ls*"])
-        d, _ = clf.classify("for b in foo bar; do aws s3 ls s3://$b/; done")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_writes_to_file_upgraded_when_whitelisted(self):
-        clf = _make_classifier(allow_patterns=["echo *"])
-        d, _ = clf.classify("echo x > /etc/profile")
-        self.assertEqual(d, DECISION_SAFE)
-
-    def test_empty_allow_patterns_unchanged_behavior(self):
-        clf = _make_classifier(allow_patterns=[])
-        d, _ = clf.classify("somecommand_unknown")
-        self.assertEqual(d, DECISION_UNKNOWN)
-
-    def test_suggested_allow_hints_round_trip(self):
+    def test_suggested_allow_hints(self):
         cases = [
             ("git -C /tmp/wt add file.txt", "Bash(git -C * add*)"),
-            (
-                'gh issue create --title "x" --body "y"',
-                "Bash(gh issue create*)",
-            ),
+            # Was `gh issue create`. Phase 3 (#100) delegated the gh pr and
+            # issue namespaces, so the hint map now covers the gh surface
+            # that still asks.
+            ("gh release create v1.0.0", "Bash(gh release create*)"),
+            ("gh repo fork o/r", "Bash(gh repo fork*)"),
         ]
         for command, expected_hint in cases:
             hint = _make_classifier().suggest_allow_pattern(command)
             self.assertEqual(hint, expected_hint)
-            inner = hint[len("Bash("):-1]
-            d, _ = _make_classifier(allow_patterns=[inner]).classify(command)
-            self.assertEqual(d, DECISION_SAFE, command)
 
+    def test_classifier_refuses_allow_patterns_outright(self):
+        # The classifier-level pin for #98. Asserting "an unknown stays
+        # unknown" here would be vacuous — it passes on the old code too,
+        # because the old constructor defaulted to no patterns. The
+        # non-vacuous statement is that the parameter is gone, so no
+        # caller can reintroduce the upgrade by passing one.
+        shell_rules = load_shell_rules(REPO_ROOT / "rules")
+        with self.assertRaises(TypeError):
+            GrammarClassifier(shell_rules, allow_patterns=["aws *"])
+        with self.assertRaises(TypeError):
+            classify_command("aws s3 ls", shell_rules, allow_patterns=["aws *"])
 
-class TestSqlCli(unittest.TestCase):
-    """SQL clients: sqlite3 / psql / mysql / mariadb / duckdb. The argv
-    walker extracts SQL and the SQL keyword scan decides safe vs unsafe."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.clf = _make_classifier()
-
-    def assertDecision(self, cmd, expected):
-        d, r = self.clf.classify(cmd)
-        self.assertEqual(d, expected, msg="cmd={!r}, reason={}".format(cmd, r))
-
-    # sqlite3 positional SQL
-    def test_sqlite3_select_safe(self):
-        self.assertDecision(
-            'sqlite3 /tmp/db.sqlite "SELECT * FROM foo"',
-            DECISION_SAFE,
-        )
-
-    def test_sqlite3_multiline_select_safe(self):
-        cmd = (
-            'sqlite3 /Users/x/voitta.db "SELECT sync_status,\n'
-            "COALESCE(sync_error,'none') AS err, "
-            "(SELECT count(*) FROM llm_tldr_indexed_files WHERE\n"
-            "folder_path='vrag-test-4') AS tldr_rows "
-            "FROM folder_sync_sources WHERE folder_path='vrag-test-4';\""
-        )
-        self.assertDecision(cmd, DECISION_SAFE)
-
-    def test_sqlite3_drop_unsafe(self):
-        self.assertDecision(
-            "sqlite3 /tmp/db.sqlite 'DROP TABLE foo'",
-            DECISION_UNSAFE,
-        )
-
-    def test_sqlite3_insert_unsafe(self):
-        self.assertDecision(
-            "sqlite3 /tmp/db.sqlite 'INSERT INTO foo VALUES (1)'",
-            DECISION_UNSAFE,
-        )
-
-    def test_sqlite3_interactive_is_unknown(self):
-        # Bare invocation drops the user into a REPL — no SQL to analyze.
-        self.assertDecision("sqlite3 /tmp/db.sqlite", DECISION_UNKNOWN)
-
-    def test_sqlite3_dot_tables_safe(self):
-        self.assertDecision(
-            "sqlite3 /tmp/db.sqlite '.tables'",
-            DECISION_SAFE,
-        )
-
-    def test_sqlite3_dot_import_unsafe(self):
-        self.assertDecision(
-            "sqlite3 /tmp/db.sqlite '.import foo.csv mytable'",
-            DECISION_UNSAFE,
-        )
-
-    def test_sqlite3_cmd_flag(self):
-        self.assertDecision(
-            'sqlite3 -cmd "SELECT 1" /tmp/db.sqlite',
-            DECISION_SAFE,
-        )
-
-    def test_sqlite3_readonly_flag_does_not_eat_positional(self):
-        # -readonly is valueless; it must not consume /tmp/db.sqlite.
-        self.assertDecision(
-            'sqlite3 -readonly /tmp/db.sqlite "SELECT 1"',
-            DECISION_SAFE,
-        )
-
-    # psql -c
-    def test_psql_dash_c_select_safe(self):
-        self.assertDecision(
-            'psql -c "SELECT 1" mydb',
-            DECISION_SAFE,
-        )
-
-    def test_psql_dash_c_delete_unsafe(self):
-        self.assertDecision(
-            'psql -c "DELETE FROM users WHERE id = 1" mydb',
-            DECISION_UNSAFE,
-        )
-
-    def test_psql_command_long_form(self):
-        self.assertDecision(
-            'psql --command "SELECT now()" mydb',
-            DECISION_SAFE,
-        )
-
-    def test_psql_dash_f_file_is_unknown(self):
-        # File contents are opaque to a static checker.
-        self.assertDecision(
-            "psql -f queries.sql mydb",
-            DECISION_UNKNOWN,
-        )
-
-    def test_psql_bare_dbname_is_unknown(self):
-        self.assertDecision("psql mydb", DECISION_UNKNOWN)
-
-    # mysql -e
-    def test_mysql_dash_e_select_safe(self):
-        self.assertDecision(
-            'mysql -e "SELECT VERSION()" mydb',
-            DECISION_SAFE,
-        )
-
-    def test_mysql_dash_e_drop_unsafe(self):
-        self.assertDecision(
-            'mysql -e "DROP TABLE foo" mydb',
-            DECISION_UNSAFE,
-        )
-
-    def test_mysql_execute_equals_form(self):
-        self.assertDecision(
-            'mysql --execute=SHOW DATABASES',
-            DECISION_SAFE,
-        )
-
-    # --- Issue #61: destructive DDL through a SQL CLI must be unsafe. ---
-
-    def test_psql_alter_table_drop_column_unsafe(self):
-        # ALTER TABLE ... DROP COLUMN is a destructive schema change.
-        self.assertDecision(
-            'psql -c "ALTER TABLE users DROP COLUMN email" mydb',
-            DECISION_UNSAFE,
-        )
-
-    def test_psql_bare_drop_table_unsafe(self):
-        self.assertDecision(
-            'psql -c "DROP TABLE users" mydb',
-            DECISION_UNSAFE,
-        )
-
-    def test_psql_truncate_unsafe(self):
-        self.assertDecision(
-            'psql -c "TRUNCATE TABLE users" mydb',
-            DECISION_UNSAFE,
-        )
-
-    # SQL injected via $(...) substitution — placeholders preserve safety.
-    def test_sqlite3_with_substitution_in_select(self):
-        self.assertDecision(
-            'sqlite3 /tmp/db "SELECT * FROM t WHERE id = $(echo 1)"',
-            DECISION_SAFE,
-        )
-
-    # Compound: SELECT then mutating substitution.
-    def test_sqlite3_with_destructive_substitution(self):
-        # The outer SQL is SELECT (safe), but the substitution runs `rm`.
-        self.assertDecision(
-            'sqlite3 /tmp/db "SELECT $(rm -rf /tmp/x)"',
-            DECISION_UNSAFE,
-        )
 
 
 class TestClassifierCLI(unittest.TestCase):
@@ -1237,11 +909,16 @@ class TestClassifierCLI(unittest.TestCase):
         claude = Path(self.home) / ".claude"
         claude.mkdir()
         (claude / "settings.json").write_text(
-            json.dumps({"permissions": {"allow": ["Bash(gh pr merge*)"]}})
+            # `rm` survives Phase 3 (#100); `gh pr merge` is delegated now,
+            # and a delegated command cannot show that the allow path is gone.
+            json.dumps({"permissions": {"allow": ["Bash(rm*)"]}})
         )
 
     def test_cli_reports_safe(self):
-        self.assertEqual(self._run("ls /tmp")["decision"], "safe")
+        # Phase 3 (#100) retired the rule that called `ls` safe. Safe and
+        # unknown are the same silent exit post-Phase-1; what this asserts
+        # is that the CLI does not flag a read.
+        self.assertIn(self._run("ls /tmp")["decision"], ("safe", "unknown"))
 
     def test_cli_reports_unsafe(self):
         self.assertEqual(self._run("rm -rf /tmp/foo")["decision"], "unsafe")
@@ -1249,22 +926,34 @@ class TestClassifierCLI(unittest.TestCase):
     def test_cli_reports_unknown(self):
         self.assertEqual(self._run("somecommand_unknown --flag")["decision"], "unknown")
 
-    def test_cli_inherits_user_allow_patterns_by_default(self):
-        # the Claude Code hook's own behavior: a pattern the user allowed
-        # upgrades a mutating command to safe
-        out = self._run("gh pr merge 1 --squash")
-        self.assertEqual(out["decision"], "safe")
-        self.assertIn("allow pattern", out["reason"])
-        self.assertEqual(out["allow_patterns"], 1)
+    def test_cli_no_longer_inherits_user_allow_patterns(self):
+        """2.0.0 removed the allow path, so settings files change nothing.
+
+        Until 1.2.0 this asserted the opposite: a pattern the operator had
+        allowed upgraded a mutating command to `safe`, and `--no-user-allow`
+        existed to switch that off for consumers that were not the terminal
+        those settings were written for.
+
+        Phase 1 (#98) removed the inheritance entirely, so the behaviour the
+        flag asked for is now unconditional and the verdict is the same with
+        or without it. Kept as a test rather than deleted because it is the
+        assertion that would catch the allow path being reintroduced.
+        """
+        out = self._run("rm -rf /tmp/foo")
+        self.assertEqual(out["decision"], "unsafe")
+        self.assertEqual(out["allow_patterns"], 0)
+        self.assertNotIn("allow pattern", out["reason"])
 
     def test_no_user_allow_drops_them(self):
         # a consumer that is not that terminal gets the rules' own verdict
-        out = self._run("gh pr merge 1 --squash", "--no-user-allow")
+        out = self._run("rm -rf /tmp/foo", "--no-user-allow")
         self.assertEqual(out["decision"], "unsafe")
         self.assertEqual(out["allow_patterns"], 0)
 
     def test_no_user_allow_leaves_read_only_alone(self):
-        self.assertEqual(self._run("ls /tmp", "--no-user-allow")["decision"], "safe")
+        self.assertIn(
+            self._run("ls /tmp", "--no-user-allow")["decision"],
+            ("safe", "unknown"))
 
 
 if __name__ == "__main__":

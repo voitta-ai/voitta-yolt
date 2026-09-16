@@ -670,8 +670,24 @@ class LogWritingTests(unittest.TestCase):
     def test_decision_log_redacts(self):
         self.assert_log_clean("--hook", "YOLT_LOG_FILE")
 
-    def test_ran_log_redacts(self):
-        self.assert_log_clean("--ran-hook", "YOLT_RAN_LOG_FILE")
+    def test_ran_log_sink_is_gone(self):
+        """Phase 3 (#100) deleted the PostToolUse ran-log.
+
+        This used to assert that the sink redacted what it wrote. The sink
+        is gone, so the standing requirement is that it stays gone: it had
+        no reader left once the self-improvement reviewer was deleted, and
+        it wrote command lines to disk. Re-adding it means re-adding
+        redaction coverage with it, and this is what says so."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ya_ransink", REPO_ROOT / "hooks" / "yolt_analyzer.py")
+        analyzer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(analyzer)
+        for gone in ("_log_ran_command", "run_ran_hook",
+                     "_resolve_ran_log_path", "DEFAULT_RAN_LOG_PATH"):
+            self.assertFalse(
+                hasattr(analyzer, gone),
+                "{} is back: a log sink needs redaction coverage".format(gone))
 
     def test_redactor_failure_writes_nothing_and_does_not_raise(self):
         """A bug in the redactor must cost a log line, not the session -
@@ -695,7 +711,6 @@ class LogWritingTests(unittest.TestCase):
                 # Must not propagate.
                 analyzer._log_hook_decision(
                     command, "safe", "reason", "default", None)
-                analyzer._log_ran_command(command)
             finally:
                 os.environ.pop("YOLT_LOG_FILE", None)
                 os.environ.pop("YOLT_RAN_LOG_FILE", None)
