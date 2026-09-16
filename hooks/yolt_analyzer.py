@@ -903,6 +903,11 @@ TOOL_WRITE_PATH_FIELDS = {
 }
 
 
+# Deep enough for any real tool payload, shallow enough that the walk
+# cannot exhaust the stack. Issue #99.
+_TOOL_INPUT_MAX_DEPTH = 64
+
+
 def tool_input_text(tool_input):
     """Flatten a tool input to the text the credential scanner reads.
 
@@ -915,15 +920,27 @@ def tool_input_text(tool_input):
     """
     parts = []
 
-    def walk(value):
+    def walk(value, depth=0):
+        # Bounded, and the bound is not cosmetic. With the matcher widened
+        # to `*` this runs on every tool call, including MCP payloads this
+        # repo does not author. An unbounded walk raised RecursionError at
+        # roughly 1,000 levels of nesting and the hook exited non-zero --
+        # which for a PreToolUse hook is the one outcome that must never
+        # happen, since every other failure path here exits 0 precisely so
+        # a broken guard cannot break the session.
+        #
+        # Truncating the scan costs a missed credential warning, which is
+        # advisory. Raising costs the tool call.
+        if depth > _TOOL_INPUT_MAX_DEPTH:
+            return
         if isinstance(value, str):
             parts.append(value)
         elif isinstance(value, dict):
             for item in value.values():
-                walk(item)
+                walk(item, depth + 1)
         elif isinstance(value, (list, tuple)):
             for item in value:
-                walk(item)
+                walk(item, depth + 1)
 
     walk(tool_input)
     retval = "\n".join(parts)
@@ -1543,7 +1560,23 @@ def run_cli():
         sys.exit(1)
 
     if sys.argv[1] == "--hook":
-        run_hook()
+        # A PreToolUse hook must never exit non-zero, and must never raise.
+        # Every failure path inside run_hook already exits 0 deliberately --
+        # a guard that cannot classify should cost the host nothing. This
+        # catches the ones nobody anticipated.
+        #
+        # It is not theoretical: a tool_input nested ~1,000 deep raised
+        # RecursionError out of the credential walk and the process exited
+        # 1. With the matcher widened to `*` that reaches every tool call,
+        # including MCP payloads this repo does not author. The depth bound
+        # fixes that instance; this stops the next one being a session
+        # outage rather than a missing opinion.
+        try:
+            run_hook()
+        except SystemExit:
+            raise
+        except BaseException:
+            sys.exit(0)
         return
 
     if sys.argv[1] == "--ran-hook":

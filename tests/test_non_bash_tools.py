@@ -333,3 +333,67 @@ class TestLogRecord(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HookNeverBreaksTheSession(unittest.TestCase):
+    """A PreToolUse hook must exit 0 whatever it is handed.
+
+    Raised by the adversarial review on #106. With the matcher widened to
+    `*`, the credential walk runs on every tool call -- including MCP
+    payloads this repo does not author. A `tool_input` nested about 1,000
+    deep raised `RecursionError` out of that walk and the process exited 1.
+
+    Every other failure path in `run_hook` exits 0 on purpose: a guard that
+    cannot classify should cost the host nothing. An uncaught exception was
+    the one way that promise could break, and the widened matcher is what
+    made arbitrary payload shapes reachable.
+    """
+
+    def _run(self, body):
+        import subprocess
+        import sys as _sys
+        hook = Path(__file__).resolve().parent.parent / "hooks" / "yolt_analyzer.py"
+        retval = subprocess.run(
+            [_sys.executable, str(hook), "--hook"],
+            input=body, capture_output=True, text=True,
+        )
+        return retval
+
+    def test_deeply_nested_input_does_not_crash(self):
+        payload = {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x"}}
+        node = payload["tool_input"]
+        for _ in range(2000):
+            node["n"] = {}
+            node = node["n"]
+        node["leaf"] = "v"
+        self.assertEqual(self._run(json.dumps(payload)).returncode, 0)
+
+    def test_absurdly_nested_input_does_not_crash(self):
+        payload = {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x"}}
+        node = payload["tool_input"]
+        for _ in range(20000):
+            node["n"] = {}
+            node = node["n"]
+        self.assertEqual(self._run(json.dumps(payload)).returncode, 0)
+
+    def test_malformed_payloads_exit_zero(self):
+        for body in ('{{{', '', '{"tool_name":"Write"}',
+                     '{"tool_name":"Write","tool_input":null}',
+                     '{"tool_name":"Write","tool_input":[1,2]}'):
+            self.assertEqual(self._run(body).returncode, 0, body[:24])
+
+    def test_walk_truncates_rather_than_raising(self):
+        # The bound is a truncation, not an error: a missed credential
+        # warning is advisory, a raised exception costs the tool call.
+        deep = current = {}
+        for _ in range(500):
+            current["n"] = {}
+            current = current["n"]
+        current["leaf"] = "surface-marker"
+        text = tool_input_text(deep)
+        self.assertNotIn("surface-marker", text)
+
+    def test_shallow_input_is_still_fully_scanned(self):
+        payload = {"a": {"b": {"c": "findable-marker"}}}
+        self.assertIn("findable-marker",
+                      tool_input_text(payload))
