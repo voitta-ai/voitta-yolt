@@ -207,3 +207,47 @@ class NormaliserKeepsOrdinaryPathsAlone(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeredocRedirectTargetIsSeen(unittest.TestCase):
+    """A heredoc nests its redirect deeper, and the scan used to miss it.
+
+    #136. tree-sitter puts the `file_redirect` inside the `heredoc_redirect`
+    rather than beside it:
+
+        redirected_statement
+          command            'cat'
+          heredoc_redirect   "<<'X' > ~/.ssh/authorized_keys"
+            file_redirect      '> ~/.ssh/authorized_keys'
+
+    The walker scanned direct children only, so the target never reached the
+    deny list, the statement was judged on the verb, and `cat` reported
+    `read-only` for a command installing an SSH key. The hook granted it.
+
+    Third route into one outcome, after #128's `$HOME` spelling and the
+    single-quoted `raw_string` gap: a write target that never reaches the
+    deny list.
+    """
+
+    def test_cat_heredoc_into_authorized_keys(self):
+        self.assertEqual(
+            classify("cat <<'XX' > ~/.ssh/authorized_keys\nssh-rsa AAAA\nXX"),
+            "unsafe")
+
+    def test_python_heredoc_into_bashrc(self):
+        self.assertEqual(
+            classify("python3 <<'XX' > ~/.bashrc\nimport os\nXX"), "unsafe")
+
+    def test_heredoc_into_a_benign_target_stays_safe(self):
+        self.assertEqual(
+            classify("cat <<'XX' > /tmp/ok\nhello\nXX"), "safe")
+
+    def test_heredoc_with_no_redirect_is_unaffected(self):
+        self.assertEqual(classify("cat <<'XX'\nhello\nXX"), "safe")
+
+    def test_destructive_heredoc_body_still_reported(self):
+        # The body analysis must survive the redirect fix, not be replaced
+        # by it.
+        self.assertEqual(
+            classify("python3 <<'XX' > /tmp/ok\n"
+                     "import shutil\nshutil.rmtree('/')\nXX"), "unsafe")
