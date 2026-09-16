@@ -459,23 +459,29 @@
       "_note": "GNU parallel runs its argument command."
     },
     "time": {
-      "default": "delegate_to_argument"
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after it. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
     "nohup": {
-      "default": "delegate_to_argument"
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after it, detached. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
     "nice": {
-      "default": "delegate_to_argument"
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after its flags. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
     "ionice": {
-      "default": "delegate_to_argument"
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after its flags. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
     "timeout": {
       "default": "delegate_to_argument",
-      "_skip_first_positional": true
+      "_skip_first_positional": true,
+      "_note": "Recursion, not classification: it runs the command after its duration argument. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
     "watch": {
-      "default": "delegate_to_argument"
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after its flags, repeatedly. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     }
   },
   "_policies_note": "Deny policies. A policy runs only when the static rules already classified the command 'unsafe' and its argv matches an entry, and it can only upgrade 'unsafe' to 'deny'. Each name in 'refuse_when' is a condition under which the command is refused; a condition that cannot be established never fires, so no probe failure can produce a deny. Valid predicates: default_branch_target, shared_history, primary_checkout. Set YOLT_NO_POLICIES=1 to disable the layer. PRECONDITION, and it is a silent one: a policy runs only on a command the static rules already classified 'unsafe', so every argv named in an enabled policy must still be reachable as unsafe through 'commands'. That is why 'git push' survives Phase 3's deletion (#100) -- delegating it would disarm default_branch_target and shared_history with nothing reported anywhere. 'git_worktree_convention' is disabled and names 'git commit', which Phase 3 DID delegate: enabling that policy also requires adding 'commit' to commands.git.unsafe_subcommands, or it matches nothing.",
