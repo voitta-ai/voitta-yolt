@@ -527,6 +527,24 @@ repository. Pass `--cwd DIR`, which restores the deny from anywhere:
 
 A consumer that does not pass it has a silently inert deny layer.
 
+### Errors are signalled out-of-band, not in the JSON
+
+The CLI reports a bad invocation on **stderr with a non-zero exit**, and
+writes nothing to stdout. There is no error field in the verdict JSON,
+because on that path there is no JSON:
+
+    $ python3 hooks/grammar_classifier.py --dry-run 'rm -rf /tmp/x'
+    unrecognized option '--dry-run': expected a shell command. ...
+    $ echo $?
+    1
+
+A consumer that captures stdout and ignores `returncode` therefore sees an
+empty string and fails at `json.loads` with
+`Expecting value: line 1 column 1 (char 0)` — a parse error standing in for
+what was actually a refusal with a named cause. **Check `returncode` and
+build your error from stderr.** A fail-closed consumer is still safe either
+way; what it loses is the ability to tell its operator why.
+
 ## Dependencies
 
 Two pure-Python deps via wheels:
