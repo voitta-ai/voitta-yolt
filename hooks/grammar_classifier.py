@@ -398,6 +398,14 @@ class GrammarClassifier:
                 target = self._slice(c, src)
             elif c.type == "string":
                 target = self._reconstruct_string(c, src)
+            elif c.type == "raw_string":
+                # `> '/path/with space'` parses as a `raw_string`. Single
+                # quotes suppress every expansion, so unlike a `string` the
+                # content needs no reconstruction -- only the quotes come
+                # off. Until #132 this matched no branch, the target stayed
+                # None, and quoting a protected path was enough to turn an
+                # `ask` into silence.
+                target = self._slice(c, src).strip("'")
             elif c.type in _REDIR_TARGET_NODES:
                 # `> $HOME/.ssh/authorized_keys` parses as a `concatenation`,
                 # not a `word`. Before #128 neither branch matched, the
