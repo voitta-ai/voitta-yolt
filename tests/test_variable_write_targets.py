@@ -17,6 +17,7 @@ Two things are under test, and the second is the one that matters in a year:
    silence, so the next unanticipated node shape is a prompt, not a grant.
 """
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +25,8 @@ from pathlib import Path
 HOOKS = Path(__file__).resolve().parent.parent / "hooks"
 RULES = Path(__file__).resolve().parent.parent / "rules"
 sys.path.insert(0, str(HOOKS))
+
+HOME = os.path.expanduser("~")
 
 from grammar_classifier import (  # noqa: E402
     UNEXTRACTABLE_WRITE_TARGET, GrammarClassifier,
@@ -207,3 +210,91 @@ class NormaliserKeepsOrdinaryPathsAlone(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeredocRedirectTargetIsSeen(unittest.TestCase):
+    """A heredoc nests its redirect deeper, and the scan used to miss it.
+
+    #136. tree-sitter puts the `file_redirect` inside the `heredoc_redirect`
+    rather than beside it:
+
+        redirected_statement
+          command            'cat'
+          heredoc_redirect   "<<'X' > ~/.ssh/authorized_keys"
+            file_redirect      '> ~/.ssh/authorized_keys'
+
+    The walker scanned direct children only, so the target never reached the
+    deny list, the statement was judged on the verb, and `cat` reported
+    `read-only` for a command installing an SSH key. The hook granted it.
+
+    Third route into one outcome, after #128's `$HOME` spelling and the
+    single-quoted `raw_string` gap: a write target that never reaches the
+    deny list.
+    """
+
+    def test_cat_heredoc_into_authorized_keys(self):
+        self.assertEqual(
+            classify("cat <<'XX' > ~/.ssh/authorized_keys\nssh-rsa AAAA\nXX"),
+            "unsafe")
+
+    def test_python_heredoc_into_bashrc(self):
+        self.assertEqual(
+            classify("python3 <<'XX' > ~/.bashrc\nimport os\nXX"), "unsafe")
+
+    def test_heredoc_into_a_benign_target_stays_safe(self):
+        self.assertEqual(
+            classify("cat <<'XX' > /tmp/ok\nhello\nXX"), "safe")
+
+    def test_heredoc_with_no_redirect_is_unaffected(self):
+        self.assertEqual(classify("cat <<'XX'\nhello\nXX"), "safe")
+
+    def test_destructive_heredoc_body_still_reported(self):
+        # The body analysis must survive the redirect fix, not be replaced
+        # by it.
+        self.assertEqual(
+            classify("python3 <<'XX' > /tmp/ok\n"
+                     "import shutil\nshutil.rmtree('/')\nXX"), "unsafe")
+
+
+class SingleQuotedTargetIsSeen(unittest.TestCase):
+    """Quoting a protected path used to be enough to lose the prompt.
+
+    #132. A single-quoted target parses as `raw_string`, which matched no
+    branch in `_redirect_write_target`, so the target stayed None and the
+    statement classified `unknown` -- silent, rather than the `ask` the same
+    path gets when written bare or double-quoted.
+
+    Fourth and last of the known routes into one outcome, after #128's
+    `$HOME` spelling, #136's heredoc nesting, and the function-body gap
+    recorded on #136: a write target that never reaches the deny list.
+    """
+
+    def test_single_quoted_protected_path(self):
+        self.assertEqual(
+            classify("echo x > '{}/.ssh/authorized_keys'".format(HOME)),
+            "unsafe")
+
+    def test_single_quoted_bashrc(self):
+        self.assertEqual(
+            classify("echo x > '{}/.bashrc'".format(HOME)), "unsafe")
+
+    def test_quoting_does_not_change_the_verdict(self):
+        # The point of the fix: three spellings of one path, one answer.
+        bare = classify("echo x > ~/.ssh/authorized_keys")
+        dq = classify('echo x > "{}/.ssh/authorized_keys"'.format(HOME))
+        sq = classify("echo x > '{}/.ssh/authorized_keys'".format(HOME))
+        self.assertEqual(bare, "unsafe")
+        self.assertEqual(dq, "unsafe")
+        self.assertEqual(sq, "unsafe")
+
+    def test_single_quoted_benign_target_stays_safe(self):
+        self.assertEqual(classify("echo x > '/tmp/ok'"), "safe")
+
+    def test_single_quotes_are_what_make_spaces_usable(self):
+        # The reason people single-quote paths at all. Must not card.
+        self.assertEqual(classify("echo x > '/tmp/my file'"), "safe")
+
+    def test_composes_with_the_heredoc_fix(self):
+        self.assertEqual(
+            classify("cat <<'XX' > '{}/.bashrc'\nk\nXX".format(HOME)),
+            "unsafe")
