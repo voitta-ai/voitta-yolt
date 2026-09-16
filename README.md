@@ -422,21 +422,25 @@ trusting a flag to remain a no-op.
 
 
 Your `permissions.allow` entries are Claude Code's to honor, which is the
-appropriate place for them — but **under auto mode it does not honor the
-Bash ones.** Auto mode runs with `classifyAllShell` active, and it then
-ignores every `Bash(...)` and PowerShell allow rule at runtime; outside auto
-mode those same rules apply normally. So a standing `Bash(gh pr merge*)` is
-authoritative in one mode and inert in the other, with nothing at the prompt
-saying which mode you are in.
+appropriate place for them. One setting changes that, and it is worth knowing
+because nothing at the prompt announces it: **`autoMode.classifyAllShell`.**
+Claude Code's settings schema describes it as
 
-Two consequences worth stating plainly, because both have been hit:
+> When true, every Bash/PowerShell allow rule is suspended while auto mode is
+> active so all shell commands are routed through the classifier (higher
+> safety, more classifier calls). **Default: false.**
 
-- A rule you added to stop being asked about a command will stop working the
-  moment you turn auto mode on, and the denial you get will not mention the
-  rule.
-- YOLT's paste-ready `Bash(...)` suggestion below is subject to the same
-  thing. Adding it fixes the prompt outside auto mode and changes nothing
-  inside it.
+So it is **off unless you turn it on.** With it on, a standing
+`Bash(gh pr merge*)` is authoritative outside auto mode and inert inside it,
+and the denial you get will not mention the rule. YOLT's paste-ready
+`Bash(...)` suggestion below is subject to the same thing: adding it fixes
+the prompt outside auto mode and changes nothing inside it.
+
+With it off — the default — your Bash allow rules apply in auto mode as they
+always did. If a rule you can see in your settings is not taking effect and
+`classifyAllShell` is unset, this is not the explanation; check that the
+pattern actually matches (`fnmatch` semantics) and look for a second gate,
+such as a server-side branch ruleset, before editing the rule.
 
 For common workflow writes (`git push`, `git commit`, `gh issue create`,
 `gh pr comment`, ...), YOLT's `ask` message still includes a paste-ready
