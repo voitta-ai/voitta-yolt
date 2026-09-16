@@ -478,6 +478,49 @@ unrecognized verdict means before you add one.** Comparing against `safe` is
 what makes a new verdict fail safely; comparing against `unsafe` is what
 makes a new verdict fail open.
 
+### Delegation is absence, not a tier
+
+There is no retained list of what YOLT delegates. From `rules/shell.json`:
+
+> A command absent from `commands`, or a subcommand on no list here,
+> classifies `unknown` and is delegated to the host by design.
+
+So `unknown` on `cat` and `unknown` on a command YOLT has never heard of are
+the same verdict for the same reason — absence — and they are byte-identical
+in the reason string too (`no rule: cat`, `no rule: frobnicate`). YOLT cannot
+tell you which is which because YOLT does not know.
+
+This bounds what #144 can be. A fix cannot surface a distinction YOLT
+already has; it would mean restoring a positive read-only list, which is the
+realignment's thesis in reverse. **A consumer that cannot afford to delegate
+has to supply its own safe list** — in its own reviewable config, consulted
+only on `unknown`, never over `unsafe` or `deny`, so it can promote but never
+override. That is the appropriate place for it, and it is the same conclusion
+the auto-mode caveat above reaches from the other direction: an inherited
+allow-list is one the host itself discards.
+
+### Pass `--cwd` if you are not running where the command would run
+
+The `deny` predicates are about repository state, so they are properties of a
+directory, not of the command text. The CLI defaults to its own process's
+directory, which is right for a shell wrapper and wrong for a service:
+
+    $ python3 hooks/grammar_classifier.py 'git push origin master'      # in the repo
+    {"decision": "deny", "reason": "git push: would push to the default branch (master)", ...}
+
+    $ cd /tmp/elsewhere && python3 .../grammar_classifier.py 'git push origin master'
+    {"decision": "unsafe", "reason": "git push: mutating", ...}
+
+Both answers are correct for their directory. But a consumer that subprocesses
+the classifier without setting the directory gets the second one — or worse,
+a `deny` citing *its own* branch for a command destined for another
+repository. Pass `--cwd DIR`, which restores the deny from anywhere:
+
+    $ cd /tmp/elsewhere && python3 .../grammar_classifier.py --cwd /path/to/repo 'git push origin master'
+    {"decision": "deny", "reason": "git push: would push to the default branch (master)", ...}
+
+A consumer that does not pass it has a silently inert deny layer.
+
 ## Dependencies
 
 Two pure-Python deps via wheels:
