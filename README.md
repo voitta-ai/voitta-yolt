@@ -421,13 +421,129 @@ is asserting something real about 2.0.0, which is a better contract than
 trusting a flag to remain a no-op.
 
 
-Your `permissions.allow` entries still work — Claude Code honors them
-itself, which is the appropriate place for them.
+Your `permissions.allow` entries are Claude Code's to honor, which is the
+appropriate place for them — but **under auto mode it does not honor the
+Bash ones.** Auto mode runs with `classifyAllShell` active, and it then
+ignores every `Bash(...)` and PowerShell allow rule at runtime; outside auto
+mode those same rules apply normally. So a standing `Bash(gh pr merge*)` is
+authoritative in one mode and inert in the other, with nothing at the prompt
+saying which mode you are in.
+
+Two consequences worth stating plainly, because both have been hit:
+
+- A rule you added to stop being asked about a command will stop working the
+  moment you turn auto mode on, and the denial you get will not mention the
+  rule.
+- YOLT's paste-ready `Bash(...)` suggestion below is subject to the same
+  thing. Adding it fixes the prompt outside auto mode and changes nothing
+  inside it.
 
 For common workflow writes (`git push`, `git commit`, `gh issue create`,
 `gh pr comment`, ...), YOLT's `ask` message still includes a paste-ready
 `Bash(...)` suggestion. It is advice to you, not a grant: nothing happens
-until you add it yourself, and Claude Code — not YOLT — is what acts on it.
+until you add it yourself, and Claude Code — not YOLT — is what acts on it,
+subject to the auto-mode caveat above.
+
+## One verdict, two consumers that read it oppositely
+
+YOLT has two kinds of caller, and they disagree about what a non-`safe`
+verdict means. The realignment was designed against both, so the difference
+is worth stating before reading any decision table.
+
+**The Claude Code `PreToolUse` hook.** `safe` and `unknown` are the same
+event: YOLT exits 0 with no `permissionDecision` and the host decides.
+Delegating a command to the host is therefore free — indistinguishable, on
+the wire, from judging it safe.
+
+**A fail-closed programmatic consumer.**
+[shmobster](https://github.com/voitta-ai/shmobster) — a self-hosted Slack
+agent — runs `grammar_classifier.py` as a subprocess and compares
+`== "safe"`, never `== "unsafe"`, so that a verdict it does not recognize
+lands on the restrictive side. For it, `safe` and `unknown` are *opposites*.
+Anything not literally `safe` ends the model's turn and parks the command on
+a Slack approval card until a trusted human returns, which may be hours.
+Delegating a command costs one asynchronous human interrupt.
+
+This is the whole of
+[#144](https://github.com/voitta-ai/voitta-yolt/issues/144): 2.0.0 collapses
+*we deliberately delegate this* and *we could not classify this* into a
+single `unknown`. The hook cannot tell those apart and does not need to. A
+consumer that must fail closed on the second has no way to avoid failing
+closed on the first, so ordinary reads — `cat`, `ls`, `grep`, `git status`,
+`gh pr list` — park. shmobster pins `>= 1.6.0, < 2.0.0` at startup for this
+reason, and the pin lifts when the two are distinguishable.
+
+The general rule, for anyone writing a consumer: **decide what an
+unrecognized verdict means before you add one.** Comparing against `safe` is
+what makes a new verdict fail safely; comparing against `unsafe` is what
+makes a new verdict fail open.
+
+### Delegation is absence, not a tier
+
+There is no retained list of what YOLT delegates. From `rules/shell.json`:
+
+> A command absent from `commands`, or a subcommand on no list here,
+> classifies `unknown` and is delegated to the host by design.
+
+So `unknown` on `cat` and `unknown` on a command YOLT has never heard of are
+the same verdict for the same reason — absence — and they are byte-identical
+in the reason string too (`no rule: cat`, `no rule: frobnicate`). YOLT cannot
+tell you which is which because YOLT does not know.
+
+This bounds what #144 can be. A fix cannot surface a distinction YOLT
+already has; it would mean restoring a positive read-only list, which is the
+realignment's thesis in reverse. **A consumer that cannot afford to delegate
+has to supply its own safe list** — in its own reviewable config, consulted
+only on `unknown`, never over `unsafe` or `deny`, so it can promote but never
+override. That is the appropriate place for it, and it is the same conclusion
+the auto-mode caveat above reaches from the other direction: an inherited
+allow-list is one the host itself discards.
+
+### Pass `--cwd` if you are not running where the command would run
+
+`--cwd` is new in **2.0.1** ([#145](https://github.com/voitta-ai/voitta-yolt/issues/145)),
+the same change that made `deny` reachable from the CLI. At 2.0.0 and
+earlier the flag does not exist and the CLI produces no `deny` at all, so
+this section applies to 2.0.1 onward — a consumer already on 2.0.1 needs no
+upgrade to fix an inert deny layer, only the flag.
+
+The `deny` predicates are about repository state, so they are properties of a
+directory, not of the command text. The CLI defaults to its own process's
+directory, which is right for a shell wrapper and wrong for a service:
+
+    $ python3 hooks/grammar_classifier.py 'git push origin master'      # in the repo
+    {"decision": "deny", "reason": "git push: would push to the default branch (master)", ...}
+
+    $ cd /tmp/elsewhere && python3 .../grammar_classifier.py 'git push origin master'
+    {"decision": "unsafe", "reason": "git push: mutating", ...}
+
+Both answers are correct for their directory. But a consumer that subprocesses
+the classifier without setting the directory gets the second one — or worse,
+a `deny` citing *its own* branch for a command destined for another
+repository. Pass `--cwd DIR`, which restores the deny from anywhere:
+
+    $ cd /tmp/elsewhere && python3 .../grammar_classifier.py --cwd /path/to/repo 'git push origin master'
+    {"decision": "deny", "reason": "git push: would push to the default branch (master)", ...}
+
+A consumer that does not pass it has a silently inert deny layer.
+
+### Errors are signalled out-of-band, not in the JSON
+
+The CLI reports a bad invocation on **stderr with a non-zero exit**, and
+writes nothing to stdout. There is no error field in the verdict JSON,
+because on that path there is no JSON:
+
+    $ python3 hooks/grammar_classifier.py --dry-run 'rm -rf /tmp/x'
+    unrecognized option '--dry-run': expected a shell command. ...
+    $ echo $?
+    1
+
+A consumer that captures stdout and ignores `returncode` therefore sees an
+empty string and fails at `json.loads` with
+`Expecting value: line 1 column 1 (char 0)` — a parse error standing in for
+what was actually a refusal with a named cause. **Check `returncode` and
+build your error from stderr.** A fail-closed consumer is still safe either
+way; what it loses is the ability to tell its operator why.
 
 ## Dependencies
 
