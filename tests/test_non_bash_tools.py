@@ -359,22 +359,33 @@ class HookNeverBreaksTheSession(unittest.TestCase):
         )
         return retval
 
+    @staticmethod
+    def _nested_payload(depth):
+        """Build the JSON as text rather than via json.dumps.
+
+        Encoding a structure this deep recurses in the *test* process, and
+        json's recursion headroom differs between interpreter versions --
+        3.14 encoded 20,000 levels where 3.10, 3.11 and 3.12 raised
+        `RecursionError: maximum recursion depth exceeded while encoding a
+        JSON object`. The first version of this test therefore failed on CI
+        while passing locally, and it was the test that could not build its
+        input, not the hook that could not survive it.
+
+        Emitting the text directly keeps the subject under test the hook's
+        parser, which is the thing this is actually about.
+        """
+        retval = ('{"tool_name":"Write","tool_input":'
+                  + '{"n":' * depth
+                  + '{"file_path":"/tmp/x","leaf":"v"}'
+                  + "}" * depth
+                  + "}")
+        return retval
+
     def test_deeply_nested_input_does_not_crash(self):
-        payload = {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x"}}
-        node = payload["tool_input"]
-        for _ in range(2000):
-            node["n"] = {}
-            node = node["n"]
-        node["leaf"] = "v"
-        self.assertEqual(self._run(json.dumps(payload)).returncode, 0)
+        self.assertEqual(self._run(self._nested_payload(2000)).returncode, 0)
 
     def test_absurdly_nested_input_does_not_crash(self):
-        payload = {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x"}}
-        node = payload["tool_input"]
-        for _ in range(20000):
-            node["n"] = {}
-            node = node["n"]
-        self.assertEqual(self._run(json.dumps(payload)).returncode, 0)
+        self.assertEqual(self._run(self._nested_payload(20000)).returncode, 0)
 
     def test_malformed_payloads_exit_zero(self):
         for body in ('{{{', '', '{"tool_name":"Write"}',
@@ -385,6 +396,9 @@ class HookNeverBreaksTheSession(unittest.TestCase):
     def test_walk_truncates_rather_than_raising(self):
         # The bound is a truncation, not an error: a missed credential
         # warning is advisory, a raised exception costs the tool call.
+        # 500 is comfortably past the 64-level bound and comfortably
+        # inside every interpreter's construction headroom, so this one can
+        # be built as a structure.
         deep = current = {}
         for _ in range(500):
             current["n"] = {}
