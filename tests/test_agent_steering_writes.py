@@ -190,8 +190,16 @@ class OrdinaryWritesAreUntouched(unittest.TestCase):
 
 
 class WriteVerbsAlsoRouteThroughTheList(unittest.TestCase):
-    """`unsafe_write_targets` covers redirects and the write-target
-    arguments of tee/cp/mv/install/dd/find, not redirects alone."""
+    """`unsafe_write_targets` covers the write-target arguments of
+    tee/cp/mv/install/dd, not redirects alone.
+
+    The docstring used to claim `find` as well. Phase 3 (#100) dropped
+    `find`'s `write_flag_value_targets` (`-fprint`/`-fprintf`/`-fls`)
+    because that field consults `safe_write_targets`, i.e. whitelist
+    semantics, which is what the phase retires -- so a `find -fprint` into
+    a steering path is genuinely no longer flagged. Recorded here rather
+    than left as a stale claim.
+    """
 
     def test_tee(self):
         self.assertEqual(
@@ -204,6 +212,49 @@ class WriteVerbsAlsoRouteThroughTheList(unittest.TestCase):
     def test_mv(self):
         self.assertEqual(
             classify("mv /tmp/x ~/.claude/skills/y/SKILL.md"), "unsafe")
+
+    def test_install(self):
+        self.assertEqual(
+            classify("install -m 644 /tmp/x ~/.claude/skills/y/SKILL.md"),
+            "unsafe")
+
+    def test_dd(self):
+        self.assertEqual(
+            classify("dd if=/dev/zero of=~/.codex/config.toml"), "unsafe")
+
+
+class WriteVerbsOnOrdinaryTargetsAreDelegated(unittest.TestCase):
+    """The other half of the pair, and the half that regressed twice.
+
+    Phase 3 (#100) first DELETED these commands, which did not delegate
+    them -- it deleted the steering-path coverage above, because the check
+    is re-derived at each command site rather than living at one choke
+    point (#136). They came back with `default: "ask"`, which consults the
+    deny list only.
+
+    So the standing requirement is two-sided: a protected destination
+    still classifies, and an ordinary one now classifies `unknown` where
+    before Phase 3 it was unconditionally `unsafe`. Asserting only the
+    first half would pass against `default: "unsafe"` -- the pre-Phase-3
+    behaviour this phase exists to remove.
+    """
+
+    def test_ordinary_cp_is_delegated(self):
+        self.assertIn(classify("cp /tmp/a /tmp/b"), ("safe", "unknown"))
+
+    def test_ordinary_mv_is_delegated(self):
+        self.assertIn(classify("mv /tmp/a /tmp/b"), ("safe", "unknown"))
+
+    def test_ordinary_tee_is_delegated(self):
+        self.assertIn(classify("tee /tmp/out.txt"), ("safe", "unknown"))
+
+    def test_ordinary_install_is_delegated(self):
+        self.assertIn(
+            classify("install -m 644 /tmp/a /tmp/build/a"),
+            ("safe", "unknown"))
+
+    def test_ordinary_dd_is_delegated(self):
+        self.assertIn(classify("dd if=/tmp/a of=/tmp/b"), ("safe", "unknown"))
 
 
 if __name__ == "__main__":
