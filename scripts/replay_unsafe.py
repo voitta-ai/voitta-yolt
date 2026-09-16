@@ -107,6 +107,15 @@ def build_classifier(hooks_dir, rules_dir, use_allow_patterns):
     shell_rules = load_shell_rules(rules_dir=rules_dir)
     py_rules = load_rules(rules_dir=rules_dir)
 
+    # No `policy=` and no `cwd=`, deliberately -- unlike every other
+    # caller, which must go through grammar_classifier.build_classifier
+    # (#143). The git deny predicates answer questions about a
+    # repository: which branch a push targets, who authored the commits
+    # it would move. The corpus is logged command TEXT with no record of
+    # the directory each ran in, so probing would judge every one of
+    # them against whichever repo this harness happens to sit in. The
+    # consequence, stated rather than discovered later: a replay counts
+    # as `unsafe` some commands the live hook would `deny`.
     kwargs = {"python_analyzer_factory": lambda: SafetyAnalyzer(py_rules)}
 
     # Phase 1 (#98) removed the allow-pattern wiring from GrammarClassifier,

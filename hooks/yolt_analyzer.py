@@ -1008,6 +1008,11 @@ def _run_hook_non_bash(tool_name, tool_input, permission_mode, agent_id):
         _emit_advisory_only(advisory)
         sys.exit(0)
 
+    # Deliberately bare, and not routed through build_classifier:
+    # nothing here calls classify(). This instance is used only for
+    # `_target_is_unsafe_write`, a pure lookup against the rules, so
+    # it has no command to judge, no directory to judge it in, and no
+    # verdict for a deny policy to narrow.
     classifier = GrammarClassifier(shell_rules)
     decision, reason = classify_tool_input(
         tool_name, tool_input, classifier._target_is_unsafe_write,
@@ -1407,8 +1412,7 @@ def run_hook():
         hooks_dir = Path(__file__).resolve().parent
         if str(hooks_dir) not in sys.path:
             sys.path.insert(0, str(hooks_dir))
-        from grammar_classifier import GrammarClassifier
-        from git_policy import load_policies
+        from grammar_classifier import build_classifier
         from rule_classifier import (
             DECISION_UNSAFE,
             DECISION_DENY,
@@ -1433,11 +1437,10 @@ def run_hook():
     def _python_factory():
         return SafetyAnalyzer(py_rules)
 
-    classifier = GrammarClassifier(
+    classifier = build_classifier(
         shell_rules,
         python_analyzer_factory=_python_factory,
         cwd=hook_input.get("cwd"),
-        policy=load_policies(shell_rules),
     )
     decision, reason = classifier.classify(command)
     _log_hook_decision(command, decision, reason, permission_mode, agent_id)
