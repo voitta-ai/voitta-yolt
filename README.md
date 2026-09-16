@@ -501,6 +501,12 @@ allow-list is one the host itself discards.
 
 ### Pass `--cwd` if you are not running where the command would run
 
+`--cwd` is new in **2.0.1** ([#145](https://github.com/voitta-ai/voitta-yolt/issues/145)),
+the same change that made `deny` reachable from the CLI. At 2.0.0 and
+earlier the flag does not exist and the CLI produces no `deny` at all, so
+this section applies to 2.0.1 onward — a consumer already on 2.0.1 needs no
+upgrade to fix an inert deny layer, only the flag.
+
 The `deny` predicates are about repository state, so they are properties of a
 directory, not of the command text. The CLI defaults to its own process's
 directory, which is right for a shell wrapper and wrong for a service:
