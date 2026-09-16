@@ -181,11 +181,12 @@ class OrdinaryWritesAreUntouched(unittest.TestCase):
         self.assertEqual(classify("echo x > ~/.claude/yolt/cache.json"), "safe")
 
     def test_reading_a_skill_is_not_a_write(self):
-        self.assertEqual(
-            classify("cat ~/.claude/skills/x/SKILL.md"), "safe")
+        self.assertIn(
+            classify("cat ~/.claude/skills/x/SKILL.md"),
+            ("safe", "unknown"))
 
     def test_listing_the_skills_dir_is_not_a_write(self):
-        self.assertEqual(classify("ls ~/.claude/skills"), "safe")
+        self.assertIn(classify("ls ~/.claude/skills"), ("safe", "unknown"))
 
 
 class WriteVerbsAlsoRouteThroughTheList(unittest.TestCase):

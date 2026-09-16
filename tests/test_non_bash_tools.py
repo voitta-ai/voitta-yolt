@@ -328,7 +328,10 @@ class TestLogRecord(unittest.TestCase):
             )
             record = json.loads(log.read_text().strip().splitlines()[-1])
         self.assertEqual(record["tool_name"], "Bash")
-        self.assertEqual(record["decision"], "safe")
+        # Phase 3 (#100) retired the rule that called `ls` safe; safe and
+        # unknown are the same silent exit. The subject here is the
+        # tool_name field, not the verdict.
+        self.assertIn(record["decision"], ("safe", "unknown"))
 
 
 if __name__ == "__main__":

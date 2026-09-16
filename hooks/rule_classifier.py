@@ -377,9 +377,11 @@ def merge_shell_overrides(rules, overrides):
     override of `safe_write_targets` replaces the whole list rather than
     extending it). Mutates and returns `rules`.
 
-    Extracted so the reviewer (`yolt_review.py`) can validate a candidate
-    override against the same merge the hook performs, with no second copy
-    of the merge rule to drift from this one (issue #45)."""
+    Extracted so a caller validating a candidate override runs the same
+    merge the hook performs, with no second copy of the merge rule to
+    drift from this one (issue #45). The reviewer that originally needed
+    it is gone (#100); the operator's own `~/.claude/yolt/` overrides
+    still go through here."""
     for key, value in overrides.items():
         if key in rules and isinstance(rules[key], dict) and isinstance(value, dict):
             rules[key].update(value)
@@ -669,6 +671,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "safe_write_targets", "unsafe_write_targets",
     "commands", "interpreters",
     "policies", "_policies_note",
+    "_commands_note",
 })
 
 _ALLOWED_COMMAND_KEYS = frozenset({
