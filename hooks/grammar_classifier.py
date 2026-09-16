@@ -651,13 +651,48 @@ class GrammarClassifier:
         return None
 
 
-def classify_command(command, rules, python_analyzer_factory=None):
-    """Module-level convenience wrapper."""
-    classifier = GrammarClassifier(
+def build_classifier(rules, python_analyzer_factory=None, cwd=None):
+    """The one construction point for a classifier that will be asked to
+    `classify()`. Every entry point goes through here.
+
+    It exists because the plain constructor is too easy to call
+    incompletely, and incompletely is indistinguishable from correctly.
+    The deny layer is parasitic -- it narrows an existing `unsafe` and can
+    never originate a verdict -- so a classifier built without `policy=`
+    does not error, does not warn, and does not return anything a caller
+    could tell apart from a real answer. It just quietly never denies.
+
+    That shipped: through v2.0.0 the CLI answered `unsafe` for
+    `git push --force origin master` while the hook answered `deny`, and a
+    downstream consumer built deny handling against it that could not fire
+    (#143). The same mistake had already been made once in the replay
+    harness during #100. Two instances of one shape is the argument for a
+    factory rather than a third fix.
+
+    `cwd` stays explicit rather than defaulting to `os.getcwd()` here: the
+    hook takes it from the host payload and legitimately passes `None` when
+    the host did not supply one, and silently substituting this process's
+    directory would judge a command against the wrong repository."""
+    from git_policy import load_policies
+
+    retval = GrammarClassifier(
         rules,
         python_analyzer_factory=python_analyzer_factory,
+        cwd=cwd,
+        policy=load_policies(rules),
     )
-    return classifier.classify(command)
+    return retval
+
+
+def classify_command(command, rules, python_analyzer_factory=None, cwd=None):
+    """Module-level convenience wrapper."""
+    classifier = build_classifier(
+        rules,
+        python_analyzer_factory=python_analyzer_factory,
+        cwd=cwd,
+    )
+    retval = classifier.classify(command)
+    return retval
 
 
 def run_cli():
@@ -673,9 +708,28 @@ def run_cli():
     """
     argv = [a for a in sys.argv[1:] if a != "--no-user-allow"]
     no_user_allow = len(argv) != len(sys.argv) - 1
+
+    # `--cwd DIR` says which directory the command would run in. The git
+    # deny predicates need it: which branch a `git push` targets, and who
+    # authored the commits it would move, are properties of a repository,
+    # not of the command text. Defaults to this process's directory, which
+    # is right for a shell wrapper and wrong for a service classifying on
+    # behalf of somebody else -- so it is overridable. A directory that is
+    # not a repository is safe: every probe fails, every predicate reads
+    # UNDETERMINED, and no deny can be produced from a failed probe.
+    cwd = os.getcwd()
+    if "--cwd" in argv:
+        i = argv.index("--cwd")
+        if i + 1 >= len(argv):
+            print("--cwd needs a directory", file=sys.stderr)
+            sys.exit(1)
+        cwd = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+
     if not argv:
         print(
-            "Usage: grammar_classifier.py [--no-user-allow] '<shell command>'",
+            "Usage: grammar_classifier.py [--no-user-allow] [--cwd DIR] "
+            "'<shell command>'",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -713,6 +767,7 @@ def run_cli():
         command,
         rules,
         python_analyzer_factory=factory,
+        cwd=cwd,
     )
 
     # How many allow patterns were in play is part of the verdict's meaning: the
