@@ -161,13 +161,12 @@ class GrammarClassifier:
     def _walk_redirected(self, node, src, decisions, _depth):
         write_targets = []
         unreadable_target = False
-        for c in node.children:
-            if c.type == "file_redirect":
-                t = self._redirect_write_target(c, src)
-                if t is UNEXTRACTABLE_WRITE_TARGET:
-                    unreadable_target = True
-                elif t is not None:
-                    write_targets.append(t)
+        for c in self._file_redirects(node):
+            t = self._redirect_write_target(c, src)
+            if t is UNEXTRACTABLE_WRITE_TARGET:
+                unreadable_target = True
+            elif t is not None:
+                write_targets.append(t)
         # Evaluate EVERY write redirect with unsafe > unknown > safe
         # precedence. A safe first redirect must not mask a later unsafe or
         # unknown target -- e.g. `echo x > /tmp/ok > ~/.bashrc` and
@@ -443,6 +442,33 @@ class GrammarClassifier:
 
     # --- Helpers ---
 
+    @staticmethod
+    def _file_redirects(node):
+        """Every `file_redirect` belonging to this statement.
+
+        A heredoc nests its redirect one level deeper than a plain one:
+
+            redirected_statement
+              command            'cat'
+              heredoc_redirect   "<<'X' > ~/.ssh/authorized_keys"
+                file_redirect      '> ~/.ssh/authorized_keys'
+
+        A scan of direct children alone therefore finds nothing for
+        `cat <<'X' > target`, the write target never reaches the deny list,
+        and the statement is judged on the verb -- so `cat` reported
+        `read-only` for a command installing an SSH key, and the hook
+        granted it. Issue #136.
+        """
+        retval = []
+        for child in node.children:
+            if child.type == "file_redirect":
+                retval.append(child)
+            elif child.type == "heredoc_redirect":
+                retval.extend(
+                    g for g in child.children if g.type == "file_redirect"
+                )
+        return retval
+
     def _redirect_write_target(self, redirect_node, src):
         """Return the target path of a write redirect (`> FILE`, `>> FILE`),
         or None if this redirect is not a write. The caller classifies the
@@ -458,6 +484,14 @@ class GrammarClassifier:
                 target = self._slice(c, src)
             elif c.type == "string":
                 target = self._reconstruct_string(c, src)
+            elif c.type == "raw_string":
+                # `> '/path/with space'` parses as a `raw_string`. Single
+                # quotes suppress every expansion, so unlike a `string` the
+                # content needs no reconstruction -- only the quotes come
+                # off. Until #132 this matched no branch, the target stayed
+                # None, and quoting a protected path turned an `ask` into
+                # silence.
+                target = self._slice(c, src).strip("'")
             elif c.type in _REDIR_TARGET_NODES:
                 # `> $HOME/.ssh/authorized_keys` parses as a `concatenation`,
                 # not a `word`. Before #128 neither branch matched, the
