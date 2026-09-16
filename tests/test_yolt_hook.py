@@ -197,14 +197,15 @@ class TestHookEndToEnd(unittest.TestCase):
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("Bash(git -C * push -u origin feature/*)", reason)
 
-    def test_gh_issue_create_reason_includes_allow_hint(self):
-        result = HookSubprocess.run_bash(
-            'gh issue create --title "x" --body "y"'
-        )
+    def test_gh_release_create_reason_includes_allow_hint(self):
+        # Was `gh issue create`, which Phase 3 (#100) delegated to auto
+        # mode -- a delegated command emits no response to read a hint
+        # from. `gh release create` is irrevocable-remote and stays.
+        result = HookSubprocess.run_bash('gh release create v1.0.0')
         resp = HookSubprocess.response_of(result)
         self.assertIsNotNone(resp)
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("Bash(gh issue create*)", reason)
+        self.assertIn("Bash(gh release create*)", reason)
 
 
 class TestHookSubagentDeny(unittest.TestCase):
@@ -412,7 +413,10 @@ class TestHookLogFile(unittest.TestCase):
         self._run_with_log("ls /tmp")
         recs = self._records()
         self.assertEqual(len(recs), 1)
-        self.assertEqual(recs[0]["decision"], "safe")
+        # Phase 3 (#100) retired the rule that called `ls` safe. Safe
+        # and unknown are the same silent exit post-Phase-1; the
+        # subject here is the log record, not the verdict.
+        self.assertIn(recs[0]["decision"], ("safe", "unknown"))
         self.assertEqual(recs[0]["command"], "ls /tmp")
         self.assertIn("ts", recs[0])
         self.assertIn("ls", recs[0]["reason"])
@@ -437,7 +441,9 @@ class TestHookLogFile(unittest.TestCase):
         recs = self._records()
         self.assertEqual(len(recs), 3)
         decisions = [r["decision"] for r in recs]
-        self.assertEqual(decisions, ["safe", "unsafe", "safe"])
+        self.assertIn(decisions[0], ("safe", "unknown"))
+        self.assertEqual(decisions[1], "unsafe")
+        self.assertIn(decisions[2], ("safe", "unknown"))
 
     def test_logs_permission_mode_and_agent_id(self):
         self._run_with_log(
@@ -488,7 +494,10 @@ class TestHookLogFile(unittest.TestCase):
         self.assertTrue(default_log.exists(), "default log path was not written")
         line = default_log.read_text().strip()
         record = json.loads(line)
-        self.assertEqual(record["decision"], "safe")
+        # Phase 3 (#100) retired the rule that called `ls` safe. Safe
+        # and unknown are the same silent exit post-Phase-1; the
+        # subject here is the log record, not the verdict.
+        self.assertIn(record["decision"], ("safe", "unknown"))
         self.assertEqual(record["command"], "ls /tmp")
 
     def test_empty_string_opts_out_of_logging(self):
@@ -539,7 +548,10 @@ class TestHookLogFile(unittest.TestCase):
         self.assertIn("xxx", old_path.read_text())
         new_records = self._records()
         self.assertEqual(len(new_records), 1)
-        self.assertEqual(new_records[0]["decision"], "safe")
+        # Phase 3 (#100) retired the rule that called `ls` safe. Safe
+        # and unknown are the same silent exit post-Phase-1; the
+        # subject here is the log record, not the verdict.
+        self.assertIn(new_records[0]["decision"], ("safe", "unknown"))
 
     def test_log_does_not_rotate_below_threshold(self):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -563,7 +575,7 @@ class TestHookLogFile(unittest.TestCase):
         # Pre-existing line + the new record both present.
         contents = self.log_path.read_text()
         self.assertIn("small", contents)
-        self.assertIn('"decision": "safe"', contents)
+        self.assertIn('"command": "ls /tmp"', contents)
 
     def test_log_rotation_disabled_when_max_bytes_zero(self):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

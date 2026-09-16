@@ -18,7 +18,7 @@ Two match families:
     only the *value* is redacted, and only when it looks like a literal
     secret rather than a shell expansion or an ordinary resource name.
     Keeping the flag and the key name preserves the command *shape*,
-    which is what `yolt_review.py` actually mines.
+    which is what a log reader needs and a secret is not.
 
 Nothing here ever emits, logs or returns the matched value: a
 secret-detector that writes secrets into its own diagnostics is the same

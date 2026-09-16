@@ -23,7 +23,7 @@
 - [User whitelist (removed in the auto-mode realignment)](#user-whitelist-removed-in-the-auto-mode-realignment)
 - [Dependencies](#dependencies)
 - [What the grammar classifier handles](#what-the-grammar-classifier-handles)
-- [SQL CLIs](#sql-clis)
+- [SQL CLIs (removed in Phase 3)](#sql-clis-removed-in-phase-3)
 - [Python rules (interpreter delegate)](#python-rules-interpreter-delegate)
 - [Custom rules](#custom-rules)
   - [Python rules — `~/.claude/yolt/rules.json`](#python-rules---claudeyoltrulesjson)
@@ -31,7 +31,7 @@
 - [Credentials in the command line (advisory)](#credentials-in-the-command-line-advisory)
 - [Debug / dogfood log](#debug--dogfood-log)
   - [Credential redaction](#credential-redaction)
-- [Self-improvement loop](#self-improvement-loop)
+- [Self-improvement loop (removed in Phase 3)](#self-improvement-loop-removed-in-phase-3)
 - [CLI usage](#cli-usage)
 - [Tests and demo](#tests-and-demo)
 - [Analysis boundaries](#analysis-boundaries)
@@ -458,104 +458,88 @@ rm ~/.cache/yolt/deps-installed-*
 
 ## What the grammar classifier handles
 
-Example decisions (see `rules/shell.json` for the full rule set):
+Phase 3 ([#100](https://github.com/voitta-ai/voitta-yolt/issues/100))
+replaced "classify everything" with a **non-delegable list**: the decisions
+deliberately refused to a probabilistic classifier. `rules/shell.json` went
+from 136 command entries to 28. Everything not on the list classifies
+`unknown`, which is a silent exit — Claude Code's own auto mode decides it.
 
-| Command                                                      | Decision |
-| ------------------------------------------------------------ | -------- |
-| `aws ec2 describe-instances`                                 | allow    |
-| `aws ec2 terminate-instances --instance-ids i-abc`           | ask      |
-| `aws --profile prod --region us-east-1 ec2 describe-instances --no-cli-pager` | allow |
-| `aws s3 ls` / `aws s3 rm s3://bucket/key`                    | allow / ask |
-| `aws logs start-query --log-group-name X --query-string ...` | allow (service override: `start-query` is read-only) |
-| `gh api /repos/x/y/issues`                                   | allow    |
-| `gh api -X POST /repos/x/y/issues`                           | ask      |
-| `gh pr list` / `gh pr merge`                                 | allow / ask |
-| `curl https://api.example.com/users`                         | allow    |
-| `curl -X POST ... -d ...`                                    | ask      |
-| `kubectl get pods` / `kubectl exec -it pod -- bash`          | allow / ask |
-| `terraform plan` / `terraform apply`                         | allow / ask |
-| `terraform state list` / `terraform state rm foo`            | allow / ask |
-| `git status` / `git push`                                    | allow / ask |
-| `find . -name '*.py'`                                        | allow    |
-| `find . -name '*.py' -delete`                                | ask      |
-| `sed 's/a/b/' f` / `sed -i 's/a/b/' f`                       | allow / ask |
-| `python3 -c "print(1+1)"`                                    | allow    |
-| `python3 -c "import os; os.system('rm -rf /')"`              | ask      |
-| `python3 -m json.tool` / `python3 -m http.server`            | allow / ask |
-| `python3 -m pip list` / `python3 -m pip install requests`    | allow / ask |
-| `bash -c "ls /tmp"` / `bash -c "rm /etc/passwd"`             | allow / ask |
-| `for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done` | allow |
-| `echo foo \| xargs rm` / `echo foo \| xargs cat`             | ask / allow |
-| `time aws ec2 describe-instances`                            | allow    |
-| `cat file > /tmp/out`                                        | allow (`/tmp/*` is on the safe-write list) |
-| `echo x > /etc/profile` / `echo x > ~/.bashrc`               | ask (on the `unsafe_write_targets` deny list) |
-| `echo x > ~/.claude/settings.json`                           | ask (deny list overrides the `~/.claude/*` safe glob) |
-| `echo x > ~/.claude/cache.json`                              | allow (`~/.claude/*` safe-write; not on the deny list) |
-| `aws ec2 describe-instances > /dev/null`                     | allow    |
-| `sqlite3 db.sqlite "SELECT * FROM t"`                        | allow    |
-| `sqlite3 db.sqlite "DROP TABLE t"`                           | ask      |
-| `sqlite3 db.sqlite ".tables"` / `... ".import f.csv t"`      | allow / ask |
-| `psql -c "SELECT now()" mydb` / `psql -c "DELETE FROM t" mydb` | allow / ask |
-| `mysql -e "SHOW DATABASES" mydb` / `mysql -e "DROP TABLE t" mydb` | allow / ask |
+Measured against the 3,846-command dogfood corpus, that moved YOLT from
+**609 asks (15.8%) to 188 (4.9%)** across 48 distinct reasons instead of 135.
 
-## SQL CLIs
+The seven categories, and what they cover:
 
-`sqlite3`, `psql`, `mysql`, `mariadb`, and `duckdb` are classified via
-the `sql_cli` default. The argv walker pulls the SQL string out
-(positional for sqlite3/duckdb, `-c` / `--command` for psql, `-e` /
-`--execute` for mysql/mariadb) and runs a conservative scan:
+| Category | Commands |
+| --- | --- |
+| irreversible-fs | `rm`, `shred`, `rmdir`, `git rm`, `git clean`, `find -delete` |
+| history-rewrite | `git reset --hard` only — the reflog recovers everything else |
+| credential-shape | `gh api -f/-F/--field/--input`, `curl -d/--data*/-F/-T`, `curl -X POST` |
+| infra-destroy | `terraform apply`, `terraform destroy`, `kubectl delete`, `aws iam` (non-read) |
+| opaque-execution | `eval`, `sudo`, `find -exec`, inline Python that parses destructively or does not parse |
+| process-kill | `kill`, `pkill`, `gh run cancel` |
+| irrevocable-remote | `gh api -X POST/PUT/PATCH/DELETE`, `gh release create/delete`, `gh repo fork` |
+| agent-steering-write | any write to `unsafe_write_targets` — by redirect, or via `cp`/`mv`/`tee`/`dd`/`install` |
 
-1. Strip line comments (`-- ...`), block comments (`/* ... */`), and
-   string/identifier literals (`'...'`, `"..."`, `` `...` ``).
-2. If any of `INSERT / UPDATE / DELETE / DROP / CREATE / ALTER /
-   TRUNCATE / REPLACE / MERGE / GRANT / REVOKE / VACUUM / REINDEX /
-   ATTACH / DETACH / COPY / LOAD / IMPORT / LOCK / CALL / EXEC /
-   SET / RESET / BEGIN / COMMIT / ROLLBACK / ...` survives → `unsafe`.
-3. Otherwise, if the first remaining keyword is `SELECT / WITH /
-   EXPLAIN / SHOW / DESCRIBE / DESC / VALUES / TABLE` → `safe`.
-4. `PRAGMA` is `safe` for reads, `unsafe` if it contains `=`
-   (sqlite assignment form).
-5. Anything else → `unknown` (Claude Code's default prompt fires).
+Plus `git push`, which is on the list for a structural reason rather than a
+risk one: see "Policy-driven CLIs" below.
 
-SQL fed via file (`psql -f queries.sql`, `mysql < queries.sql`) is
-opaque to a static checker and stays `unknown`. Bare `sqlite3 db.sqlite`
-also stays `unknown` because it opens an interactive shell.
+Example decisions:
 
-sqlite3 dot-commands (`.tables`, `.schema`, `.import`, `.read`, ...)
-are classified separately by name — `.tables` / `.schema` / `.headers`
-are safe; `.import` / `.load` / `.read` / `.shell` / `.backup` are
-unsafe.
+| Command | Decision |
+| --- | --- |
+| `rm -rf build` / `shred -u f` / `rmdir d` | ask |
+| `git rm old.py` / `git clean -fd` | ask |
+| `git reset --hard HEAD~1` | ask |
+| `git reset --soft HEAD~1` / `git rebase -i master` | silent (delegated) |
+| `git log` / `git status` / `git pull` / `git checkout -b x` / `git commit` | silent (delegated) |
+| `git push origin feature/x` | ask (precondition for the deny policies) |
+| `git push origin master` | **deny**, when the branch probe resolves |
+| `gh api repos/o/r/pulls` | silent (a GET) |
+| `gh api -X PUT .../merge -f m=squash` / `gh api -f title=x` | ask |
+| `gh release create v1` / `gh repo fork o/r` / `gh run cancel 1` | ask |
+| `gh pr merge` / `gh pr view` / `gh issue create` | silent (delegated) |
+| `curl https://example.com` | silent (a GET) |
+| `curl -X POST ... -d @body.json` | ask |
+| `terraform apply` / `terraform destroy` | ask |
+| `terraform init` / `terraform plan` / `terraform state rm` | silent (delegated) |
+| `kubectl delete pod x` | ask |
+| `kubectl get pods` / `kubectl exec ...` | silent (delegated) |
+| `aws iam attach-role-policy ...` | ask |
+| `aws iam list-users` / `aws s3 cp a b` / `aws ec2 terminate-instances` | silent (delegated) |
+| `eval "$CMD"` / `sudo rm -rf /` | ask |
+| `echo a \| xargs rm` / `timeout 5 rm x` / `nohup rm x` | ask (the wrapper is unwrapped first) |
+| `kill -9 1234` / `pkill -f node` | ask |
+| `find . -delete` / `find . -exec rm {} +` | ask |
+| `find . -name '*.py'` | silent (delegated) |
+| `python3 -c "print(1+1)"` | silent |
+| `python3 -c "import os; os.system('rm -rf /')"` | ask |
+| `cp a b` / `mv a b` / `tee out.txt` / `sed -i s/a/b/ f` | silent (delegated) |
+| `cp evil.md ~/.claude/skills/x/SKILL.md` | ask (protected path) |
+| `echo x > ~/.claude/settings.json` | ask (deny list beats the `~/.claude/*` safe glob) |
+| `echo x > /tmp/out` | silent |
+| `ls` / `cat` / `grep` / `mkdir` / `brew install` / `source ~/.bash_profile` | silent (no rule — delegated) |
 
-### SQL carried in cloud-CLI flags
+"silent" means the hook exits without emitting a permission decision, which
+post-Phase-1 is what both `safe` and `unknown` do.
 
-Several AWS CLIs take a SQL string as a flag value (`aws athena
-start-query-execution --query-string`, `aws rds-data execute-statement
---sql`, `aws timestream-query query --query-string`, `aws redshift-data
-execute-statement --sql`). The `aws` rule names these in a
-`sql_payload_flags` registry keyed by `"<service> <operation>"`; each
-entry gives the SQL-carrying `flag` and a `dialect`. When the operation
-matches, the flag value is pulled and run through the same SQL scanner
-described above.
+## SQL CLIs (removed in Phase 3)
 
-The verb decision is a **floor**, so payload scanning never weakens a
-mutating operation on its own:
+`sqlite3`, `psql`, `mysql`, `duckdb` and the cloud SQL-over-flag forms
+(`aws athena start-query-execution --query-string`, `aws rds-data --sql`,
+`aws redshift-data`, `aws timestream-query`) had a conservative SQL scanner
+that classified `SELECT` read-only and `DROP`/`DELETE`/`INSERT` mutating.
 
-- A write verb (`start-*`, `execute-*`) stays `unsafe` regardless of
-  payload. Reading the SQL only helps once the user has explicitly
-  marked the operation safe — e.g. an `extra_safe_patterns` override
-  for `start-query-execution`. After that, the payload governs:
-  read-only `SELECT` → `safe`, destructive SQL → `unsafe`, unclassified
-  SQL → `unknown`. This is the point of the registry: an override that
-  used to blanket-allow every query now keeps destructive ones flagged.
-- `aws timestream-query query` matches no verb pattern (so it was
-  `unknown` and prompted every time); its payload now refines it to
-  `safe` / `unsafe` out of the box.
+Phase 3 ([#100](https://github.com/voitta-ai/voitta-yolt/issues/100)) removed
+all of it. It is a good example of what the phase is for: a substantial,
+carefully-built classifier that auto mode does at least as well, and the
+half that mattered — "the scanner could not classify this string" — only
+ever produced `unknown`, which is now the default for the whole surface
+anyway.
 
-`dialect` feeds the per-dialect function-side-effect scanner (see issue
-#26). `presto` / `timestream` / `redshift` / `varies` have no function
-deny-set yet, so only the dialect-agnostic keyword scan applies to them
-today; the field is recorded so adding a deny-set later lights up
-function detection for those services with no further wiring.
+An operator who wants it back can restore it through
+`~/.claude/yolt/shell.json`; the `sql_cli` default and the `sql_flags` /
+`sql_positional_index` / `sql_payload_flags` fields are still implemented
+and still schema-validated. Nothing ships them.
 
 ## Python rules (interpreter delegate)
 
@@ -713,6 +697,12 @@ copy the default list through. `unsafe_write_targets` is checked before
 `safe_write_targets`, so a deny entry wins over a broader safe glob.
 Examples: `examples/user-overrides.json`, `examples/shell-overrides.json`.
 
+Since Phase 3 this file is also **how you get a deleted rule back.** The
+schema did not shrink with the rule set: `safe_subcommands`, `sql_cli`,
+`nested_modules` and the rest are all still implemented and still
+validated. If auto mode keeps letting through something you want a hard
+prompt on, add it here rather than reopening the treadmill upstream.
+
 ## Credentials in the command line (advisory)
 
 YOLT already parses every Bash command for safety, which makes
@@ -826,14 +816,18 @@ preserved. `YOLT_LOG_MAX_BYTES` overrides the threshold; set
 ### Credential redaction
 
 Credentials land on command lines routinely — `curl -H "X-Api-Key: ..."`,
-`--token`, connection strings — and both logs are append-only, so
-anything written to them should be assumed permanent. Before a record is
-written, credential-shaped substrings in `command` (and in `reason`) are
-replaced with a `[REDACTED:<shape>]` marker naming the shape only, never
-the value. This applies to `~/.claude/yolt.log` and
-`~/.claude/yolt-ran.log` alike, and happens at write time — the risk
-being closed is the file on disk. Issue
-[#84](https://github.com/voitta-ai/voitta-yolt/issues/84).
+`--token`, connection strings — and the log is append-only, so anything
+written to it should be assumed permanent. Before a record is written,
+credential-shaped substrings in `command` (and in `reason`) are replaced
+with a `[REDACTED:<shape>]` marker naming the shape only, never the
+value. Issue [#84](https://github.com/voitta-ai/voitta-yolt/issues/84).
+
+This happens at **write time**, which is the whole shape of the
+mitigation and its limit: the risk being closed is the file on disk, and
+lines written before #84 landed are still plaintext. Phase 3 removed the
+second sink (`~/.claude/yolt-ran.log`) along with the reviewer that read
+it, so `~/.claude/yolt.log` is now the only log YOLT writes — but any
+`yolt-ran.log` already on your machine stays exactly as it was.
 
 ```json
 {"ts": "...", "decision": "unsafe", "reason": "curl: mutating", "command": "curl -H \"Authorization: Bearer [REDACTED:github-token]\" https://api.github.com", "permission_mode": "default", "agent_id": null}
@@ -916,145 +910,41 @@ environment:
 KEY="$(fetch-secret)" sh -c 'curl -H "X-Api-Key: $KEY" https://service/endpoint'
 ```
 
-## Self-improvement loop
+## Self-improvement loop (removed in Phase 3)
 
-The dogfood log is also a record of where YOLT got in your way. The
-reviewer (`hooks/yolt_review.py`, issue
-[#44](https://github.com/voitta-ai/voitta-yolt/issues/44)) mines that log
-for recurring friction and distills it into a human-reviewable doc plus a
-suggestion state file under `~/.claude/yolt/`:
+`hooks/yolt_review.py`, the `/yolt:review` slash command, and the SessionStart
+and SessionEnd hooks that drove them are gone, along with the PostToolUse
+"ran log" that fed them. Removed by Phase 3
+([#100](https://github.com/voitta-ai/voitta-yolt/issues/100)) for two reasons,
+the second being the stronger:
 
-- `~/.claude/yolt/review.md` — the doc you read.
-- `~/.claude/yolt/suggestions.json` — suggestion ids with
-  pending / applied / dismissed status that survives regeneration.
+1. It mined decision-log friction to suggest new rules. It was the engine of
+   the rule treadmill, and the treadmill is what Phase 3 retires.
+2. **It was independently the source of two credential leaks**
+   ([#91](https://github.com/voitta-ai/voitta-yolt/issues/91),
+   [#94](https://github.com/voitta-ai/voitta-yolt/issues/94)). It copied raw
+   log commands into `review.md` and `suggestions.json`, then — after the
+   first fix — into `glob_collisions` as well, so the same credential
+   appeared redacted on one line and in cleartext eight lines below.
+   Deleting it removes those sinks permanently, which no further redaction
+   work can match.
 
-Repeated commands are grouped to a conservative prefix (argv head plus
-subcommand tokens — no flags, no values, no paths) and sorted into three
-buckets:
+The PostToolUse ran log went with it: once the reviewer was gone nothing read
+it, and it was a third place command lines were written to disk.
 
-- **`friction-unsafe`** — YOLT returned `ask` on this prefix repeatedly.
-- **`friction-unknown`** — the command fell through to Claude Code's
-  default prompt repeatedly (a rules gap, or a personal/internal CLI).
-- **`fastpath`** — YOLT auto-allowed this prefix at high frequency; a
-  static `permissions.allow` glob would skip the hook startup entirely
-  (a static allow rule
-  [bypasses PreToolUse hooks](#install) natively).
+`hooks/secret_redact.py` is untouched and still runs on every log write. It
+is the asset; the reviewer was its largest consumer, not its owner.
 
-Grouping is stdlib-only and deliberately does not depend on tree-sitter,
-so the reviewer still works when the grammar deps failed to bootstrap.
-Compound commands (pipes, substitutions, loops) are counted but never
-turned into suggestions — a prefix glob cannot express them; rules and
-user overrides handle those (issue
-[#45](https://github.com/voitta-ai/voitta-yolt/issues/45)).
+**What is left on disk is yours.** Removing the hooks stops new writes; it
+does not delete `~/.claude/yolt/suggestions.json`, the generated `review.md`,
+or existing `yolt.log` / `yolt-ran.log` files. Redaction has always been
+write-time only, so lines written before
+[#84](https://github.com/voitta-ai/voitta-yolt/issues/84) may still hold
+plaintext credentials. Delete them at your own discretion — and do not grep
+them to check first.
 
-### Did you approve, or did YOLT?
-
-A second log, `~/.claude/yolt-ran.log`, is written by a PostToolUse hook:
-one record per Bash command that actually ran. A command that YOLT said
-`ask` on only reaches PostToolUse if you approved it at the prompt (a
-denied command never runs). The reviewer correlates the two logs by
-timestamp, so each `friction-unsafe` suggestion carries an `approved`
-count — high `approved` is real friction worth acting on; `approved` 0
-means YOLT is very likely doing its job. Override with `YOLT_RAN_LOG_FILE`
-(absolute path) or opt out with `YOLT_RAN_LOG_FILE=""`.
-
-### Routing — and the collision veto
-
-Each suggestion routes to exactly one of three remediations:
-
-- **`settings.json` allow** — for a prefix that is read-only regardless
-  of flags. Fastest, but a static allow rule bypasses YOLT's hook
-  entirely (including its redirect and command-substitution checks).
-- **Local override** — a `~/.claude/yolt/shell.json` rule for anything
-  flag-conditional or verb-class, keeping the AST walk in the loop. For
-  the narrow, additive case of a personal CLI hitting `unknown` on a
-  subcommand, the reviewer writes the `safe_subcommands` override itself
-  (`--write-override <id>`); deeper rules stay hand-written. See
-  [Writing overrides](#writing-overrides-issue-45).
-- **Upstream issue** — a common CLI repeatedly hitting `unknown` is
-  likely a rules gap worth reporting on voitta-ai/voitta-yolt.
-
-The safety-critical part is the **glob-collision veto**: a `fastpath`
-prefix like `gh api` is read-only, but `gh api -X POST` is not, and both
-match `Bash(gh api*)`. Promoting that glob to `permissions.allow` would
-silently bypass YOLT for the POST too. Before recommending any
-`settings.json` glob, the reviewer fnmatches it against every command
-YOLT did *not* classify safe; any hit is recorded as a collision and the
-suggestion is re-routed to a `shell.json` rule instead, never the
-whitelist. Partially-overlapping namespaces stay suggestable —
-`gh pr view*` does not collide with `gh pr merge`.
-
-Only the redacted `shape` field (argv head plus flag names, every value
-stripped to `<...>`) may leave the machine in an upstream issue. The
-`examples` lines are raw log data and stay local.
-
-### Surfacing and applying
-
-- **`/yolt:review`** — the slash command that walks you through pending
-  suggestions, honors the routing above, edits `settings.json` /
-  `shell.json` with your confirmation, and records each as applied or
-  dismissed.
-- **SessionStart** prints a one-line nudge toward `/yolt:review` when
-  there are pending suggestions, throttled to once per 24h. It reads only
-  the small state file — it never parses the decision log.
-- **SessionEnd** regenerates the doc with `--generate --if-stale`: a
-  no-op (just an mtime check) when the log has not changed since the last
-  run, so quiet sessions cost almost nothing.
-
-Run it by hand the same way the hooks do:
-
-```bash
-python3 hooks/yolt_review.py --generate   # parse logs, write doc + state
-python3 hooks/yolt_review.py --status     # {"pending": N, ...}
-python3 hooks/yolt_review.py --list       # full suggestion JSON
-python3 hooks/yolt_review.py --applied <id> [<id> ...]
-python3 hooks/yolt_review.py --dismiss <id> [<id> ...]
-python3 hooks/yolt_review.py --write-override <id> [<id> ...]  # see below
-```
-
-Override the state directory with `YOLT_STATE_DIR`. The reviewer only
-ever writes under `~/.claude/yolt/`: its own state files, and — via
-`--write-override` — the `shell.json` override the hook reads. Edits to
-`settings.json` go through you. A Codex CLI parity loop is tracked in
-issue [#46](https://github.com/voitta-ai/voitta-yolt/issues/46).
-
-### Writing overrides (issue [#45](https://github.com/voitta-ai/voitta-yolt/issues/45))
-
-`--write-override <id>` turns a `friction-unknown` suggestion into a
-`~/.claude/yolt/shell.json` rule, for the one case the reviewer can infer
-safely: a **personal CLI** (no bundled rule) that fell through to
-`unknown` on a subcommand. It writes a `safe_subcommands` fragment
-asserting that one observed subcommand is read-only —
-
-```json
-{"commands": {"mycli": {"default": "subcommand", "safe_subcommands": ["status"]}}}
-```
-
-— so `mycli status` auto-allows while every other `mycli` subcommand
-still prompts (the assertion is strictly additive; it never marks the
-whole CLI safe, and never flips an existing `unsafe` verdict). A
-`cli group sub` prefix nests under
-`nested_subcommand.<group>.safe_subcommands` instead. Each suggestion's
-`override` field carries `writable`, the `label`, and the exact
-`fragment`.
-
-Three properties make the write safe:
-
-- **Read-modify-write** — overrides merge per top-level key (a `commands`
-  override replaces individual command specs), so the writer reads the
-  existing file and unions the new subcommand in, never clobbering
-  entries you already have.
-- **Validate before write** — the merged result (bundled rules ∪ the
-  override) is checked with `validate_shell_rules`; the writer refuses to
-  write anything that would fail, since a malformed override downgrades
-  the whole hook to `rules-validation-error`.
-- **Personal-CLI only** — a `friction-unknown` on a *bundled* CLI is a
-  rules gap worth an upstream issue, not a local shadow that would freeze
-  a stale copy of the bundled spec. Flag-conditional, verb-class, and
-  `friction-unsafe` overrides stay hand-written.
-
-Override the paths the writer reads/writes with `YOLT_RULES_DIR` (bundled
-rules) and `YOLT_SHELL_OVERRIDE` (the user override file).
+`~/.claude/yolt/rules.json` and `~/.claude/yolt/shell.json` are unaffected:
+those are your overrides, still read on every hook invocation.
 
 ## CLI usage
 
@@ -1143,20 +1033,11 @@ Adding one means writing an analyzer of the same shape as
 `yolt_analyzer.py` and registering it under `interpreters` in
 `rules/shell.json`.
 
-### SQL CLIs (in scope)
+### SQL CLIs
 
-`sqlite3`, `psql`, `mysql`, `mariadb`, `duckdb` — inline SQL string
-extracted from argv and scanned for destructive keywords; see
-[SQL CLIs](#sql-clis).
-
-### SQL CLIs (out of scope)
-
-- SQL fed via file (`psql -f q.sql`, `mysql < q.sql`) — opaque
-  statically, stays `unknown`.
-- Bare interactive invocations (`sqlite3 db.sqlite` with no SQL) —
-  stay `unknown`.
-- Other SQL clients (`cockroach sql`, `clickhouse-client`,
-  `snowsql`, ...) — not classified by the SQL path.
+Removed in Phase 3. See "SQL CLIs (removed in Phase 3)" above. The scanner
+code (`classify_sql_text`) is still present and still reachable through an
+operator override; nothing in the shipped rules routes to it.
 
 ### Python alias resolution (in scope)
 
@@ -1189,23 +1070,39 @@ surface name rather than guessed.
 
 ### Policy-driven CLIs
 
-Common CLIs (`gh`, `git`, `aws`, `curl`, `kubectl`, `helm`, `docker`,
-`terraform`, ...) are policy-driven via `rules/shell.json`. The
-walker pulls a command path from argv and matches against:
+A small set of CLIs (`git`, `gh`, `aws`, `curl`, `kubectl`, `terraform`) are
+policy-driven via `rules/shell.json`. The walker pulls a command path from
+argv and matches against:
 
-- `safe_subcommands` / `unsafe_subcommands` at the top level;
-- `nested_subcommand` specs for namespaces with mutating verbs at
-  arbitrary depth (e.g. `docker image rm`, `kubectl config
-  set-context`, `helm repo add`);
-- `service_overrides` for AWS service-specific reads
-  (e.g. `aws logs start-query` is read-only despite the verb);
-- `unsafe_flags` / `unsafe_flag_values` /
-  `unsafe_flag_any_value` / `unsafe_flag_value_prefix` /
-  `unsafe_flags_without_value` for flag-driven mutation
-  (e.g. `find -exec`, `gh api --input`).
+- `unsafe_subcommands` at the top level;
+- `nested_subcommand` specs for namespaces with mutating verbs at depth
+  (e.g. `gh api`, `git reset`);
+- `service_overrides` for AWS service-specific handling (only `iam` ships);
+- `unsafe_flag_values` / `unsafe_flag_any_value` /
+  `unsafe_flag_value_prefix` / `unsafe_flags_without_value` for flag-driven
+  mutation (e.g. `find -exec`, `gh api --input`, `git reset --hard`);
+- `write_target_last_positional` / `write_target_all_positional` /
+  `write_value_prefix_targets`, which route an argument through
+  `unsafe_write_targets` so `cp`/`mv`/`tee`/`dd`/`install` cannot be used to
+  write a steering file.
 
-For namespaces that are only partially modeled, bare and unmodeled
-verbs fall to `unknown` rather than silently classifying safe.
+Since Phase 3 there are **no `safe_subcommands` in the shipped rules.** A
+verb on no list falls to `unknown` and is delegated; that is the mechanism,
+not an omission. `_match_subcommand_lists` still honours `safe_subcommands`
+for operator overrides.
+
+One coupling is worth knowing because it is silent. The git deny policies
+(`policies.git`, from
+[#97](https://github.com/voitta-ai/voitta-yolt/issues/97)) are **parasitic**:
+a policy runs only on a command the static rules already classified `unsafe`,
+so it can narrow `unsafe` to `deny` but can never originate a verdict. That
+is a deliberate safety property — a failed probe lands on the pre-existing
+verdict and cannot manufacture a refusal — but it means deleting a rule also
+disarms every policy attached to it, with nothing reported anywhere. It is
+why `git push` survived Phase 3 despite being reversible, high-volume local
+workflow: delegating it would have silently turned off `default_branch_target`
+and `shared_history`. Any argv named in an enabled policy must stay reachable
+as `unsafe`.
 
 ### Conservative-unknown contract
 

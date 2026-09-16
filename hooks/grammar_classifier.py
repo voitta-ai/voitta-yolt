@@ -626,10 +626,14 @@ class GrammarClassifier:
 
         namespace = argv[1]
         action = argv[2]
+        # The gh surface that still classifies after Phase 3 (#100). This
+        # map used to hold `pr` and `issue`, which that phase delegated to
+        # auto mode -- leaving a hint generator that could only fire for
+        # commands the hook no longer has an opinion about.
         allowed = {
-            "pr": {"create", "comment", "edit", "merge", "ready",
-                   "review", "update-branch"},
-            "issue": {"create", "comment", "edit", "close", "reopen"},
+            "release": {"create", "delete"},
+            "repo": {"fork"},
+            "run": {"cancel"},
         }
         if action in allowed.get(namespace, set()):
             return "Bash(gh {} {}*)".format(namespace, action)

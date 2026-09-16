@@ -1,30 +1,61 @@
 {
   "_meta": {
     "version": "0.1.0",
-    "description": "YOLT shell command classification rules. Used to decide whether the *full* invocation of a Bash command is read-only (auto-allow) or mutating (ask)."
+    "description": "YOLT shell classification rules. NOT a model of which commands are safe: auto mode does that. This file carries only the decisions deliberately refused to a probabilistic classifier -- the non-delegable list of issue #100. A command absent from 'commands', or a subcommand on no list here, classifies 'unknown' and is delegated to the host by design."
   },
-
   "shell_builtins_safe": [
-    "echo", "printf", "pwd", "true", "false",
-    "test", "[", "[[",
-    "cd", "pushd", "popd", "dirs",
-    "type", "command", "hash",
-    "alias", "unalias",
-    "history", "fc",
-    "jobs", "wait", "sleep",
-    "let", "read",
-    "unset", "set",
+    "echo",
+    "printf",
+    "pwd",
+    "true",
+    "false",
+    "test",
+    "[",
+    "[[",
+    "cd",
+    "pushd",
+    "popd",
+    "dirs",
+    "type",
+    "command",
+    "hash",
+    "alias",
+    "unalias",
+    "history",
+    "fc",
+    "jobs",
+    "wait",
+    "sleep",
+    "let",
+    "read",
+    "unset",
+    "set",
     ":"
   ],
-
   "shell_keywords": [
-    "if", "then", "else", "elif", "fi",
-    "for", "while", "until", "do", "done",
-    "case", "esac", "in", "select",
-    "function", "time", "coproc",
-    "!", "{", "}", "(", ")"
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "for",
+    "while",
+    "until",
+    "do",
+    "done",
+    "case",
+    "esac",
+    "in",
+    "select",
+    "function",
+    "time",
+    "coproc",
+    "!",
+    "{",
+    "}",
+    "(",
+    ")"
   ],
-
   "_safe_write_targets_note": "Redirect targets that count as benign. Anything matching one of these globs does not flip the classifier to 'writes to a file via redirection'. Glob semantics are fnmatch. Tilde and $HOME are expanded before matching.",
   "safe_write_targets": [
     "/dev/null",
@@ -38,7 +69,6 @@
     "~/.cache/*",
     "~/.claude/*"
   ],
-
   "_unsafe_write_targets_note": "Write targets dangerous enough to classify 'unsafe' (ask with a specific reason) rather than 'unknown' (contextless default prompt). Checked BEFORE safe_write_targets, so an entry here overrides a broader safe glob -- e.g. '~/.claude/settings.json' is unsafe even though '~/.claude/*' is a safe-write target, because settings.json can disable this hook. That reasoning is not specific to settings.json: a skill file is read into the model's context on every later turn, an agent definition carries tool grants, files under hooks/ are executed by the host, and an MCP config names servers the agent will trust. Each one steers the agent, so each one is listed. Note the asymmetry this corrects: '~/.bashrc' was already unsafe for steering a shell while '~/.claude/skills/*' was safe for steering the agent. '~/.claude/*' stays a safe-write target for everything else under it -- logs, caches and '~/.claude/yolt/*' state -- because this list is checked first and the specific entries win. Applies to redirect targets and to the write-target arguments of tee/cp/mv/install/dd/find. Glob semantics are fnmatch; '~/' is expanded before matching.",
   "unsafe_write_targets": [
     "~/.bashrc",
@@ -88,7 +118,6 @@
     ".mcp.json",
     "*/.mcp.json"
   ],
-
   "interpreters": {
     "python3": {
       "inline_flag": "-c",
@@ -97,14 +126,26 @@
       "read_script_file": true,
       "safe_modules": [
         "json.tool",
-        "tokenize", "dis", "ast", "py_compile", "tabnanny",
-        "this", "antigravity",
-        "calendar", "uuid", "secrets",
-        "site", "sysconfig", "platform",
+        "tokenize",
+        "dis",
+        "ast",
+        "py_compile",
+        "tabnanny",
+        "this",
+        "antigravity",
+        "calendar",
+        "uuid",
+        "secrets",
+        "site",
+        "sysconfig",
+        "platform",
         "pdb",
-        "timeit", "cProfile", "profile",
+        "timeit",
+        "cProfile",
+        "profile",
         "doctest",
-        "base64", "binhex"
+        "base64",
+        "binhex"
       ],
       "unsafe_modules": [
         "http.server",
@@ -119,156 +160,295 @@
       "nested_modules": {
         "pip": {
           "safe_subcommands": [
-            "list", "show", "freeze", "help", "search", "check",
-            "config", "debug", "inspect", "index", "hash", "completion"
+            "list",
+            "show",
+            "freeze",
+            "help",
+            "search",
+            "check",
+            "config",
+            "debug",
+            "inspect",
+            "index",
+            "hash",
+            "completion"
           ],
           "unsafe_subcommands": [
-            "install", "uninstall", "download", "wheel"
+            "install",
+            "uninstall",
+            "download",
+            "wheel"
           ]
         },
         "unittest": {
-          "safe_subcommands": ["discover"],
+          "safe_subcommands": [
+            "discover"
+          ],
           "default": "safe"
         }
       }
     },
-    "python":  {
+    "python": {
       "inline_flag": "-c",
       "module_flag": "-m",
       "delegate": "python",
       "read_script_file": true
     },
-    "bash":    {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
-    "sh":      {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
-    "zsh":     {"inline_flag": "-c", "delegate": "bash",   "read_script_file": false},
-    "node":    {"inline_flag": "-e", "delegate": "unknown","read_script_file": false},
-    "bun":     {"inline_flag": "-e", "delegate": "unknown","read_script_file": false},
-    "ruby":    {"inline_flag": "-e", "delegate": "unknown","read_script_file": false},
-    "perl":    {"inline_flag": "-e", "delegate": "unknown","read_script_file": false}
+    "bash": {
+      "inline_flag": "-c",
+      "delegate": "bash",
+      "read_script_file": false
+    },
+    "sh": {
+      "inline_flag": "-c",
+      "delegate": "bash",
+      "read_script_file": false
+    },
+    "zsh": {
+      "inline_flag": "-c",
+      "delegate": "bash",
+      "read_script_file": false
+    },
+    "node": {
+      "inline_flag": "-e",
+      "delegate": "unknown",
+      "read_script_file": false
+    },
+    "bun": {
+      "inline_flag": "-e",
+      "delegate": "unknown",
+      "read_script_file": false
+    },
+    "ruby": {
+      "inline_flag": "-e",
+      "delegate": "unknown",
+      "read_script_file": false
+    },
+    "perl": {
+      "inline_flag": "-e",
+      "delegate": "unknown",
+      "read_script_file": false
+    }
   },
-
   "commands": {
-    "ls":       {"default": "safe"},
-    "cat":      {"default": "safe"},
-    "head":     {"default": "safe"},
-    "tail":     {"default": "safe"},
-    "less":     {"default": "safe"},
-    "more":     {"default": "safe"},
-    "wc":       {"default": "safe"},
-    "file":     {"default": "safe"},
-    "stat":     {"default": "safe"},
-    "basename": {"default": "safe"},
-    "dirname":  {"default": "safe"},
-    "realpath": {"default": "safe"},
-    "readlink": {"default": "safe"},
-    "which":    {"default": "safe"},
-    "whereis":  {"default": "safe"},
-    "env":      {"default": "safe"},
-    "printenv": {"default": "safe"},
-    "date":     {"default": "safe"},
-    "cal":      {"default": "safe"},
-    "uname":    {"default": "safe"},
-    "hostname": {"default": "safe"},
-    "id":       {"default": "safe"},
-    "whoami":   {"default": "safe"},
-    "who":      {"default": "safe"},
-    "uptime":   {"default": "safe"},
-    "tty":      {"default": "safe"},
-    "locale":   {"default": "safe"},
-    "groups":   {"default": "safe"},
-    "ps":       {"default": "safe"},
-    "top":      {"default": "safe"},
-    "htop":     {"default": "safe"},
-    "df":       {"default": "safe"},
-    "du":       {"default": "safe"},
-    "free":     {"default": "safe"},
-    "lsof":     {"default": "safe"},
-    "netstat":  {"default": "safe"},
-    "ss":       {"default": "safe"},
-    "dig":      {"default": "safe"},
-    "nslookup": {"default": "safe"},
-    "host":     {"default": "safe"},
-    "ping":     {"default": "safe"},
-
-    "grep":     {"default": "safe"},
-    "rg":       {"default": "safe"},
-    "ag":       {"default": "safe"},
-    "ack":      {"default": "safe"},
-    "sort":     {"default": "safe"},
-    "uniq":     {"default": "safe"},
-    "cut":      {"default": "safe"},
-    "tr":       {"default": "safe"},
-    "paste":    {"default": "safe"},
-    "join":     {"default": "safe"},
-    "comm":     {"default": "safe"},
-    "column":   {"default": "safe"},
-    "expand":   {"default": "safe"},
-    "unexpand": {"default": "safe"},
-    "fold":     {"default": "safe"},
-    "fmt":      {"default": "safe"},
-    "nl":       {"default": "safe"},
-    "od":       {"default": "safe"},
-    "hexdump":  {"default": "safe"},
-    "xxd":      {"default": "safe"},
-    "diff":     {"default": "safe"},
-    "cmp":      {"default": "safe"},
-    "jq":       {"default": "safe"},
-    "yq":       {"default": "safe"},
-    "awk":      {
-      "default": "safe",
-      "_note": "awk is safe unless given `-i inplace` (GNU) or the program calls system()/print > file. Pure text filtering is safe."
+    "git": {
+      "default": "subcommand",
+      "valueless_flags": [
+        "--no-pager",
+        "--paginate",
+        "--no-replace-objects",
+        "--bare",
+        "--no-optional-locks",
+        "--literal-pathspecs",
+        "--glob-pathspecs",
+        "--noglob-pathspecs",
+        "--icase-pathspecs",
+        "--no-advice",
+        "--version",
+        "--help"
+      ],
+      "unsafe_subcommands": [
+        "rm",
+        "clean",
+        "push"
+      ],
+      "nested_subcommand": {
+        "reset": {
+          "unsafe_flags_without_value": [
+            "--hard"
+          ],
+          "_note": "Only --hard. The reflog recovers committed history, so rebase/reset --soft/--mixed are delegable; nothing recovers an uncommitted working tree, which --hard discards. Force-pushing a rewritten history is covered by the git deny policies, not here."
+        }
+      },
+      "_note": "irreversible-fs (rm, clean), the one history-rewrite that is not reflog-recoverable (reset --hard), and 'push'. Pushing is NOT here because it is dangerous -- it is reversible and high-volume, and the draft delegated it. It is here because the git deny policies below are PARASITIC: a policy runs only on a command the static rules already called 'unsafe', so delegating 'git push' to auto mode silently disarms default_branch_target and shared_history. The deny predicates are themselves on the non-delegable list, so their precondition is too. Every other subcommand -- log, status, pull, commit, checkout, rebase -- is delegated and classifies 'unknown'."
     },
-    "sed": {
-      "default": "safe",
-      "unsafe_flag_any_value": ["-i", "--in-place"],
-      "_note": "sed without -i just outputs to stdout. -i rewrites files in place."
+    "gh": {
+      "default": "subcommand",
+      "valueless_flags": [
+        "--no-pager",
+        "--paginate",
+        "--version",
+        "--help"
+      ],
+      "nested_subcommand": {
+        "api": {
+          "unsafe_flag_values": {
+            "-X": [
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "--method": [
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          },
+          "unsafe_flag_any_value": [
+            "-F",
+            "--field",
+            "-f",
+            "--raw-field"
+          ],
+          "unsafe_flag_value_prefix": {
+            "--input": "*"
+          },
+          "_note": "Two categories at once: credential-shape (a -f/-F/--field body is where a token gets typed onto a command line) and irrevocable-remote (an arbitrary authenticated mutation against a remote has no local undo, whichever verb spells it). Bare 'gh api PATH' is a GET and is delegated."
+        },
+        "release": {
+          "unsafe_subcommands": [
+            "create",
+            "delete"
+          ]
+        },
+        "repo": {
+          "unsafe_subcommands": [
+            "fork"
+          ]
+        },
+        "run": {
+          "unsafe_subcommands": [
+            "cancel"
+          ]
+        }
+      },
+      "_note": "gh pr merge, gh issue create and the rest of the gh surface are delegated. What stays is what a remote will not give back."
     },
-
-    "md5":      {"default": "safe"},
-    "md5sum":   {"default": "safe"},
-    "shasum":   {"default": "safe"},
-    "sha1sum":  {"default": "safe"},
-    "sha256sum":{"default": "safe"},
-    "sha512sum":{"default": "safe"},
-    "openssl":  {"default": "ask", "_note": "openssl can generate keys and sign things. Too many subcommands to enumerate safely; punt to prompt."},
-
-    "tee": {
+    "curl": {
+      "default": "ask",
+      "unsafe_flag_values": {
+        "-X": [
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE"
+        ],
+        "--request": [
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE"
+        ]
+      },
+      "unsafe_flag_any_value": [
+        "-d",
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "--data-urlencode",
+        "-F",
+        "--form",
+        "--form-string",
+        "-T",
+        "--upload-file"
+      ],
+      "_note": "credential-shape. A request body is where a secret rides. default 'ask' yields 'unknown' post-Phase-1, so a plain GET is delegated; only the body-carrying forms classify."
+    },
+    "terraform": {
+      "default": "subcommand",
+      "unsafe_subcommands": [
+        "apply",
+        "destroy"
+      ],
+      "_note": "infra-destroy. 'apply' is kept on the operator's own standing convention that apply scope is reviewed before it runs, not because apply is destroy. init/plan/fmt/state are delegated."
+    },
+    "kubectl": {
+      "default": "subcommand",
+      "unsafe_subcommands": [
+        "delete"
+      ],
+      "_note": "infra-destroy. apply/create/patch are recoverable from manifests; delete is not."
+    },
+    "aws": {
+      "default": "aws_cli",
+      "service_overrides": {
+        "iam": {
+          "safe_operation_patterns": [
+            "get-*",
+            "list-*",
+            "simulate-*"
+          ],
+          "unsafe_operation_patterns": [
+            "*"
+          ],
+          "_note": "Privilege surface, so it fails closed: anything not plainly a read is non-delegable. Every other AWS service falls through to 'unclassified' -> unknown."
+        }
+      },
+      "_note": "infra-destroy, narrowed to the one service where a wrong call grants standing access rather than destroying a resource."
+    },
+    "rm": {
       "default": "unsafe",
-      "write_target_all_positional": true,
-      "_note": "tee writes to one or more files. Always mutating. Every positional arg is a write target, routed through unsafe_write_targets for a specific reason."
+      "_note": "irreversible-fs."
     },
-    "rm":     {"default": "unsafe"},
-    "rmdir":  {"default": "unsafe"},
-    "mv":     {"default": "unsafe", "write_target_last_positional": true},
-    "cp":     {"default": "unsafe", "write_target_last_positional": true},
-    "ln":     {"default": "unsafe"},
-    "touch":  {"default": "unsafe"},
-    "mkdir":  {"default": "unsafe"},
-    "chmod":  {"default": "unsafe"},
-    "chown":  {"default": "unsafe"},
-    "chgrp":  {"default": "unsafe"},
-    "install":{"default": "unsafe", "write_flag_value_targets": ["-t", "--target-directory"]},
-    "dd":     {"default": "unsafe", "write_value_prefix_targets": ["of="]},
-    "shred":  {"default": "unsafe"},
-    "sudo":   {"default": "unsafe"},
-    "su":     {"default": "unsafe"},
-    "doas":   {"default": "unsafe"},
-    "eval":   {"default": "unsafe"},
-    "source": {"default": "unsafe"},
-    ".":      {"default": "unsafe"},
-    "exec":   {"default": "unsafe"},
-    "trap":   {"default": "unsafe"},
-    "kill":   {"default": "unsafe"},
-    "killall":{"default": "unsafe"},
-    "pkill":  {"default": "unsafe"},
-
+    "shred": {
+      "default": "unsafe",
+      "_note": "irreversible-fs."
+    },
+    "rmdir": {
+      "default": "unsafe",
+      "_note": "irreversible-fs."
+    },
+    "eval": {
+      "default": "unsafe",
+      "_note": "opaque-execution. The argument is constructed at runtime, so no static rule below can see what actually runs."
+    },
+    "sudo": {
+      "default": "unsafe",
+      "_note": "Kept as a rule, not as plumbing. sudo is NOT delegate_to_argument, so deleting this entry would make 'sudo rm -rf /' classify 'unknown' -- a hole around every rule in this file rather than a delegation."
+    },
+    "kill": {
+      "default": "unsafe",
+      "_note": "process-kill."
+    },
+    "pkill": {
+      "default": "unsafe",
+      "_note": "process-kill."
+    },
+    "cp": {
+      "default": "ask",
+      "write_target_last_positional": true,
+      "_note": "Kept for one reason: this command can write to a path on unsafe_write_targets, and agent-steering writes are the first entry on the non-delegable list. default 'ask' yields 'unknown', so an ordinary copy is delegated; only a protected destination classifies. The write_target_* fields consult the deny list ONLY, so no ordinary path can become unsafe through them."
+    },
+    "mv": {
+      "default": "ask",
+      "write_target_last_positional": true,
+      "_note": "Kept for one reason: this command can write to a path on unsafe_write_targets, and agent-steering writes are the first entry on the non-delegable list. default 'ask' yields 'unknown', so an ordinary copy is delegated; only a protected destination classifies. The write_target_* fields consult the deny list ONLY, so no ordinary path can become unsafe through them."
+    },
+    "install": {
+      "default": "ask",
+      "write_target_last_positional": true,
+      "_note": "Kept for one reason: this command can write to a path on unsafe_write_targets, and agent-steering writes are the first entry on the non-delegable list. default 'ask' yields 'unknown', so an ordinary copy is delegated; only a protected destination classifies. The write_target_* fields consult the deny list ONLY, so no ordinary path can become unsafe through them. The 'install -t DIR SRC' form is not covered: last-positional reads SRC, not DIR. A false negative, never a false positive."
+    },
+    "tee": {
+      "default": "ask",
+      "write_target_all_positional": true,
+      "_note": "Kept for one reason: this command can write to a path on unsafe_write_targets, and agent-steering writes are the first entry on the non-delegable list. default 'ask' yields 'unknown', so an ordinary copy is delegated; only a protected destination classifies. The write_target_* fields consult the deny list ONLY, so no ordinary path can become unsafe through them."
+    },
+    "dd": {
+      "default": "ask",
+      "write_value_prefix_targets": [
+        "of="
+      ],
+      "_note": "Kept for one reason: this command can write to a path on unsafe_write_targets, and agent-steering writes are the first entry on the non-delegable list. default 'ask' yields 'unknown', so an ordinary copy is delegated; only a protected destination classifies. The write_target_* fields consult the deny list ONLY, so no ordinary path can become unsafe through them."
+    },
     "find": {
-      "default": "safe",
-      "unsafe_flag_any_value": ["-delete"],
-      "unsafe_flags_without_value": ["-delete"],
-      "unsafe_flag_value_prefix": {"-exec": "*", "-execdir": "*", "-ok": "*", "-okdir": "*"},
-      "write_flag_value_targets": ["-fprint", "-fprintf", "-fls", "-fls0"],
-      "_note": "find is read-only until you add -delete, -exec, -execdir, -ok, -okdir, or a -fprint/-fprintf/-fls/-fls0 that writes outside safe_write_targets."
+      "default": "ask",
+      "unsafe_flags_without_value": [
+        "-delete"
+      ],
+      "unsafe_flag_value_prefix": {
+        "-exec": "*",
+        "-execdir": "*",
+        "-ok": "*",
+        "-okdir": "*"
+      },
+      "_note": "irreversible-fs (-delete) and opaque-execution (-exec runs a command this cannot see). Deleting the entry would not delegate 'find . -delete', it would hide it. A bare find is delegated. write_flag_value_targets (-fprint) is deliberately NOT carried over: it consults safe_write_targets, which can turn an ordinary path unsafe."
+    },
+    "env": {
+      "default": "delegate_to_argument",
+      "_note": "'env FOO=bar cmd args' runs cmd. Skip VAR=val tokens until we reach the actual command."
     },
     "xargs": {
       "default": "delegate_to_argument",
@@ -278,479 +458,33 @@
       "default": "delegate_to_argument",
       "_note": "GNU parallel runs its argument command."
     },
-    "time":    {"default": "delegate_to_argument"},
-    "nohup":   {"default": "delegate_to_argument"},
-    "nice":    {"default": "delegate_to_argument"},
-    "ionice":  {"default": "delegate_to_argument"},
-    "timeout": {"default": "delegate_to_argument", "_skip_first_positional": true},
-    "env":     {"default": "delegate_to_argument", "_note": "'env FOO=bar cmd args' runs cmd. Skip VAR=val tokens until we reach the actual command."},
-    "watch":   {"default": "delegate_to_argument"},
-
-    "gh": {
-      "default": "subcommand",
-      "valueless_flags": [
-        "--no-pager", "--paginate",
-        "--version", "--help"
-      ],
-      "safe_subcommands": [
-        "auth", "browse", "help",
-        "search", "status", "version"
-      ],
-      "nested_subcommand": {
-        "api": {
-          "default": "safe",
-          "unsafe_flag_values": {
-            "-X": ["POST", "PUT", "PATCH", "DELETE"],
-            "--method": ["POST", "PUT", "PATCH", "DELETE"]
-          },
-          "unsafe_flag_any_value": ["-F", "--field", "-f", "--raw-field"],
-          "unsafe_flag_value_prefix": {"--input": "*"},
-          "_note": "gh api defaults to GET. Body-carrying methods and --field/-F/-f imply POST."
-        },
-        "issue":       {"safe_subcommands": ["view", "list", "status"], "unsafe_subcommands": ["create", "close", "reopen", "comment", "edit", "delete", "transfer", "pin", "unpin", "lock", "unlock", "develop"]},
-        "pr":          {"safe_subcommands": ["view", "list", "status", "diff", "checks", "checkout"], "unsafe_subcommands": ["create", "close", "reopen", "comment", "edit", "merge", "ready", "review", "update-branch"]},
-        "release":     {"safe_subcommands": ["view", "list", "download"], "unsafe_subcommands": ["create", "delete", "edit", "upload"]},
-        "repo":        {"safe_subcommands": ["view", "list", "clone"], "unsafe_subcommands": ["create", "delete", "fork", "archive", "rename", "edit", "deploy-key", "sync"]},
-        "run":         {"safe_subcommands": ["list", "view", "watch"], "unsafe_subcommands": ["cancel", "delete", "rerun"]},
-        "workflow":    {"safe_subcommands": ["list", "view"], "unsafe_subcommands": ["disable", "enable", "run"]},
-        "gist":        {"safe_subcommands": ["view", "list"], "unsafe_subcommands": ["create", "delete", "edit", "clone"]},
-        "label":       {"safe_subcommands": ["list"], "unsafe_subcommands": ["create", "delete", "edit", "clone"]},
-        "cache":       {"safe_subcommands": ["list"], "unsafe_subcommands": ["delete"]},
-        "secret":      {"safe_subcommands": ["list"], "unsafe_subcommands": ["set", "delete"]},
-        "variable":    {"safe_subcommands": ["list"], "unsafe_subcommands": ["set", "delete"]},
-        "ssh-key":     {"safe_subcommands": ["list"], "unsafe_subcommands": ["add", "delete"]},
-        "gpg-key":     {"safe_subcommands": ["list"], "unsafe_subcommands": ["add", "delete"]},
-        "codespace":   {"safe_subcommands": ["list", "view", "logs", "ports"], "unsafe_subcommands": ["create", "delete", "edit", "stop", "rebuild", "ssh"]},
-        "config":      {"safe_subcommands": ["get", "list"], "unsafe_subcommands": ["set", "clear-cache"]}
-      }
+    "time": {
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after it. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
-
-    "curl": {
-      "default": "safe",
-      "unsafe_flag_values": {
-        "-X": ["POST", "PUT", "PATCH", "DELETE"],
-        "--request": ["POST", "PUT", "PATCH", "DELETE"]
-      },
-      "unsafe_flag_any_value": [
-        "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-        "-F", "--form", "--form-string",
-        "-T", "--upload-file"
-      ],
-      "_note": "curl defaults to GET. Presence of body flags (-d, --data, -F, -T) or -X with a body method implies mutation."
+    "nohup": {
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after it, detached. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
-    "wget": {
-      "default": "safe",
-      "unsafe_flag_any_value": ["--post-data", "--post-file", "--method"],
-      "_note": "wget defaults to GET. --post-data / --post-file imply POST."
+    "nice": {
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after its flags. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
-    "http":  {"default": "ask", "_note": "httpie CLI: full classification is non-trivial. Punt."},
-    "https": {"default": "ask"},
-
-    "git": {
-      "default": "subcommand",
-      "valueless_flags": [
-        "--no-pager", "--paginate", "--no-replace-objects",
-        "--bare", "--no-optional-locks",
-        "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
-        "--icase-pathspecs", "--no-advice",
-        "--version", "--help"
-      ],
-      "safe_subcommands": [
-        "log", "status", "diff", "show", "blame",
-        "branch",
-        "rev-parse", "rev-list", "describe", "name-rev",
-        "reflog",
-        "ls-files", "ls-tree", "ls-remote",
-        "cat-file", "show-ref", "show-branch",
-        "grep", "shortlog",
-        "bisect",
-        "worktree",
-        "config",
-        "remote", "fetch",
-        "stash",
-        "help", "version"
-      ],
-      "unsafe_subcommands": [
-        "add", "rm", "mv",
-        "commit", "commit-tree",
-        "push", "pull",
-        "merge", "rebase", "cherry-pick", "revert", "am",
-        "reset", "restore", "checkout", "switch",
-        "clean",
-        "apply", "format-patch",
-        "clone",
-        "init",
-        "gc", "prune", "repack",
-        "update-ref", "update-index",
-        "notes", "filter-branch", "filter-repo",
-        "submodule"
-      ],
-      "nested_subcommand": {
-        "tag": {
-          "empty_decision": "safe",
-          "unsafe_flag_any_value": [
-            "-d", "--delete",
-            "-a", "--annotate",
-            "-s", "--sign",
-            "-u", "--local-user",
-            "-f", "--force",
-            "-m", "--message",
-            "-F", "--file"
-          ],
-          "_note": "Bare 'git tag' lists. Any positional after flag-skipping (a tagname) or any mutating flag (-d, -a, -s, -f, -m, -F) classifies as not-safe. Falls back to unknown for positional + no unsafe flag."
-        }
-      },
-      "_note": "Removed 'tag' from flat safe/unsafe lists. It now lives under nested_subcommand.tag with positional-aware classification: bare 'git tag' lists safely; 'git tag v1' is unknown (not silently safe); mutating flags are explicit."
+    "ionice": {
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after its flags. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
-
-    "eslint": {
-      "default": "safe",
-      "unsafe_flags_without_value": ["--fix"],
-      "unsafe_flag_any_value": ["--fix-type"],
-      "write_flag_value_targets": ["-o", "--output-file"],
-      "_note": "eslint is read-only (lint/report) unless it rewrites files: --fix / --fix-type, or -o/--output-file writing outside safe_write_targets. --fix-dry-run stays safe."
+    "timeout": {
+      "default": "delegate_to_argument",
+      "_skip_first_positional": true,
+      "_note": "Recursion, not classification: it runs the command after its duration argument. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     },
-    "docker": {
-      "default": "subcommand",
-      "safe_subcommands": [
-        "ps", "images",
-        "inspect", "logs", "stats", "top", "port",
-        "diff", "history", "info", "version", "events",
-        "context", "search"
-      ],
-      "unsafe_subcommands": [
-        "run", "exec", "kill", "stop", "start", "restart",
-        "rm", "rmi", "prune",
-        "build", "buildx", "push", "pull", "load", "save",
-        "create", "commit", "cp", "tag", "update",
-        "pause", "unpause",
-        "login", "logout",
-        "compose", "swarm", "service", "stack"
-      ],
-      "nested_subcommand": {
-        "image": {
-          "safe_subcommands": ["ls", "inspect", "history"],
-          "unsafe_subcommands": [
-            "rm", "prune", "build", "pull", "push",
-            "load", "save", "tag", "import"
-          ]
-        },
-        "container": {
-          "safe_subcommands": [
-            "ls", "inspect", "top", "logs", "port",
-            "diff", "stats", "wait"
-          ],
-          "unsafe_subcommands": [
-            "rm", "prune", "run", "exec", "start", "stop",
-            "restart", "kill", "pause", "unpause",
-            "create", "commit", "cp", "rename", "update", "attach"
-          ]
-        },
-        "volume": {
-          "safe_subcommands": ["ls", "inspect"],
-          "unsafe_subcommands": ["create", "rm", "prune"]
-        },
-        "network": {
-          "safe_subcommands": ["ls", "inspect"],
-          "unsafe_subcommands": [
-            "create", "rm", "prune", "connect", "disconnect"
-          ]
-        },
-        "system": {
-          "safe_subcommands": ["info", "df", "events"],
-          "unsafe_subcommands": ["prune"]
-        }
-      },
-      "_note": "Top-level 'image', 'container', 'volume', 'network', 'system' moved into nested_subcommand with explicit safe/unsafe sub-subcommands. Bare 'docker image' (no further positional) now classifies as unknown instead of silently safe."
-    },
-
-    "prisma": {
-      "default": "subcommand",
-      "safe_subcommands": [
-        "generate", "validate", "format", "version", "studio"
-      ],
-      "nested_subcommand": {
-        "db": {
-          "unsafe_subcommands": ["push", "execute", "seed"]
-        },
-        "migrate": {
-          "safe_subcommands": ["status", "diff"],
-          "unsafe_subcommands": ["reset", "deploy", "dev"]
-        }
-      },
-      "_note": "Destructive schema/migration ops (prisma db push/execute/seed, prisma migrate reset/deploy/dev) are gated unsafe; read-only migrate status/diff are safe. Bare 'prisma db' / 'prisma migrate' (no further positional) classify as unknown. Codegen/read-only top-level subcommands (generate, validate, format, version, studio) are safe. See issue #61."
-    },
-
-    "kubectl": {
-      "default": "subcommand",
-      "safe_subcommands": [
-        "get", "describe", "logs", "explain",
-        "top", "cluster-info", "version",
-        "api-resources", "api-versions",
-        "auth",
-        "diff",
-        "events",
-        "wait"
-      ],
-      "unsafe_subcommands": [
-        "apply", "create", "replace", "patch", "edit",
-        "delete",
-        "exec", "attach", "port-forward", "proxy", "run",
-        "rollout", "scale", "autoscale",
-        "label", "annotate",
-        "cordon", "uncordon", "drain", "taint",
-        "cp"
-      ],
-      "nested_subcommand": {
-        "config": {
-          "safe_subcommands": [
-            "view", "current-context",
-            "get-contexts", "get-clusters", "get-users"
-          ],
-          "unsafe_subcommands": [
-            "set", "set-context", "set-cluster", "set-credentials",
-            "use-context",
-            "unset",
-            "delete-context", "delete-cluster", "delete-user",
-            "rename-context"
-          ]
-        }
-      },
-      "_note": "'config' moved into nested_subcommand: kubectl config view is safe, kubectl config set-context is unsafe. Bare 'kubectl config' (no further positional) is unknown."
-    },
-
-    "helm": {
-      "default": "subcommand",
-      "safe_subcommands": [
-        "get", "list", "ls", "status", "history",
-        "show", "search", "inspect", "lint", "template",
-        "env", "version"
-      ],
-      "unsafe_subcommands": [
-        "install", "upgrade", "uninstall", "delete",
-        "rollback", "test", "push", "pull", "package",
-        "dependency", "plugin", "registry", "create"
-      ],
-      "nested_subcommand": {
-        "repo": {
-          "safe_subcommands": ["list", "ls"],
-          "unsafe_subcommands": ["add", "remove", "rm", "update", "index"],
-          "_note": "'update' refreshes the local repo cache; 'index' writes or merges an index.yaml. Both mutate state."
-        }
-      },
-      "_note": "'repo' moved into nested_subcommand: helm repo list is safe, helm repo add is unsafe."
-    },
-
-    "istioctl": {
-      "default": "subcommand",
-      "safe_subcommands": [
-        "proxy-config", "pc", "proxy-status", "ps", "remote-clusters",
-        "version", "analyze", "validate", "describe"
-      ],
-      "unsafe_subcommands": [
-        "install", "uninstall", "upgrade", "kube-inject", "create-remote-secret"
-      ],
-      "nested_subcommand": {
-        "manifest": {
-          "safe_subcommands": ["generate", "diff", "dump"],
-          "unsafe_subcommands": ["install", "apply"]
-        },
-        "tag": {
-          "safe_subcommands": ["list"],
-          "unsafe_subcommands": ["set", "remove"]
-        }
-      },
-      "_note": "Read-only mesh introspection (proxy-config/pc, proxy-status/ps, remote-clusters, analyze, describe) is safe; install/uninstall/upgrade and kube-inject/create-remote-secret (which render credentials/manifests meant to be applied) are unsafe. Unlisted subcommands stay unknown."
-    },
-
-    "eksctl": {
-      "default": "subcommand",
-      "safe_subcommands": ["get", "version", "info"],
-      "unsafe_subcommands": [
-        "create", "delete", "upgrade", "scale", "drain", "update", "set",
-        "associate", "disassociate", "register", "deregister", "enable"
-      ],
-      "_note": "eksctl get/version/info are read-only; everything that provisions or mutates a cluster/nodegroup is unsafe. Bare or unlisted subcommands stay unknown."
-    },
-
-    "aws": {
-      "default": "aws_cli",
-      "_note": "Special-cased. AWS CLI operations are uniformly verb-prefixed: describe-*/list-*/get-*/head-* are read-only; create-*/delete-*/update-*/put-*/terminate-*/start-*/stop-*/run-* are mutating.",
-      "safe_operation_patterns": [
-        "describe-*", "list-*", "get-*", "head-*",
-        "lookup-*", "search-*", "batch-get-*",
-        "preview-*", "check-*", "test-*", "select-*",
-        "can-paginate", "wait", "help",
-        "ls", "cp_DISABLED"
-      ],
-      "unsafe_operation_patterns": [
-        "create-*", "delete-*", "put-*", "update-*", "modify-*",
-        "terminate-*", "stop-*", "start-*", "restart-*", "reboot-*",
-        "run-*", "execute-*", "invoke-*",
-        "attach-*", "detach-*",
-        "deregister-*", "register-*",
-        "disable-*", "enable-*",
-        "revoke-*", "grant-*", "authorize-*",
-        "tag-*", "untag-*",
-        "publish-*", "send-*",
-        "upload-*", "download-*",
-        "copy-*", "move-*", "restore-*",
-        "reset-*", "rollback-*", "cancel-*",
-        "accept-*", "reject-*", "decline-*",
-        "associate-*", "disassociate-*",
-        "add-*", "remove-*",
-        "set-*"
-      ],
-      "service_overrides": {
-        "s3": {
-          "safe_subcommands": ["ls"],
-          "unsafe_subcommands": ["cp", "mv", "rm", "sync", "mb", "rb", "presign", "website"]
-        },
-        "s3api": {
-          "safe_operation_patterns": ["head-*", "list-*", "get-*"],
-          "unsafe_operation_patterns": ["put-*", "delete-*", "copy-*", "create-*", "upload-*", "abort-*", "complete-*", "restore-*"]
-        },
-        "logs": {
-          "extra_safe_patterns": ["filter-log-events", "start-query", "get-query-results", "stop-query", "tail"],
-          "_note": "Logs service has some 'start-*' operations that are actually read-only queries (start-query). Explicit overrides."
-        }
-      },
-      "sql_payload_flags": {
-        "athena start-query-execution":     {"flag": "--query-string", "dialect": "presto"},
-        "rds-data execute-statement":       {"flag": "--sql",          "dialect": "varies"},
-        "timestream-query query":           {"flag": "--query-string", "dialect": "timestream"},
-        "redshift-data execute-statement":  {"flag": "--sql",          "dialect": "redshift"},
-        "_note": "(service operation) -> SQL-carrying flag. The verb decision is a floor: start-*/execute-* stay unsafe unless the user marks the op safe via an override, after which the SQL payload governs (read-only SELECT -> safe, destructive -> unsafe). 'timestream-query query' (verb -> unknown) is refined to safe/unsafe by its payload out of the box. dialect feeds the per-dialect function scanner (issue #26); presto/timestream/redshift/varies have no function set yet, so only the dialect-agnostic keyword scan applies to them today."
-      }
-    },
-
-    "gcloud":   {"default": "gcloud_cli"},
-    "az":       {"default": "az_cli"},
-
-    "terraform": {
-      "default": "subcommand",
-      "safe_subcommands": [
-        "validate", "fmt", "plan", "show", "state",
-        "output", "version", "providers", "console",
-        "graph", "force-unlock_DISABLED", "workspace"
-      ],
-      "unsafe_subcommands": [
-        "apply", "destroy", "import", "init", "refresh",
-        "taint", "untaint"
-      ],
-      "nested_subcommand": {
-        "state": {
-          "safe_subcommands": ["list", "show", "pull"],
-          "unsafe_subcommands": ["mv", "rm", "replace-provider", "push"]
-        },
-        "workspace": {
-          "safe_subcommands": ["list", "show"],
-          "unsafe_subcommands": ["new", "select", "delete"]
-        }
-      }
-    },
-
-    "npm": {
-      "default": "subcommand",
-      "safe_subcommands": ["ls", "list", "view", "info", "show", "outdated", "search", "help", "root", "prefix", "config", "doctor", "ping", "version", "whoami"],
-      "unsafe_subcommands": ["install", "i", "uninstall", "un", "update", "up", "run", "run-script", "start", "test", "publish", "unpublish", "link", "unlink", "adduser", "login", "logout", "access", "deprecate", "dist-tag", "pack", "rebuild", "audit", "ci", "init", "edit", "exec", "x"]
-    },
-
-    "yarn": {"default": "ask", "_note": "yarn invokes scripts by default. Punt."},
-    "pnpm": {"default": "ask"},
-
-    "pip": {
-      "default": "subcommand",
-      "safe_subcommands": ["list", "show", "freeze", "check", "help", "config", "search", "index", "inspect"],
-      "unsafe_subcommands": ["install", "uninstall", "download", "wheel", "hash"]
-    },
-    "pip3": {
-      "default": "subcommand",
-      "safe_subcommands": ["list", "show", "freeze", "check", "help", "config", "search", "index", "inspect"],
-      "unsafe_subcommands": ["install", "uninstall", "download", "wheel", "hash"]
-    },
-
-    "brew": {
-      "default": "subcommand",
-      "safe_subcommands": ["list", "ls", "info", "abv", "search", "deps", "uses", "leaves", "outdated", "home", "config", "doctor", "help", "--version"],
-      "unsafe_subcommands": ["install", "uninstall", "remove", "rm", "upgrade", "update", "reinstall", "pin", "unpin", "cleanup", "tap", "untap", "link", "unlink"]
-    },
-
-    "sqlite3": {
-      "default": "sql_cli",
-      "sql_flags": ["-cmd"],
-      "sql_positional_index": 1,
-      "valueless_flags": [
-        "-batch", "-bail", "-csv", "-echo", "-fullschema",
-        "-header", "-noheader", "-help", "-html", "-interactive",
-        "-line", "-list", "-nofollow", "-quote", "-readonly",
-        "-stats", "-table", "-tabs", "-version", "-zip", "-A",
-        "-markdown", "-box", "-json", "-safe"
-      ],
-      "_note": "sqlite3 DB [SQL] — second positional is the SQL string. Dot-commands (.tables, .schema, .import, ...) come through the same channel and are classified separately."
-    },
-    "psql": {
-      "default": "sql_cli",
-      "sql_flags": ["-c", "--command"],
-      "sql_file_flags": ["-f", "--file"],
-      "valueless_flags": [
-        "-l", "--list", "-?", "-V", "--version", "-X", "--no-psqlrc",
-        "-1", "--single-transaction", "-A", "--no-align",
-        "-e", "--echo-queries", "-E", "--echo-hidden",
-        "-H", "--html", "-n", "--no-readline",
-        "-q", "--quiet", "-s", "--single-step", "-S", "--single-line",
-        "-t", "--tuples-only", "-w", "--no-password", "-W", "--password",
-        "-x", "--expanded", "-z", "--field-separator-zero",
-        "-0", "--record-separator-zero", "-a", "--echo-all",
-        "-b", "--echo-errors"
-      ],
-      "_note": "psql -c 'SQL' / -f file.sql. Bare positionals are dbname/username, not SQL."
-    },
-    "mysql": {
-      "default": "sql_cli",
-      "sql_flags": ["-e", "--execute"],
-      "valueless_flags": [
-        "-?", "--help", "-V", "--version",
-        "-A", "--no-auto-rehash",
-        "-B", "--batch", "-C", "--compress",
-        "-E", "--vertical", "-f", "--force",
-        "-N", "--skip-column-names", "-s", "--silent",
-        "-t", "--table", "-v", "--verbose",
-        "-w", "--wait", "-X", "--xml",
-        "--column-names", "--auto-rehash", "--auto-vertical-output",
-        "--show-warnings", "--no-defaults", "--no-beep"
-      ],
-      "_note": "mysql -e 'SQL'. Bare positional is the database name."
-    },
-    "mariadb": {
-      "default": "sql_cli",
-      "sql_flags": ["-e", "--execute"],
-      "valueless_flags": [
-        "-?", "--help", "-V", "--version",
-        "-A", "--no-auto-rehash",
-        "-B", "--batch", "-C", "--compress",
-        "-E", "--vertical", "-f", "--force",
-        "-N", "--skip-column-names", "-s", "--silent",
-        "-t", "--table", "-v", "--verbose",
-        "-w", "--wait", "-X", "--xml",
-        "--column-names", "--auto-rehash"
-      ]
-    },
-    "duckdb": {
-      "default": "sql_cli",
-      "sql_flags": ["-c", "-cmd"],
-      "sql_positional_index": 1,
-      "valueless_flags": [
-        "-readonly", "-batch", "-csv", "-echo", "-header", "-noheader",
-        "-html", "-interactive", "-json", "-line", "-list", "-markdown",
-        "-quote", "-table", "-version", "-help"
-      ],
-      "_note": "duckdb CLI mirrors sqlite3 surface: DB [SQL], plus -c/-cmd flags."
+    "watch": {
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: it runs the command after its flags, repeatedly. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
     }
   },
-
-  "_policies_note": "Deny policies. A policy runs only when the static rules already classified the command 'unsafe' and its argv matches an entry, and it can only upgrade 'unsafe' to 'deny'. Each name in 'refuse_when' is a condition under which the command is refused; a condition that cannot be established never fires, so no probe failure can produce a deny. Valid predicates: default_branch_target, shared_history, primary_checkout. Set YOLT_NO_POLICIES=1 to disable the layer.",
-
+  "_policies_note": "Deny policies. A policy runs only when the static rules already classified the command 'unsafe' and its argv matches an entry, and it can only upgrade 'unsafe' to 'deny'. Each name in 'refuse_when' is a condition under which the command is refused; a condition that cannot be established never fires, so no probe failure can produce a deny. Valid predicates: default_branch_target, shared_history, primary_checkout. Set YOLT_NO_POLICIES=1 to disable the layer. PRECONDITION, and it is a silent one: a policy runs only on a command the static rules already classified 'unsafe', so every argv named in an enabled policy must still be reachable as unsafe through 'commands'. That is why 'git push' survives Phase 3's deletion (#100) -- delegating it would disarm default_branch_target and shared_history with nothing reported anywhere. 'git_worktree_convention' is disabled and names 'git commit', which Phase 3 DID delegate: enabling that policy also requires adding 'commit' to commands.git.unsafe_subcommands, or it matches nothing.",
   "policies": {
     "git": {
       "enabled": true,
@@ -799,5 +533,6 @@
         }
       ]
     }
-  }
+  },
+  "_commands_note": "The non-delegable list. Entries fall in seven categories: irreversible-fs, history-rewrite, credential-shape, infra-destroy, opaque-execution, process-kill, irrevocable-remote, agent-steering-write -- plus the command-wrapper plumbing (env, xargs, timeout, nohup, nice, ionice, parallel, time, watch), which is recursion rather than classification and must survive so a wrapper cannot be used to route around the list."
 }

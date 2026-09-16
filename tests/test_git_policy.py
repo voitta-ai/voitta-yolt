@@ -283,6 +283,11 @@ class ThroughTheClassifier(unittest.TestCase):
         self.assertIn("default branch", reason)
 
     def test_feature_branch_still_only_asks(self):
+        # Also the guard that `git push` stays non-delegable. A policy runs
+        # only on a command the static rules already called `unsafe`, so if
+        # Phase 3 (#100) had delegated `git push` this would read `unknown`
+        # and every git deny predicate would be off with nothing reported.
+        # That is exactly how it failed when the rule was first deleted.
         c = self._classifier(HERE, branch="feature/x")
         self.assertEqual(c.classify("git push")[0], "unsafe")
 
