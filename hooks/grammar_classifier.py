@@ -734,6 +734,24 @@ def run_cli():
         )
         sys.exit(1)
 
+    if argv[0].startswith("--"):
+        # An unrecognized leading flag used to be consumed AS the command.
+        # `--cwd` on a build predating it classified as `no rule: --cwd`,
+        # and `--no-user-allow` did the same before 1.2.0 -- so every
+        # verdict became a verdict about the flag string. That is silent,
+        # and for a consumer treating anything but `safe` as a refusal it
+        # parks every command with nothing to diagnose. It also hides the
+        # real command: `--dry-run "rm -rf /tmp/x"` read `unknown` because
+        # the `rm` was never examined, not because it was judged. A shell
+        # command does not begin with `--`, so reject it loudly instead.
+        print(
+            "unrecognized option {!r}: expected a shell command. "
+            "Supported options are --no-user-allow and --cwd DIR.".format(
+                argv[0]),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     command = argv[0]
     yolt_dir = Path(__file__).resolve().parent.parent
     rules = load_shell_rules(
