@@ -5,3 +5,7 @@ __pycache__/
 
 .handoffs/
 HANDOFF.md
+
+# Graph extraction output: bulk JSON that mirrors whatever corpus was
+# indexed, so it can carry material from outside this repo. Never commit it.
+graphify-out/
