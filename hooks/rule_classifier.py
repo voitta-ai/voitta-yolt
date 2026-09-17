@@ -586,52 +586,83 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
     unsafe_flag_value_prefix = spec.get("unsafe_flag_value_prefix", {})
     write_flag_value_targets = set(spec.get("write_flag_value_targets", []))
 
+    def _match_flag(flag, inline_value, next_arg):
+        """One (flag, value) candidate against this spec. Reason, or None."""
+        if flag in unsafe_flags_without_value:
+            retval = "{} (no value)".format(flag)
+            return retval
+
+        if flag in unsafe_flag_values:
+            value = inline_value if inline_value is not None else next_arg
+            if value is not None:
+                value_upper = value.upper() if isinstance(value, str) else value
+                for unsafe_val in unsafe_flag_values[flag]:
+                    if value_upper == unsafe_val.upper():
+                        retval = "{} {}".format(flag, value)
+                        return retval
+
+        if flag in unsafe_flag_value_prefix:
+            value = inline_value if inline_value is not None else next_arg
+            if value is not None:
+                pat = unsafe_flag_value_prefix[flag]
+                if fnmatch(value, pat):
+                    retval = "{} {}".format(flag, value)
+                    return retval
+
+        if flag in write_flag_value_targets:
+            value = inline_value if inline_value is not None else next_arg
+            if value is not None:
+                if _path_matches_target_list(value, unsafe_write_targets):
+                    retval = "{} {} (protected path)".format(flag, value)
+                    return retval
+                if not _path_matches_safe_write_targets(value, safe_write_targets):
+                    retval = "{} {}".format(flag, value)
+                    return retval
+
+        if flag in unsafe_flag_any_value:
+            retval = flag
+            return retval
+
+        retval = None
+        return retval
+
     i = 0
     while i < len(cmd_args):
         tok = cmd_args[i]
+        next_arg = cmd_args[i + 1] if i + 1 < len(cmd_args) else None
 
         flag = tok
         inline_value = None
         if "=" in tok and tok.startswith("-"):
             flag, _, inline_value = tok.partition("=")
 
-        if flag in unsafe_flags_without_value:
-            return "{} (no value)".format(flag)
+        hit = _match_flag(flag, inline_value, next_arg)
+        if hit:
+            return hit
 
-        if flag in unsafe_flag_values:
-            value = inline_value
-            if value is None and i + 1 < len(cmd_args):
-                value = cmd_args[i + 1]
-            if value is not None:
-                value_upper = value.upper() if isinstance(value, str) else value
-                for unsafe_val in unsafe_flag_values[flag]:
-                    if value_upper == unsafe_val.upper():
-                        return "{} {}".format(flag, value)
-
-        if flag in unsafe_flag_value_prefix:
-            value = inline_value
-            if value is None and i + 1 < len(cmd_args):
-                value = cmd_args[i + 1]
-            if value is not None:
-                pat = unsafe_flag_value_prefix[flag]
-                if fnmatch(value, pat):
-                    return "{} {}".format(flag, value)
-
-        if flag in write_flag_value_targets:
-            value = inline_value
-            if value is None and i + 1 < len(cmd_args):
-                value = cmd_args[i + 1]
-            if value is not None:
-                if _path_matches_target_list(value, unsafe_write_targets):
-                    return "{} {} (protected path)".format(flag, value)
-                if not _path_matches_safe_write_targets(value, safe_write_targets):
-                    return "{} {}".format(flag, value)
-
-        if flag in unsafe_flag_any_value:
-            return flag
+        # A short-option cluster hides an encoded flag from a whole-token
+        # match. `curl -XPOST` attaches the value; `curl -sX POST` buries the
+        # letter mid-cluster; `curl -dsecret=1` does both and additionally
+        # defeats the `=` partition above, which yields the flag `-dsecret`.
+        # In POSIX short-option syntax every character is an option letter and
+        # the first one taking a value consumes the rest of the cluster, or the
+        # next argument when it ends the cluster.
+        #
+        # Every position is tried because this cannot know which unencoded
+        # letters take values, so an encoded letter sitting inside an earlier
+        # flag's value still matches. That over-matches rather than under-
+        # matches, which is the right direction for a gate whose output is a
+        # prompt.
+        if len(tok) > 2 and tok.startswith("-") and not tok.startswith("--"):
+            for pos in range(1, len(tok)):
+                rest = tok[pos + 1:]
+                hit = _match_flag(
+                    "-" + tok[pos], rest if rest else None, next_arg
+                )
+                if hit:
+                    return hit
 
         i += 1
-
     # Write-target arguments routed through the unsafe_write_targets deny
     # list. The commands carrying these fields are already
     # `default: unsafe`, so a match upgrades the reason to a specific
