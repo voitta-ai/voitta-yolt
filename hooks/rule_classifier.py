@@ -560,13 +560,20 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
       `--flag value`); the value is matched against the glob
       (`find -exec rm`, `gh api --input body.json`). `"*"` matches any
       value.
-    - `write_flag_value_targets`: list of flags whose immediately
+    - `unsafe_write_flag_values`: list of flags whose immediately
       following value is a file path the command will write to
-      (`find -fprint FILE`, `install -t DIR`). The value is checked
-      against the top-level `unsafe_write_targets` deny list first
-      (a match flags a protected-path write) and then the
-      `safe_write_targets` white list (a non-matching path makes the
-      call unsafe). Requires those lists to be passed in.
+      (`find -fprint FILE`, `sort -o FILE`, `curl -o FILE`). The value
+      is checked against the top-level `unsafe_write_targets` deny list
+      ONLY, so an ordinary path cannot become unsafe through it -- the
+      same contract as `write_target_last_positional`. Prefer this over
+      `write_flag_value_targets` below.
+    - `write_flag_value_targets`: the same idea with an added white
+      list. The value is checked against `unsafe_write_targets` first
+      (a match flags a protected-path write) and then against
+      `safe_write_targets` (a NON-matching path also makes the call
+      unsafe). That second half is why no shipped rule uses this field:
+      it turns `find -fprint ./results.txt` unsafe. Kept for a caller
+      that wants write targets confined to a known-safe set.
     - `write_value_prefix_targets`: list of token prefixes whose suffix
       is a write-target path (`dd of=PATH`). The suffix is checked
       against `unsafe_write_targets`.
@@ -585,6 +592,7 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
     unsafe_flags_without_value = set(spec.get("unsafe_flags_without_value", []))
     unsafe_flag_value_prefix = spec.get("unsafe_flag_value_prefix", {})
     write_flag_value_targets = set(spec.get("write_flag_value_targets", []))
+    unsafe_write_flag_values = set(spec.get("unsafe_write_flag_values", []))
 
     def _match_flag(flag, inline_value, next_arg):
         """One (flag, value) candidate against this spec. Reason, or None."""
@@ -608,6 +616,14 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
                 if fnmatch(value, pat):
                     retval = "{} {}".format(flag, value)
                     return retval
+
+        if flag in unsafe_write_flag_values:
+            value = inline_value if inline_value is not None else next_arg
+            if value is not None and _path_matches_target_list(
+                value, unsafe_write_targets
+            ):
+                retval = "{} {} (protected path)".format(flag, value)
+                return retval
 
         if flag in write_flag_value_targets:
             value = inline_value if inline_value is not None else next_arg
@@ -709,7 +725,7 @@ _ALLOWED_COMMAND_KEYS = frozenset({
     "default", "_note", "_skip_first_positional",
     "unsafe_flag_values", "unsafe_flag_any_value",
     "unsafe_flags_without_value", "unsafe_flag_value_prefix",
-    "write_flag_value_targets",
+    "write_flag_value_targets", "unsafe_write_flag_values",
     "write_value_prefix_targets",
     "write_target_last_positional", "write_target_all_positional",
     "valueless_flags",
