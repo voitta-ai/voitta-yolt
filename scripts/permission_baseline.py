@@ -42,9 +42,17 @@ REJECTION_MARKERS = (
 # Workload classes. Friction is not uniform across them: infra work is
 # aws/kubectl/terraform/gh heavy, which is where the gated commands live.
 # Measuring on the wrong class gives a number that does not transfer.
+# Which checkout directories count as infra work is a property of one
+# machine's layout, not of this tool, so it is configured rather than
+# hard-coded. Set YOLT_INFRA_DIR_MARKER to a substring of those directory
+# names; unset, every project falls through to "other" and the infra row
+# is simply absent.
+INFRA_DIR_MARKER = os.environ.get("YOLT_INFRA_DIR_MARKER", "")
+
+
 def workload_class(project_dir):
     name = project_dir.name
-    if "git-clickagy" in name:
+    if INFRA_DIR_MARKER and INFRA_DIR_MARKER in name:
         return "infra"
     if "voitta-yolt" in name:
         return "yolt-itself"

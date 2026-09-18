@@ -48,7 +48,7 @@ one gives a number that does not transfer:
 
 | class | calls | rejections | per 100 |
 | --- | ---: | ---: | ---: |
-| infra (clickagy) | 9,229 | 7 | 0.076 |
+| infra | 9,229 | 7 | 0.076 |
 | other | 3,005 | 3 | 0.100 |
 | yolt itself | 949 | 0 | 0.000 |
 
