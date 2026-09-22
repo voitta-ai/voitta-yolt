@@ -1,7 +1,7 @@
 {
   "name": "yolt",
   "description": "Deterministic pre-execution guard, not a second opinion on everything: it carries only the decisions deliberately refused to a probabilistic classifier, and delegates the rest to Claude Code auto mode. Decomposes compound commands, heredocs and command substitutions with tree-sitter, analyzes inline Python by AST, refuses writes that steer the agent, denies pushes that rewrite shared history, flags credentials on the command line, and redacts them from its own logs.",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "author": {
     "name": "voitta-ai"
   },

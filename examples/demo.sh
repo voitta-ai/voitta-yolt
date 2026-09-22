@@ -34,7 +34,7 @@ commands=(
   'find . -name "*.py"'
   'sed "s/a/b/" file.txt'
 
-  # Safe: AWS reads, with and without the ZoomInfo house style flags
+  # Safe: AWS reads, bare and with the usual profile/region/pager flags
   'aws ec2 describe-instances'
   'aws --profile prod --region us-east-1 ec2 describe-instances --no-cli-pager'
   'aws s3 ls'
