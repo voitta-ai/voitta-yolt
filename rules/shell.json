@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "0.1.0",
-    "description": "YOLT shell classification rules. NOT a model of which commands are safe: auto mode does that. This file carries only the decisions deliberately refused to a probabilistic classifier -- the non-delegable list of issue #100. A command absent from 'commands', or a subcommand on no list here, classifies 'unknown' and is delegated to the host by design."
+    "description": "YOLT shell classification rules. NOT a model of which commands are safe: auto mode does that. This file carries only the decisions deliberately refused to a probabilistic classifier -- the non-delegable list of issue #100. A command absent from 'commands', or a subcommand on no list here, classifies 'unknown' and is delegated to the host by design. WARNING for consumers reading reason strings: '<cmd>: rules punt' is NOT a clean bill of health. It means the command has a rule and no ENCODED unsafe flag matched. The encoded set is deliberately partial and its width differs per command -- 'cp: rules punt' has resolved the write target, 'find: rules punt' has only ruled out -delete and -exec -- and the verdict does not say which. Nor can any flag rule cover a command that sources its own options from a file instead of argv, such as 'curl -K'. Do not promote on it."
   },
   "shell_builtins_safe": [
     "echo",
@@ -354,7 +354,15 @@
         "-T",
         "--upload-file"
       ],
-      "_note": "credential-shape. A request body is where a secret rides. default 'ask' yields 'unknown' post-Phase-1, so a plain GET is delegated; only the body-carrying forms classify."
+      "unsafe_write_flag_values": [
+        "-o",
+        "--output",
+        "-D",
+        "--dump-header",
+        "--trace",
+        "--trace-ascii"
+      ],
+      "_note": "credential-shape. A request body is where a secret rides. default 'ask' yields 'unknown' post-Phase-1, so a plain GET is delegated; only the body-carrying forms classify. Separately, curl writes files: -o/-D/--trace name a destination the request-shape rules never looked at, so they go through unsafe_write_flag_values (deny list only). 'curl -o /tmp/x' stays delegated; 'curl -o ~/.ssh/authorized_keys' does not. NOT covered, and not coverable by any flag matcher: -K/--config makes curl read its options from a file, so a body or an output destination set there never appears in argv at all."
     },
     "terraform": {
       "default": "subcommand",
@@ -443,6 +451,14 @@
       ],
       "_note": "Kept for one reason: this command can write to a path on unsafe_write_targets, and agent-steering writes are the first entry on the non-delegable list. default 'ask' yields 'unknown', so an ordinary copy is delegated; only a protected destination classifies. The write_target_* fields consult the deny list ONLY, so no ordinary path can become unsafe through them."
     },
+    "sort": {
+      "default": "ask",
+      "unsafe_write_flag_values": [
+        "-o",
+        "--output"
+      ],
+      "_note": "sort writes with -o, which the shell never sees as a redirect. Carried through unsafe_write_flag_values (deny list only), so 'sort -o out.txt f' stays delegated and only a protected destination classifies. The cluster rescan matters here more than anywhere: in a short-option cluster every character is an option letter and sort's o always consumes a filename, so '-ro out.txt' writes out.txt while '-or f' writes a file named r. A matcher comparing whole tokens against '-o' catches neither."
+    },
     "find": {
       "default": "ask",
       "unsafe_flags_without_value": [
@@ -454,7 +470,13 @@
         "-ok": "*",
         "-okdir": "*"
       },
-      "_note": "irreversible-fs (-delete) and opaque-execution (-exec runs a command this cannot see). Deleting the entry would not delegate 'find . -delete', it would hide it. A bare find is delegated. write_flag_value_targets (-fprint) is deliberately NOT carried over: it consults safe_write_targets, which can turn an ordinary path unsafe."
+      "unsafe_write_flag_values": [
+        "-fprint",
+        "-fprintf",
+        "-fls",
+        "-fprint0"
+      ],
+      "_note": "irreversible-fs (-delete) and opaque-execution (-exec runs a command this cannot see). Deleting the entry would not delegate 'find . -delete', it would hide it. A bare find is delegated. The -fprint family writes a file the rest of the rule never looks at, so it is carried through unsafe_write_flag_values, which consults the deny list ONLY -- 'find . -fprint ./results.txt' stays delegated and only a protected destination classifies. An earlier note declined write_flag_value_targets for this; that field ALSO consults safe_write_targets, which would have turned an ordinary path unsafe. The objection was to that field, not to covering the flags. GNU only: BSD find has no -fprint, so this is inert on macOS and live on Linux, and the verdict does not say which."
     },
     "env": {
       "default": "delegate_to_argument",
