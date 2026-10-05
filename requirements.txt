@@ -1,2 +1,2 @@
-tree-sitter>=0.21
-tree-sitter-bash>=0.21
+tree-sitter==0.25.2
+tree-sitter-bash==0.25.1
