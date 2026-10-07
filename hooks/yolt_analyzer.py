@@ -117,7 +117,14 @@ class SafetyAnalyzer(ast.NodeVisitor):
     (`from mod import *`), relative imports (`from . import x`), and
     proving object identity for arbitrary locals."""
 
-    def __init__(self, rules):
+    def __init__(self, rules, argv_classify=None):
+        """`argv_classify` takes an argv list and returns (decision, reason),
+        normally `RuleClassifier.classify_tokens`. When supplied, a
+        `subprocess` call whose argv is a literal list is judged by the SAME
+        rules the shell path uses instead of being refused for being a
+        subprocess at all. Without it the behaviour is unchanged. Issue #162."""
+        self.argv_classify = argv_classify
+
         self.rules = rules
         self.findings = []
         self.imports = set()
@@ -666,6 +673,8 @@ class SafetyAnalyzer(ast.NodeVisitor):
             )
             for pattern in destructive_patterns:
                 if self._matches_pattern(call_name, pattern):
+                    if self._subprocess_argv_is_delegated(category, node):
+                        return
                     source_line = ""
                     if hasattr(self, "source_lines") and 0 < node.lineno <= len(self.source_lines):
                         source_line = self.source_lines[node.lineno - 1].strip()
@@ -678,6 +687,55 @@ class SafetyAnalyzer(ast.NodeVisitor):
                         "source_line": source_line,
                     })
                     return
+
+    def _subprocess_argv_is_delegated(self, category, node):
+        """True when a subprocess call carries a literal argv the shell rules
+        do not call unsafe, so refusing it here would be stricter than the
+        shell path is for the very same command.
+
+        Measured before the fix: `git rev-parse --short HEAD` classified
+        `unknown` as a shell command and `unsafe` as
+        `subprocess.run(["git", "rev-parse", "--short", "HEAD"])`. The second
+        verdict removed a repository's own read-only validation gate while the
+        first let it run. Issue #162.
+
+        A starred element (`["git", *args]`) leaves the subcommand invisible,
+        so only argv[0] is judged -- which is what the shell path does with a
+        bare `git` (`unknown`, delegated). That is deliberately weaker than the
+        shell path, because the shell path gets to see the subcommand and this
+        never will; the host still judges the `python3 <script>` invocation
+        that wraps it.
+        """
+        if category != "subprocess" or self.argv_classify is None:
+            retval = False
+            return retval
+        if not node.args:
+            retval = False
+            return retval
+        first = node.args[0]
+        if not isinstance(first, ast.List) or not first.elts:
+            retval = False
+            return retval
+        tokens = []
+        for elt in first.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                tokens.append(elt.value)
+            else:
+                # A non-literal element ends the known prefix. Keep what came
+                # before it and judge that.
+                break
+        if not tokens:
+            retval = False
+            return retval
+        from rule_classifier import DECISION_DENY, DECISION_UNSAFE
+        try:
+            decision, _ = self.argv_classify(tokens)
+        except Exception:
+            # A classifier that cannot answer must not grant. Issue #162.
+            retval = False
+            return retval
+        retval = decision not in (DECISION_UNSAFE, DECISION_DENY)
+        return retval
 
     def _check_open_mode(self, node):
         """Special handling for open() - check the file mode argument."""
@@ -1435,7 +1493,12 @@ def run_hook():
         sys.exit(0)
 
     def _python_factory():
-        return SafetyAnalyzer(py_rules)
+        # Same seam as the CLI path: a python-free RuleClassifier so a literal
+        # `subprocess.run([...])` argv is judged by the shell rules rather than
+        # refused for being a subprocess. Cannot recurse -- no python factory.
+        from rule_classifier import RuleClassifier
+        return SafetyAnalyzer(
+            py_rules, argv_classify=RuleClassifier(shell_rules).classify_tokens)
 
     classifier = build_classifier(
         shell_rules,

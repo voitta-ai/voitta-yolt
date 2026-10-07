@@ -779,7 +779,12 @@ def run_cli():
     )
 
     def factory():
-        return SafetyAnalyzer(py_rules)
+        # A python-free RuleClassifier for argv inspection. It cannot recurse
+        # into this analyzer because it has no python_analyzer_factory, and it
+        # reads the same shell rules, so a literal `subprocess.run([...])` argv
+        # is judged exactly as the equivalent shell command. Issue #162.
+        return SafetyAnalyzer(
+            py_rules, argv_classify=RuleClassifier(rules).classify_tokens)
 
     decision, reason = classify_command(
         command,
