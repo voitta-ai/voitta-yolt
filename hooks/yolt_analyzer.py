@@ -124,6 +124,16 @@ class SafetyAnalyzer(ast.NodeVisitor):
         rules the shell path uses instead of being refused for being a
         subprocess at all. Without it the behaviour is unchanged. Issue #162."""
         self.argv_classify = argv_classify
+        # Subprocess calls whose literal argv the shell rules did not call
+        # unsafe. They are not findings, but they are not cleared either:
+        # their presence makes the verdict `unresolved` (host decides),
+        # never `safe`. Issue #162.
+        self.delegated = []
+        # Set by `analyze` when the module could change what a literal
+        # argv does (rebinding subprocess, writing the environment, or
+        # executing code the analyzer cannot see). Delegation is then off
+        # for the whole module. Issue #162.
+        self._argv_delegation_blocked = False
 
         self.rules = rules
         self.findings = []
@@ -673,7 +683,7 @@ class SafetyAnalyzer(ast.NodeVisitor):
             )
             for pattern in destructive_patterns:
                 if self._matches_pattern(call_name, pattern):
-                    if self._subprocess_argv_is_delegated(category, node):
+                    if self._subprocess_argv_is_delegated(category, call_name, node):
                         return
                     source_line = ""
                     if hasattr(self, "source_lines") and 0 < node.lineno <= len(self.source_lines):
@@ -688,10 +698,22 @@ class SafetyAnalyzer(ast.NodeVisitor):
                     })
                     return
 
-    def _subprocess_argv_is_delegated(self, category, node):
-        """True when a subprocess call carries a literal argv the shell rules
-        do not call unsafe, so refusing it here would be stricter than the
-        shell path is for the very same command.
+    # Keyword arguments that change what a literal argv does: run it
+    # through a shell, swap the program, run Python before exec, or set
+    # the child's environment (`GIT_EXTERNAL_DIFF` makes `git diff` run a
+    # program). Any of them keeps master's refusal. Issue #162.
+    _ARGV_EFFECT_KEYWORDS = frozenset(
+        ("shell", "executable", "preexec_fn", "env")
+    )
+
+    def _subprocess_argv_is_delegated(self, category, call_name, node):
+        """True when a subprocess call carries a fully literal argv the
+        shell rules do not call unsafe. The call is recorded in
+        `self.delegated`, which makes the verdict `unresolved` rather than
+        `safe`: this path may lower a refusal to "the host decides", never
+        to a grant. In the hook `unknown` is a silent exit just as `safe`
+        is, so the repository's own read-only gate runs again, including
+        inside subagents, where only `unsafe` is turned into a deny.
 
         Measured before the fix: `git rev-parse --short HEAD` classified
         `unknown` as a shell command and `unsafe` as
@@ -699,42 +721,163 @@ class SafetyAnalyzer(ast.NodeVisitor):
         verdict removed a repository's own read-only validation gate while the
         first let it run. Issue #162.
 
-        A starred element (`["git", *args]`) leaves the subcommand invisible,
-        so only argv[0] is judged -- which is what the shell path does with a
-        bare `git` (`unknown`, delegated). That is deliberately weaker than the
-        shell path, because the shell path gets to see the subcommand and this
-        never will; the host still judges the `python3 <script>` invocation
-        that wraps it.
+        Refused (master's finding stands) when any argv element is not a
+        string literal (`["git", "reset", *extra, "--hard"]` hides the
+        flag that matters), when a keyword in `_ARGV_EFFECT_KEYWORDS` or a
+        `**kwargs` is present, or when the module blocked delegation (see
+        `_module_blocks_argv_delegation`).
         """
+        retval = False
         if category != "subprocess" or self.argv_classify is None:
-            retval = False
+            return retval
+        if not call_name.startswith("subprocess.") or self._argv_delegation_blocked:
             return retval
         if not node.args:
-            retval = False
             return retval
         first = node.args[0]
-        if not isinstance(first, ast.List) or not first.elts:
-            retval = False
+        if not isinstance(first, (ast.List, ast.Tuple)) or not first.elts:
             return retval
         tokens = []
         for elt in first.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                tokens.append(elt.value)
-            else:
-                # A non-literal element ends the known prefix. Keep what came
-                # before it and judge that.
-                break
-        if not tokens:
-            retval = False
+            if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                return retval
+            tokens.append(elt.value)
+        for kw in node.keywords:
+            if kw.arg is None or kw.arg in self._ARGV_EFFECT_KEYWORDS:
+                return retval
+        if self._git_global_options_execute(tokens):
             return retval
         from rule_classifier import DECISION_DENY, DECISION_UNSAFE
         try:
-            decision, _ = self.argv_classify(tokens)
+            decision, reason = self.argv_classify(tokens)
         except Exception:
             # A classifier that cannot answer must not grant. Issue #162.
-            retval = False
             return retval
-        retval = decision not in (DECISION_UNSAFE, DECISION_DENY)
+        if decision in (DECISION_UNSAFE, DECISION_DENY):
+            return retval
+        self.delegated.append({
+            "call": call_name,
+            "line": node.lineno,
+            "argv": tokens,
+            "shell_reason": reason,
+        })
+        retval = True
+        return retval
+
+    # git global options that take a value as a separate token.
+    _GIT_VALUED_GLOBALS = frozenset(
+        ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
+         "--super-prefix", "--config-env", "--exec-path", "--list-cmds")
+    )
+
+    @classmethod
+    def _git_global_options_execute(cls, tokens):
+        """True when a git argv carries a global option that can make a
+        read-only subcommand run a program: `-c` (`core.pager`,
+        `core.fsmonitor`, `diff.external`, `alias.x=!...`), `--config-env`
+        or `--exec-path`. Only options before the subcommand count; `-c`
+        after it means something else (`git log -c`).
+
+        The shell path calls these argv `unknown` today, which is a silent
+        exit in the hook, so delegating them would let a Python script run
+        what master refused. Master's refusal stays until both paths call
+        them unsafe. Issue #162.
+        """
+        retval = False
+        if not tokens or os.path.basename(tokens[0]) != "git":
+            return retval
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            tok = tokens[i]
+            if (tok.startswith("-c") or tok.startswith("--config-env")
+                    or tok.startswith("--exec-path")):
+                retval = True
+                return retval
+            if tok in cls._GIT_VALUED_GLOBALS:
+                i += 2
+            else:
+                i += 1
+        return retval
+
+    # Names whose call means the analyzer is not seeing the code that runs.
+    _OPAQUE_CALLS = frozenset(
+        ("exec", "eval", "compile", "__import__", "setattr")
+    )
+    # Methods that write the process environment a child inherits.
+    _ENV_WRITE_METHODS = frozenset(
+        ("putenv", "update", "setdefault", "__setitem__")
+    )
+
+    @classmethod
+    def _module_blocks_argv_delegation(cls, tree):
+        """True when the module could change what a literal subprocess argv
+        does, so its argv cannot be judged by the shell rules alone.
+
+        Covers, by local name bound to the `subprocess` or `os` modules or
+        to anything imported from them: rebinding (`subprocess.run =
+        os.system`, `run = ...`), aliasing (`str = os.remove`), assigning into the environment
+        (`os.environ[k] = v`), calling an environment writer
+        (`os.putenv`, `os.environ.update`), and any `exec` / `eval` /
+        `compile` / `__import__` / `setattr` call or `importlib` import.
+        Coarse on purpose: a hit only keeps master's refusal. Issue #162.
+        """
+        watched = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    if top == "importlib":
+                        return True
+                    if top in ("subprocess", "os"):
+                        watched.add(alias.asname or top)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top = node.module.split(".")[0]
+                if top == "importlib":
+                    return True
+                if top in ("subprocess", "os"):
+                    for alias in node.names:
+                        watched.add(alias.asname or alias.name)
+
+        def root_name(expr):
+            while isinstance(expr, (ast.Attribute, ast.Subscript)):
+                expr = expr.value
+            if isinstance(expr, ast.Name):
+                return expr.id
+            return None
+
+        def touches_watched(target):
+            if isinstance(target, (ast.Tuple, ast.List)):
+                return any(touches_watched(t) for t in target.elts)
+            if isinstance(target, ast.Starred):
+                return touches_watched(target.value)
+            return root_name(target) in watched
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            else:
+                targets = []
+            if any(touches_watched(t) for t in targets):
+                return True
+            # Aliasing a watched callable under a new name (`run =
+            # subprocess.run`, `str = os.remove`) hides it from pattern
+            # matching, which otherwise surfaced it only because the
+            # subprocess call itself was a finding.
+            value = getattr(node, "value", None)
+            if (targets and isinstance(value, (ast.Name, ast.Attribute))
+                    and root_name(value) in watched):
+                return True
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id in cls._OPAQUE_CALLS:
+                    return True
+                if (isinstance(func, ast.Attribute)
+                        and func.attr in cls._ENV_WRITE_METHODS
+                        and root_name(func) in watched):
+                    return True
+        retval = False
         return retval
 
     def _check_open_mode(self, node):
@@ -790,9 +933,12 @@ class SafetyAnalyzer(ast.NodeVisitor):
         self.source_lines = source.splitlines()
         self._scope_shadow_map = self._build_scope_shadow_map(source, tree)
         self._collect_top_level_bindings(tree)
+        if self.argv_classify is not None:
+            self._argv_delegation_blocked = (
+                self._module_blocks_argv_delegation(tree))
         self.visit(tree)
 
-        is_safe = len(self.findings) == 0
+        is_safe = len(self.findings) == 0 and len(self.delegated) == 0
 
         retval = {
             "safe": is_safe,
@@ -800,6 +946,18 @@ class SafetyAnalyzer(ast.NodeVisitor):
             "imports": sorted(self.imports),
             "unknown_imports": sorted(self.import_modules - self.safe_imports),
         }
+
+        if not self.findings and self.delegated:
+            # Not a finding and not a grant: the shell rules did not call
+            # any of these argv unsafe, so the host decides. Issue #162.
+            retval["unresolved"] = True
+            retval["delegated"] = self.delegated
+            retval["reason"] = "; ".join(
+                "L{}: {} argv delegated ({})".format(
+                    d["line"], d["call"], d["shell_reason"])
+                for d in self.delegated
+            )
+            return retval
 
         if not is_safe:
             reasons = []

@@ -554,6 +554,9 @@ class GrammarClassifier:
         result = analyzer.analyze(source)
         if result.get("safe"):
             return (DECISION_SAFE, "python: {}".format(description))
+        if result.get("unresolved"):
+            return (DECISION_UNKNOWN, "python {}: {}".format(
+                description, result.get("reason", "delegated subprocess argv")))
         return (DECISION_UNSAFE, "python {}: {}".format(
             description, result.get("reason", "destructive call"),
         ))
