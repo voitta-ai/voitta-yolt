@@ -1174,6 +1174,9 @@ class RuleClassifier:
         result = analyzer.analyze(source)
         if result.get("safe"):
             return (DECISION_SAFE, "python: {}".format(description))
+        if result.get("unresolved"):
+            return (DECISION_UNKNOWN, "python {}: {}".format(
+                description, result.get("reason", "delegated subprocess argv")))
         if inline and result.get("parse_error"):
             reason = "{} (parser bailed at line {})".format(
                 UNANALYZABLE_INLINE_PYTHON_PREFIX,
