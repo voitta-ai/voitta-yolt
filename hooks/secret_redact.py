@@ -63,7 +63,14 @@ _STRUCTURED_PATTERNS = [
     # `sk-` (OpenAI/Anthropic) keeps the loose form: the hyphen makes it
     # distinctive. The underscore form must carry Stripe's `live`/`test`
     # segment - a bare `[sr]k_` matched `rk_analytics_pipeline_worker`.
-    ("api-key", re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"), 0),
+    # `sk-` stays loose, but hyphen-joined English words are not a key
+    # (`sk-configuration-management-placeholder`,
+    # `sk-configuration-V2-placeholder`). The discriminator is a hyphen-FREE
+    # run of 16+ characters: a real key body is one dense token, while kebab
+    # text breaks every word or two. Requiring merely a digit or a capital
+    # is not enough -- `V2` supplies both. Issue #165.
+    ("api-key", re.compile(
+        r"sk-(?=[A-Za-z0-9_\-]*[A-Za-z0-9_]{16,})[A-Za-z0-9_\-]{16,}"), 0),
     ("api-key", re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}"), 0),
     # Lengths pinned to the real formats. The earlier `{16,}` with `_-`
     # allowed matched npm's own environment variables (`npm_config_*`,
@@ -82,7 +89,7 @@ _STRUCTURED_PATTERNS = [
     # `{"...`), so this is near-zero false-positive risk. Previously
     # caught only when it sat behind an Authorization header.
     ("jwt", re.compile(
-        r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}"
+        r"\be(?:yJ|yA|wo)[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{2,}"
         r"\.[A-Za-z0-9_\-]{8,}"), 0),
     # scheme://user:secret@host - redact only the password field.
     ("url-credentials", re.compile(
@@ -124,39 +131,61 @@ _SECRETISH_QUERY = (
 # Same tuple shape, but the captured value must additionally pass
 # `_looks_like_literal_secret` before it is treated as a match.
 _ASSIGNMENT_PATTERNS = [
+    # Each entry is (kind, pattern, group, lenient). `lenient` means the KEY
+    # already identified this as a credential, so the value is not also
+    # required to look like one. See `_value_is_plausible`.
+    #
     # Quoted first, so `--password "two words"` captures the whole value
     # rather than stopping at the space. An unquoted capture would take
     # only `two`, leaving the rest in cleartext. See issue #92.
+    # `(?:[^"\\]|\\.)+` rather than `[^"]+` so a backslash-escaped quote
+    # inside the value does not end the capture early (issue #165).
     ("flag-value", re.compile(
-        r"--(?:" + _SECRETISH_FLAG + r")[=\s]+\"([^\"]+)\"", re.I), 1),
+        r"--(?:" + _SECRETISH_FLAG + r")[=\s]+\"((?:[^\"\\]|\\.)+)\"", re.I), 1, True),
     ("flag-value", re.compile(
-        r"--(?:" + _SECRETISH_FLAG + r")[=\s]+'([^']+)'", re.I), 1),
+        r"--(?:" + _SECRETISH_FLAG + r")[=\s]+'((?:[^'\\]|\\.)+)'", re.I), 1, True),
+    # Unquoted `--flag value` stays STRICT. A command-line flag legitimately
+    # takes a resource name (`--token some-resource-name`,
+    # `--secret ThisIsAVeryLongDescription`), so the value must still earn it.
+    # A bare `NAME=` / `NAME:` right-hand side is different: that is a value
+    # by construction, which is why those are lenient. Issue #165.
     ("flag-value", re.compile(
-        r"--(?:" + _SECRETISH_FLAG + r")(?:[=\s]+)([^\s\"']+)", re.I), 1),
+        r"--(?:" + _SECRETISH_FLAG + r")(?:[=\s]+)([^\s\"']+)", re.I), 1, False),
     # The name prefix is optional. It used to be `[A-Za-z_][A-Za-z0-9_]*`,
     # which required at least one character *before* the keyword and so
     # made every keyword fail to match itself: `GH_TOKEN=` matched,
     # bare `TOKEN=` did not. See issue #90.
+    # `[=:]` rather than `=`, because JSON and YAML separate with a colon and
+    # nothing else here accepted one: `{"OPENAI_API_TOKEN": "..."}` and
+    # `password: 'hunter2'` matched no pattern at all (issue #165).
     ("env-assignment", re.compile(
         r"\b[A-Za-z0-9_]*(?:" + _SECRETISH_NAME + r")"
-        r"\s*=\s*\"([^\"]+)\"", re.I), 1),
+        r"[\"']?\s*[=:]\s*\"((?:[^\"\\]|\\.)+)\"", re.I), 1, True),
     ("env-assignment", re.compile(
         r"\b[A-Za-z0-9_]*(?:" + _SECRETISH_NAME + r")"
-        r"\s*=\s*'([^']+)'", re.I), 1),
+        r"[\"']?\s*[=:]\s*'((?:[^'\\]|\\.)+)'", re.I), 1, True),
     ("env-assignment", re.compile(
         r"\b[A-Za-z0-9_]*(?:" + _SECRETISH_NAME + r")"
-        r"\s*=\s*([^\s\"']+)", re.I), 1),
+        r"[\"']?\s*[=:]\s*([^\s\"']+)", re.I), 1, True),
+    # Split on whether an auth SCHEME keyword is present, because that is the
+    # only thing separating two cases of identical shape: `Bearer abcdefgh`
+    # must redact (8 chars, all letters) while `X-Api-Key: PLACEHOLDERVALUE`
+    # must not (16 chars, all letters). `Bearer`/`Basic`/`token` is an RFC-7235
+    # scheme, so what follows is a credential by definition and needs no
+    # entropy evidence; a bare header value does. Issue #165.
     ("header-value", re.compile(
         r"(?:" + _SECRETISH_HEADER + r")\s*:\s*"
-        r"(?:Bearer\s+|Basic\s+|token\s+)?([^\s\"']+)", re.I), 1),
+        r"(?:Bearer|Basic|token)\s+([^\s\"']+)", re.I), 1, True),
+    ("header-value", re.compile(
+        r"(?:" + _SECRETISH_HEADER + r")\s*:\s*([^\s\"']+)", re.I), 1, False),
     ("named-value", re.compile(
-        r"\b(?:" + _SECRETISH_WORD + r")[\s=]+[\"']?([^\s\"']+)", re.I), 1),
+        r"\b(?:" + _SECRETISH_WORD + r")[\s=:]+[\"']?([^\s\"']+)", re.I), 1, True),
     # curl -u user:password / --user user:password - redact the password
     # half only, so the account stays visible in the record.
     ("basic-auth", re.compile(
-        r"(?:^|\s)(?:-u|--user)[=\s]+[\"']?[^\s:\"']+:([^\s\"']+)"), 1),
+        r"(?:^|\s)(?:-u|--user)[=\s]+[\"']?[^\s:\"']+:([^\s\"']+)"), 1, False),
     ("query-param", re.compile(
-        r"[?&](?:" + _SECRETISH_QUERY + r")=([^\s&\"'#]+)", re.I), 1),
+        r"[?&](?:" + _SECRETISH_QUERY + r")=([^\s&\"'#]+)", re.I), 1, False),
 ]
 
 # Below this, a value is too short to be a credential worth the false
@@ -204,7 +233,7 @@ _EXPANSION_MARKERS = ("$(", "${", "`")
 _MARKER_RE = re.compile(
     r"\[REDACTED:(?:{})\]".format(
         "|".join(sorted({kind for kind, _, _ in _STRUCTURED_PATTERNS}
-                        | {kind for kind, _, _ in _ASSIGNMENT_PATTERNS},
+                        | {kind for kind, _, _, _ in _ASSIGNMENT_PATTERNS},
                         key=len, reverse=True))
     )
 )
@@ -235,6 +264,59 @@ def _looks_like_literal_secret(value):
         # Short *and* all-alphabetic or all-numeric reads as a name or an
         # id, not a key. Long values skip this test - see _LONG_VALUE_LEN.
         retval = False
+    return retval
+
+
+_CODE_SHAPE_RE = re.compile(r"\(\s*\)|;|\)\s*\.|=>")
+# Words that announce a value is a stand-in. Needed only under leniency: a
+# scheme keyword makes `Bearer PLACEHOLDERVALUE` a credential POSITION, and
+# nothing about its shape distinguishes it from `Bearer abcdefgh`, which is a
+# real short token. The word does. The sibling `secrets-in-agent-sessions`
+# hook carries the same list for the same reason. Issue #165.
+# Deliberately short. `example` and `redacted` were tried and removed: AWS's
+# own documented example secret key contains `EXAMPLE`, and a marker-wrapped
+# value contains `REDACTED` by construction, so both words rejected real
+# credentials. Only words that no credential fixture carries survive here.
+_PLACEHOLDER_RE = re.compile(
+    r"placeholder|changeme|change[-_]me|replace[-_]?me|notareal|"
+    r"your[-_]?(?:token|key|secret|password)", re.I)
+
+
+def _value_is_plausible(value, lenient):
+    """True when `value` may be redacted as a credential.
+
+    `lenient` is set by every pattern whose KEY already named a secret
+    (`password=`, `API_TOKEN:`, `Authorization:`). For those the entropy
+    heuristics in `_looks_like_literal_secret` are not just unnecessary but
+    actively wrong: they rejected `"correct horse battery staple"` for
+    containing spaces, `"1234567"` for being short, and
+    `password=correcthorsebatterystaple` for being all letters -- three
+    values whose key said plainly what they were. Issue #165.
+
+    Two rejections survive leniency, because they are about the value not
+    being a literal at all rather than about it looking insufficiently
+    random:
+
+    * a shell expansion (`$VAR`, `$(...)`, backticks) -- redacting it would
+      destroy a record that holds no secret;
+    * code (`response.access_token();x=1`) -- a call, not a value.
+    """
+    if value.startswith("$") or any(m in value for m in _EXPANSION_MARKERS):
+        retval = False
+    elif _CODE_SHAPE_RE.search(value):
+        retval = False
+    elif lenient and _PLACEHOLDER_RE.search(value):
+        # Scoped to leniency on purpose. Under strict matching the entropy
+        # tests already decide, and a real credential is free to contain the
+        # substring `example`; only leniency needs this.
+        retval = False
+    elif lenient:
+        # A floor even under leniency: a 2-character placeholder (`{}`, `--`)
+        # is not a credential, and redacting it would change a record that
+        # holds nothing. Requires some alphanumeric content and 4+ chars.
+        retval = len(value) >= 4 and any(c.isalnum() for c in value)
+    else:
+        retval = _looks_like_literal_secret(value)
     return retval
 
 
@@ -311,7 +393,7 @@ def find_secrets(text):
         for match in pattern.finditer(text):
             if not _is_marker(match.start(group), match.end(group)):
                 spans.append((match.start(group), match.end(group), kind))
-    for kind, pattern, group in _ASSIGNMENT_PATTERNS:
+    for kind, pattern, group, lenient in _ASSIGNMENT_PATTERNS:
         for match in pattern.finditer(text):
             if _is_marker(match.start(group), match.end(group)):
                 continue
@@ -324,9 +406,9 @@ def find_secrets(text):
                 # itself secret-shaped, the sensitive part is already
                 # handled and re-redacting only destabilises the output.
                 # This is what makes `redact` idempotent. Issue #89.
-                if not _looks_like_literal_secret(_MARKER_RE.sub("", value)):
+                if not _value_is_plausible(_MARKER_RE.sub("", value), lenient):
                     continue
-            elif not _looks_like_literal_secret(value):
+            elif not _value_is_plausible(value, lenient):
                 continue
             spans.append((match.start(group), match.end(group), kind))
 
