@@ -154,6 +154,37 @@ class GitProbe:
             return None
         return out.strip() or None
 
+    def push_remote_url(self, directory, remote, branch):
+        """The URL a push would go to, or None if it cannot be established.
+
+        `remote` is the push's remote argument when argv carries one. With
+        none, git picks branch.<b>.pushRemote, then remote.pushDefault, then
+        branch.<b>.remote, then `origin`, and so does this. A remote that is
+        already a URL is returned as is; a name is resolved with
+        `git remote get-url --push`, which applies pushurl and insteadOf.
+        """
+        if remote is None:
+            candidates = []
+            if branch:
+                candidates.append("branch.{}.pushRemote".format(branch))
+            candidates.append("remote.pushDefault")
+            if branch:
+                candidates.append("branch.{}.remote".format(branch))
+            for key in candidates:
+                remote = self._config(directory, key)
+                if remote:
+                    break
+            else:
+                remote = "origin"
+        if "/" in remote or ":" in remote:
+            retval = remote
+            return retval
+        out = self._runner(directory, ["remote", "get-url", "--push", remote])
+        if not out:
+            return None
+        retval = out.strip() or None
+        return retval
+
     def authorship(self, directory):
         """SOLO / SHARED / UNDETERMINED for the commits on this branch.
 
@@ -215,10 +246,10 @@ class GitProbe:
 class DenyPolicySet:
     """Every configured deny policy, sharing one probe cache."""
 
-    def __init__(self, policies):
+    def __init__(self, policies, allow_repos=()):
         probe = GitProbe()
         self.policies = [
-            GitDenyPolicy(spec, probe=probe)
+            GitDenyPolicy(spec, probe=probe, allow_repos=allow_repos)
             for name, spec in sorted((policies or {}).items())
             if not name.startswith("_") and isinstance(spec, dict)
         ]
@@ -234,7 +265,10 @@ class DenyPolicySet:
 def load_policies(rules):
     """Build the deny policy set from loaded shell rules. Returns None when
     nothing is configured, so the classifier can skip the layer entirely."""
-    policy_set = DenyPolicySet(rules.get("policies", {}))
+    policy_set = DenyPolicySet(
+        rules.get("policies", {}),
+        allow_repos=rules.get("default_branch_allow_repos", []),
+    )
     if not any(p.enabled and p.entries for p in policy_set.policies):
         return None
     return policy_set
@@ -271,13 +305,18 @@ def _run_git(directory, args):
 class GitDenyPolicy:
     """Evaluates configured deny entries against an argv + directory."""
 
-    def __init__(self, spec, probe=None):
+    def __init__(self, spec, probe=None, allow_repos=()):
         spec = spec or {}
         self.enabled = bool(spec.get("enabled", False))
         if os.environ.get("YOLT_NO_POLICIES"):
             self.enabled = False
         self.entries = [e for e in spec.get("deny", []) if isinstance(e, dict)]
         self.probe = probe or GitProbe()
+        # `owner/name` repos whose default branch takes direct pushes by
+        # convention. Lower-cased: GitHub slugs are case-insensitive.
+        self.allow_repos = frozenset(
+            r.lower() for r in (allow_repos or []) if isinstance(r, str)
+        )
 
     def evaluate(self, argv, directory):
         """Return a reason string when this argv must be DENIED, else None.
@@ -343,14 +382,20 @@ class GitDenyPolicy:
             if not targets:
                 return None
             if "*" in targets:
-                return ("pushes every branch (--all/--mirror), which "
-                        "includes the default branch ({})".format(
-                            default_branch))
-            if default_branch in targets:
-                return "would push to the default branch ({})".format(
+                reason = ("pushes every branch (--all/--mirror), which "
+                          "includes the default branch ({})".format(
+                              default_branch))
+            elif default_branch in targets:
+                reason = "would push to the default branch ({})".format(
                     default_branch
                 )
-            return None
+            else:
+                return None
+            if self._push_repo_allowed(argv, state, directory):
+                # Listed repo: no refusal, so the static `unsafe` stands
+                # and the operator is asked. Issue #161.
+                return None
+            return reason
 
         if predicate == "shared_history":
             verdict, detail = self.probe.authorship(directory)
@@ -367,6 +412,30 @@ class GitDenyPolicy:
         # to deny. Schema validation rejects these at load; this is the
         # belt-and-braces for a rules file that bypassed it.
         return None
+
+    def _push_repo_allowed(self, argv, state, directory):
+        """True only when the push's remote URL is affirmatively one of
+        `allow_repos`. Every uncertainty -- no list, `--repo`, an expansion
+        in the remote, a URL that cannot be resolved or parsed -- is False,
+        which keeps the refusal. This exemption is a grant, so its failure
+        semantics are the ancestor's (#82), not the deny layer's: cannot
+        tell means no. Issue #161.
+        """
+        if not self.allow_repos:
+            return False
+        if any(tok == "--repo" or tok.startswith("--repo=") for tok in argv):
+            return False
+        positionals = [
+            tok for tok in argv[1:]
+            if not tok.startswith("-") and tok != "push"
+        ]
+        remote = positionals[0] if positionals else None
+        if remote is not None and _has_expansion(remote):
+            return False
+        url = self.probe.push_remote_url(directory, remote, state.get("branch"))
+        slug = _repo_slug(url)
+        retval = slug is not None and slug in self.allow_repos
+        return retval
 
     def _match_all(self, argv):
         """Every entry whose argv prefix matches, most specific first."""
@@ -428,6 +497,43 @@ def _push_targets(argv, current_branch):
             continue
         targets.add(candidate)
     retval = targets or None
+    return retval
+
+
+_NETWORK_SCHEMES = frozenset(("https", "http", "ssh", "git", "git+ssh", "ssh+git"))
+
+
+def _repo_slug(url):
+    """`owner/name`, lower-cased, from a remote URL, or None.
+
+    Accepts `https://host/owner/name(.git)`, `ssh://git@host[:port]/owner/name`
+    and scp-style `git@host:owner/name`. Requires exactly two path segments
+    after the host, so a local path (`/srv/git/hq.git`, `../hq`) or a
+    nested path never produces a slug. Issue #161.
+    """
+    if not url:
+        return None
+    url = url.strip()
+    if "://" in url:
+        scheme, rest = url.split("://", 1)
+        # `file://` is a local path, and a local path never names a repo.
+        if scheme.lower() not in _NETWORK_SCHEMES or "/" not in rest:
+            return None
+        path = rest.split("/", 1)[1]
+    elif ":" in url and not url.startswith("/") and "/" not in url.split(":", 1)[0]:
+        path = url.split(":", 1)[1]
+        # `host:/abs/path` is a path on that host, and `C:/x` is a drive.
+        if path.startswith("/"):
+            return None
+    else:
+        return None
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-len(".git")]
+    parts = path.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    retval = "/".join(parts).lower()
     return retval
 
 

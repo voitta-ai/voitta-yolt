@@ -614,6 +614,7 @@ Example decisions:
 | `git log` / `git status` / `git pull` / `git checkout -b x` / `git commit` | silent (delegated) |
 | `git push origin feature/x` | ask (precondition for the deny policies) |
 | `git push origin master` | **deny**, when the branch probe resolves |
+| `git push origin master` in a repo listed in `default_branch_allow_repos` | ask |
 | `gh api repos/o/r/pulls` | silent (a GET) |
 | `gh api -X PUT .../merge -f m=squash` / `gh api -f title=x` | ask |
 | `gh release create v1` / `gh repo fork o/r` / `gh run cancel 1` | ask |
@@ -1223,6 +1224,29 @@ why `git push` survived Phase 3 despite being reversible, high-volume local
 workflow: delegating it would have silently turned off `default_branch_target`
 and `shared_history`. Any argv named in an enabled policy must stay reachable
 as `unsafe`.
+
+**Repos that take direct pushes by convention.** Some repos (notes, docs)
+are committed straight to the default branch with no PRs, and
+`default_branch_target` refuses every push to them. List them in
+`~/.claude/yolt/shell.json`:
+
+```json
+{ "default_branch_allow_repos": ["owner/notes", "owner/docs"] }
+```
+
+A listed repo's default-branch push is **asked**, not refused, so you still
+approve each one. Only `default_branch_target` is exempted: `shared_history`
+still refuses a force-push over someone else's commits. The match is on
+`owner/name` in the push remote's URL (https, ssh or `git@host:owner/name`),
+case-insensitive, resolved from the push's remote argument or git's own
+push-remote config, and through `git -C <path>`. Local paths and directory
+names never match. Anything the probe cannot establish keeps the refusal.
+
+It is a top-level key, not a field on the policy entry, on purpose. Overrides
+merge one level deep, so an override of `policies.git` replaces the whole git
+policy, `enabled` flag and `shared_history` entry included. The override file
+itself is an `unsafe_write_targets` entry, so a session cannot add its own
+repo to the list. [#161](https://github.com/voitta-ai/voitta-yolt/issues/161)
 
 ### Conservative-unknown contract
 
