@@ -719,6 +719,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "commands", "interpreters",
     "policies", "_policies_note",
     "_commands_note",
+    "default_branch_allow_repos", "_default_branch_allow_repos_note",
 })
 
 _ALLOWED_COMMAND_KEYS = frozenset({
@@ -893,8 +894,26 @@ def validate_shell_rules(rules):
                     )
 
     _validate_policies(rules.get("policies", {}), errors)
+    _validate_allow_repos(rules.get("default_branch_allow_repos", []), errors)
 
     return errors
+
+
+def _validate_allow_repos(repos, errors):
+    """Each entry must be exactly `owner/name`. A malformed entry would
+    match nothing, which keeps the refusal -- the loud direction -- but an
+    exemption the operator believes they configured and do not have is the
+    same silent-guard problem `_validate_policies` refuses. Issue #161."""
+    path = "default_branch_allow_repos"
+    if not isinstance(repos, list):
+        errors.append("{}: must be a list".format(path))
+        return
+    for i, repo in enumerate(repos):
+        parts = repo.split("/") if isinstance(repo, str) else []
+        if len(parts) != 2 or not all(parts) or any(
+                c.isspace() or c in ":@" for c in repo):
+            errors.append(
+                "{}[{}]: must be 'owner/name', got {!r}".format(path, i, repo))
 
 
 def _validate_command_spec(path, spec, errors):
