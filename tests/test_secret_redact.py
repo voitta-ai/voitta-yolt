@@ -434,7 +434,7 @@ class IdempotenceTests(unittest.TestCase):
         idempotence."""
         import secret_redact
         kinds = ({k for k, _, _ in secret_redact._STRUCTURED_PATTERNS}
-                 | {k for k, _, _ in secret_redact._ASSIGNMENT_PATTERNS})
+                 | {k for k, _, _, _ in secret_redact._ASSIGNMENT_PATTERNS})
         for kind in kinds:
             self.assertTrue(
                 secret_redact._MARKER_RE.fullmatch(
