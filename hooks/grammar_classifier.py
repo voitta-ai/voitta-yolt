@@ -796,6 +796,16 @@ def run_cli():
         cwd=cwd,
     )
 
+    # The CLI never reports `safe`. A static reading of a shell command
+    # cannot vouch that it runs no code: the shell decides that at run time,
+    # through more routes than rule data can enumerate. A consumer that
+    # auto-runs `safe` would be trusting a claim this tool cannot back.
+    # `unknown` says what is true, that yolt has no objection, and leaves the
+    # decision to the consumer's own gate. The hook is unaffected: there
+    # `safe` and `unknown` were already the same silent exit.
+    if decision == DECISION_SAFE:
+        decision, reason = DECISION_UNKNOWN, "no objection: {}".format(reason)
+
     # How many allow patterns were in play is part of the verdict's meaning: the
     # same command classifies differently under a different settings file, and
     # without this a consumer cannot see -- or log at startup -- how large the

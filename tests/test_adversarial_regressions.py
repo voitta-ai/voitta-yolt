@@ -91,13 +91,19 @@ class _Hook:
         they assert here instead, which is a stricter check than the
         `allow` they used to make.
         """
-        result = subprocess.run(
-            [sys.executable, str(HOOKS_DIR / "grammar_classifier.py"), command],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        retval = json.loads(result.stdout)["decision"]
+        # In-process rather than through the CLI: since 2.9.0 the CLI never
+        # reports `safe`, so only the classifier itself still draws the
+        # distinction these repros pin.
+        sys.path.insert(0, str(HOOKS_DIR))
+        from grammar_classifier import classify_command
+        from rule_classifier import load_shell_rules
+        from yolt_analyzer import SafetyAnalyzer, load_rules as load_py_rules
+        py_rules = load_py_rules(REPO_ROOT / "rules")
+        retval = classify_command(
+            command,
+            load_shell_rules(REPO_ROOT / "rules"),
+            python_analyzer_factory=lambda: SafetyAnalyzer(py_rules),
+        )[0]
         return retval
 
 

@@ -17,7 +17,6 @@
     "popd",
     "dirs",
     "type",
-    "command",
     "hash",
     "alias",
     "unalias",
@@ -505,6 +504,10 @@
     "time": {
       "default": "delegate_to_argument",
       "_note": "Recursion, not classification: it runs the command after it. Deleting this entry would not delegate what it wraps -- it would make the wrapper an escape hatch around every rule in this file, because the wrapped command would never be reached."
+    },
+    "command": {
+      "default": "delegate_to_argument",
+      "_note": "Recursion, not classification: 'command X' runs X with functions bypassed. 'command -v'/'-V' only look a name up and are handled before delegation."
     },
     "nohup": {
       "default": "delegate_to_argument",
