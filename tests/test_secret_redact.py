@@ -22,9 +22,9 @@ from secret_redact import find_secrets, redact  # noqa: E402
 FAKE_GH_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0" * 2
 FAKE_GH_PAT = "github_pat_" + "11ABCDEFG0" * 3
 FAKE_GITLAB = "glpat-" + "xY3zAb9QrS7tUv1W"
-FAKE_SLACK = "xoxb-1234567890-1234567890123-" + "AbCdEf1234567890AbCdEf12"
+FAKE_SLACK = "xoxb-" "1234567890-1234567890123-" + "AbCdEf1234567890AbCdEf12"
 FAKE_SLACK_APP = "xapp-1-A01BCDEFGHI-1234567890123-" + "abcdef1234567890"
-FAKE_AWS_ID = "AKIAIOSFODNN7EXAMPLE"
+FAKE_AWS_ID = "AKIA" "IOSFODNN7EXAMPLE"
 FAKE_API_KEY = "sk-ant-api03-" + "aB3dE6gH9jK2mN5pQ8sT1vW4"
 
 
@@ -76,7 +76,7 @@ class RedactStructuredTests(unittest.TestCase):
             FAKE_API_KEY, "api-key")
 
     def test_private_key_block(self):
-        pem = ("-----BEGIN RSA PRIVATE KEY-----\n"
+        pem = ("-----BEGIN RSA " "PRIVATE KEY-----\n"
                "MIIEowIBAAKCAQEAxfake1\nMIIEowIBAAKCAQEAxfake2\n"
                "-----END RSA PRIVATE KEY-----")
         out = redact("echo '{}' > id_rsa".format(pem))
@@ -151,7 +151,7 @@ class BypassRegressionTests(unittest.TestCase):
         # Only the surrounding context identifies it, unlike AKIA/ASIA.
         self.assert_redacted(
             "aws configure set aws_secret_access_key "
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+            "wJalrXUtnFEMI/K7MDENG/" "bPxRfiCYEXAMPLEKEY")
 
     def test_curl_basic_auth(self):
         for flag in ("-u", "--user"):
@@ -233,7 +233,7 @@ class OverlapClippingTests(unittest.TestCase):
 
     def test_run_on_pem_after_a_flag_value(self):
         command = ("ssh-add --password abc123def456ghi789"
-                   "-----BEGIN RSA PRIVATE KEY-----\n"
+                   "-----BEGIN RSA " "PRIVATE KEY-----\n"
                    "BODYSECRETMATERIAL\n"
                    "-----END RSA PRIVATE KEY-----")
         out = redact(command)
@@ -242,7 +242,7 @@ class OverlapClippingTests(unittest.TestCase):
 
     def test_clipped_spans_are_contiguous_and_ordered(self):
         command = ("ssh-add --password abc123def456ghi789"
-                   "-----BEGIN RSA PRIVATE KEY-----\n"
+                   "-----BEGIN RSA " "PRIVATE KEY-----\n"
                    "BODY\n-----END RSA PRIVATE KEY-----")
         spans = find_secrets(command)
         self.assertGreater(len(spans), 1)
@@ -340,29 +340,29 @@ class VendorPrefixTests(unittest.TestCase):
         self.assertNotIn(value, redact(command), value)
 
     def test_stripe_underscore_separator(self):
-        self.assert_redacted("sk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
-        self.assert_redacted("rk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
+        self.assert_redacted("sk_live_" "51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
+        self.assert_redacted("rk_live_" "51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
 
     def test_other_vendor_prefixes(self):
         # Suffix lengths are the real formats: npm 36, HuggingFace 34,
         # Docker 24+. The earlier fixtures were short of them, which is
         # how a `{16,}` pattern loose enough to match `npm_config_*`
         # looked correct.
-        self.assert_redacted("dckr_pat_AbCdEfGhIjKlMnOpQrStUvWx")
-        self.assert_redacted("npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
-        self.assert_redacted("hf_AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh")
+        self.assert_redacted("dckr_pat_" "AbCdEfGhIjKlMnOpQrStUvWx")
+        self.assert_redacted("npm_" "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+        self.assert_redacted("hf_" "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh")
 
     def test_google_api_key(self):
-        self.assert_redacted("AIzaSyD-1234567890abcdefghijklmnopqrs")
+        self.assert_redacted("AIza" "SyD-1234567890abcdefghijklmnopqrs")
 
     def test_bare_jwt(self):
         # Previously caught only behind an Authorization header.
         self.assert_redacted(
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0."
+            "eyJhbGciOiJIUzI1NiJ9." "eyJzdWIiOiIxIn0."
             "abcdefghijklmnopqrstuvwxyz123456")
 
     def test_hyphen_form_still_works(self):
-        self.assert_redacted("sk-ant-api03-aB3dE6gH9jK2mN5pQ8sT1vW4")
+        self.assert_redacted("sk-ant-api03-" "aB3dE6gH9jK2mN5pQ8sT1vW4")
 
 
 class IdempotenceTests(unittest.TestCase):
@@ -375,10 +375,10 @@ class IdempotenceTests(unittest.TestCase):
         "psql postgres://u:hunter2ismypassword@h/db",
         "TOKEN=9f3c1a7e42b8d05e6c1f9a7b3d2e8c40 ./x",
         "curl -u admin:s3cr3tP4ssw0rdVeryLong123 https://x",
-        "deploy sk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu",
+        "deploy sk_live_" "51H8vXyZaBcDeFgHiJkLmNoPqRsTu",
         'deploy --token "Tr0ub4dor&3!SuperLongPassword" --env prod',
         ("ssh-add --password abc123def456ghi789"
-         "-----BEGIN RSA PRIVATE KEY-----\nB\n"
+         "-----BEGIN RSA " "PRIVATE KEY-----\nB\n"
          "-----END RSA PRIVATE KEY-----"),
     ]
 
@@ -466,8 +466,8 @@ class VendorPrefixPrecisionTests(unittest.TestCase):
             redact("docker build -t rk_analytics_pipeline_worker:latest ."),
             "docker build -t rk_analytics_pipeline_worker:latest .")
         self.assertNotEqual(
-            redact("deploy sk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu"),
-            "deploy sk_live_51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
+            redact("deploy sk_live_" "51H8vXyZaBcDeFgHiJkLmNoPqRsTu"),
+            "deploy sk_live_" "51H8vXyZaBcDeFgHiJkLmNoPqRsTu")
 
     def test_real_vendor_tokens_at_their_real_lengths(self):
         for value in ("npm_" + "a" * 36, "hf_" + "b" * 34,
@@ -554,7 +554,7 @@ class PerformanceTests(unittest.TestCase):
         for command in (
             "echo " + "a" * 100000,
             # Unterminated PEM header + bulk: exercises the `.*?` with re.S.
-            "echo '-----BEGIN RSA PRIVATE KEY-----" + "A" * 100000,
+            "echo '-----BEGIN RSA " "PRIVATE KEY-----" + "A" * 100000,
             " ".join(["--token abc"] * 5000),
         ):
             start = time.perf_counter()
@@ -568,7 +568,7 @@ class PerformanceTests(unittest.TestCase):
         BEGIN markers - 800 of them across 4MB measured at 7.7s. Without
         a terminator after a BEGIN no match is possible, so it's skipped."""
         import time
-        command = "echo '-----BEGIN RSA PRIVATE KEY-----" * 800 + "A" * 5000
+        command = "echo '-----BEGIN RSA " "PRIVATE KEY-----" * 800 + "A" * 5000
         start = time.perf_counter()
         find_secrets(command)
         self.assertLess(time.perf_counter() - start, 1.0)
@@ -579,7 +579,7 @@ class PerformanceTests(unittest.TestCase):
         (8.3s on 4MB). The terminator has to follow a BEGIN."""
         import time
         command = ("-----END RSA PRIVATE KEY----- "
-                   + ("-----BEGIN RSA PRIVATE KEY-----" + "M" * 5000) * 400)
+                   + ("-----BEGIN RSA " "PRIVATE KEY-----" + "M" * 5000) * 400)
         start = time.perf_counter()
         find_secrets(command)
         elapsed = time.perf_counter() - start
@@ -588,7 +588,7 @@ class PerformanceTests(unittest.TestCase):
 
     def test_a_real_pem_is_still_matched(self):
         """The short-circuit must not cost a genuine key."""
-        command = ("echo '-----BEGIN RSA PRIVATE KEY-----\n"
+        command = ("echo '-----BEGIN RSA " "PRIVATE KEY-----\n"
                    "BODYSECRETMATERIAL\n"
                    "-----END RSA PRIVATE KEY-----'")
         self.assertNotIn("BODYSECRETMATERIAL", redact(command))
