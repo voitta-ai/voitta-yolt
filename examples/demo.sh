@@ -11,7 +11,8 @@
 #
 # Output format:
 #     <decision>  <command>
-# where <decision> is one of safe / unsafe / unknown.
+# where <decision> is one of unsafe / deny / unknown (the CLI never
+# prints safe since 2.9.0).
 
 set -u
 
@@ -131,8 +132,7 @@ else
 fi
 
 for cmd in "${commands[@]}"; do
-  # The CLI exits 0 for safe, non-0 otherwise; we don't care about the exit
-  # code, we want the JSON decision.
+  # We want the JSON decision, not the exit code.
   decision="$(python3 "$CLS" "$cmd" 2>/dev/null \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["decision"])' \
     2>/dev/null || echo "error")"

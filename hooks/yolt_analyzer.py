@@ -1744,6 +1744,13 @@ def run_cli():
     analyzer = SafetyAnalyzer(rules)
     result = analyzer.analyze(source_code)
 
+    # Like the grammar classifier's CLI, this never vouches for code: no
+    # findings is "no objection", reported as unresolved, not as safe.
+    if result["safe"]:
+        result["safe"] = False
+        result["unresolved"] = True
+        result["reason"] = "no objection: no findings"
+
     print(json.dumps(result, indent=2))
     sys.exit(0 if result["safe"] else 1)
 

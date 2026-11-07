@@ -51,6 +51,7 @@ UNANALYZABLE_INLINE_PYTHON_PREFIX = (
 )
 
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_COMMAND_OPTS_RE = re.compile(r"^-[pvV]+$")
 BASH_PATTERN_RE = re.compile(r"^Bash\((.*)\)$")
 
 
@@ -1042,11 +1043,14 @@ class RuleClassifier:
     this class is purely the rule-lookup half."""
 
     MAX_RECURSION_DEPTH = 8
+    CLASSIFY_BUDGET = 512
 
     def __init__(self, rules, python_analyzer_factory=None, bash_analyzer=None):
         self.rules = rules
         self.commands = rules.get("commands", {})
         self.shell_builtins_safe = set(rules.get("shell_builtins_safe", []))
+        self._active = 0
+        self._budget = self.CLASSIFY_BUDGET
         self.interpreters = rules.get("interpreters", {})
         self.safe_write_targets = list(rules.get("safe_write_targets", []))
         self.unsafe_write_targets = list(rules.get("unsafe_write_targets", []))
@@ -1057,8 +1061,27 @@ class RuleClassifier:
         self.bash_analyzer = bash_analyzer
 
     def classify_tokens(self, tokens, _depth=0):
+        # Wrappers classify several readings each, so nested wrappers
+        # multiply the work. A fixed budget per outermost call keeps a
+        # crafted prefix from stalling the hook (a timed-out hook lets the
+        # command run); exhausting it is a refusal, not a pass. `bash -c`
+        # re-enters at depth 0, so the reset keys on the outermost call,
+        # not on the depth.
+        if self._active == 0:
+            self._budget = self.CLASSIFY_BUDGET
+        self._budget -= 1
+        if self._budget < 0:
+            return (DECISION_UNSAFE, "too many readings to classify")
+        self._active += 1
+        try:
+            retval = self._classify_tokens(tokens, _depth)
+        finally:
+            self._active -= 1
+        return retval
+
+    def _classify_tokens(self, tokens, _depth):
         if _depth > self.MAX_RECURSION_DEPTH:
-            return (DECISION_UNKNOWN, "max recursion depth")
+            return (DECISION_UNSAFE, "max recursion depth")
 
         if not tokens:
             return (DECISION_SAFE, "empty")
@@ -1304,22 +1327,54 @@ class RuleClassifier:
     def classify_delegate_to_argument(self, cmd_name, cmd_args, spec, _depth):
         skip_first_positional = spec.get("_skip_first_positional", False)
 
+        # `command -v X` / `command -V X` print where X resolves and run
+        # nothing; every other form of `command` runs X. Only a literal
+        # option cluster of `command`'s own letters counts: anything else
+        # beginning with `-` is not known to be a lookup.
+        if cmd_name == "command":
+            for tok in cmd_args:
+                if not _COMMAND_OPTS_RE.match(tok):
+                    break
+                if "v" in tok or "V" in tok:
+                    return (DECISION_SAFE, "command -v: lookup")
+
+        # Where the wrapped command starts depends on which of the wrapper's
+        # options take a value, and this table does not know that per
+        # wrapper. A word right after an option is either that option's
+        # value or the command, so every reading is classified and the
+        # strictest verdict wins.
+        starts = []
         i = 0
         while i < len(cmd_args):
             tok = cmd_args[i]
-            if tok.startswith("--"):
-                if "=" in tok:
-                    i += 1
-                    continue
-                if i + 1 < len(cmd_args) and not cmd_args[i + 1].startswith("-"):
-                    i += 2
-                    continue
+            if tok == "--":
                 i += 1
-                continue
+                if skip_first_positional and i < len(cmd_args):
+                    # `timeout -- 10 cmd`: the positional still comes first.
+                    starts.append(i)
+                    i += 1
+                # `env -- NAME=1 cmd`: assignments still precede the command.
+                while (cmd_name == "env" and i < len(cmd_args)
+                       and ASSIGNMENT_RE.match(cmd_args[i])
+                       and "=" in cmd_args[i]):
+                    i += 1
+                break
             if tok.startswith("-") and len(tok) > 1:
                 i += 1
                 continue
             if cmd_name == "env" and ASSIGNMENT_RE.match(tok) and "=" in tok:
+                i += 1
+                continue
+            # A word after an option is the command, or the option's value,
+            # or -- when a positional is still to be skipped -- that
+            # positional (`timeout -v 10 cmd`), making the next word the
+            # command. Each reading is a start; scanning on covers the
+            # option-value reading (`timeout --signal KILL 10 cmd`).
+            prev = cmd_args[i - 1] if i > 0 else ""
+            if prev.startswith("-") and len(prev) > 1 and "=" not in prev:
+                starts.append(i)
+                if skip_first_positional and i + 1 < len(cmd_args):
+                    starts.append(i + 1)
                 i += 1
                 continue
             if skip_first_positional:
@@ -1328,11 +1383,19 @@ class RuleClassifier:
                 continue
             break
 
-        if i >= len(cmd_args):
+        if i < len(cmd_args):
+            starts.append(i)
+        if not starts:
             return (DECISION_UNKNOWN, "{}: no wrapped command".format(cmd_name))
 
-        wrapped_tokens = cmd_args[i:]
-        d, r = self.classify_tokens(wrapped_tokens, _depth=_depth + 1)
+        decisions = [
+            self.classify_tokens(cmd_args[s:], _depth=_depth + 1)
+            for s in starts
+        ]
+        if i >= len(cmd_args):
+            decisions.append(
+                (DECISION_UNKNOWN, "{}: no wrapped command".format(cmd_name)))
+        d, r = aggregate_decisions(decisions)
         return (d, "{} wraps: {}".format(cmd_name, r))
 
     def classify_aws(self, cmd_args, spec):
