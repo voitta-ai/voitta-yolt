@@ -1081,7 +1081,7 @@ class RuleClassifier:
 
     def _classify_tokens(self, tokens, _depth):
         if _depth > self.MAX_RECURSION_DEPTH:
-            return (DECISION_UNKNOWN, "max recursion depth")
+            return (DECISION_UNSAFE, "max recursion depth")
 
         if not tokens:
             return (DECISION_SAFE, "empty")
@@ -1352,6 +1352,11 @@ class RuleClassifier:
                 if skip_first_positional and i < len(cmd_args):
                     # `timeout -- 10 cmd`: the positional still comes first.
                     starts.append(i)
+                    i += 1
+                # `env -- NAME=1 cmd`: assignments still precede the command.
+                while (cmd_name == "env" and i < len(cmd_args)
+                       and ASSIGNMENT_RE.match(cmd_args[i])
+                       and "=" in cmd_args[i]):
                     i += 1
                 break
             if tok.startswith("-") and len(tok) > 1:

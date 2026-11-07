@@ -82,7 +82,7 @@ class GrammarClassifier:
 
     def classify(self, command, _depth=0):
         if _depth > self.MAX_RECURSION_DEPTH:
-            return (DECISION_UNKNOWN, "max recursion depth")
+            return (DECISION_UNSAFE, "max recursion depth")
         if not command or not command.strip():
             return (DECISION_SAFE, "empty")
 
