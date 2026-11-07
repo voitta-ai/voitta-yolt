@@ -468,14 +468,25 @@ Anything not literally `safe` ends the model's turn and parks the command on
 a Slack approval card until a trusted human returns, which may be hours.
 Delegating a command costs one asynchronous human interrupt.
 
+**Since 2.9.0 the CLI never reports `safe`.** Where the classifier has no
+objection, the CLI says `unknown`, with a reason starting `no objection:`. A
+static reading of a shell command cannot vouch that it runs no code. The shell
+decides that at run time, through more routes than rule data can list, so a
+consumer that auto-runs on `safe` would be trusting a claim YOLT cannot back.
+What runs without a human is the consumer's own gate to decide. YOLT's
+contract with it is `unsafe` and `deny`. The hook is unaffected, because there
+`safe` and `unknown` were already the same silent exit.
+
 This is the whole of
 [#144](https://github.com/voitta-ai/voitta-yolt/issues/144): 2.0.0 collapses
 *we deliberately delegate this* and *we could not classify this* into a
 single `unknown`. The hook cannot tell those apart and does not need to. A
 consumer that must fail closed on the second has no way to avoid failing
 closed on the first, so ordinary reads — `cat`, `ls`, `grep`, `git status`,
-`gh pr list` — park. shmobster pins `>= 1.6.0, < 2.0.0` at startup for this
-reason, and the pin lifts when the two are distinguishable.
+`gh pr list` — park. Since 2.9.0 the CLI reports no `safe` at all, so a
+consumer comparing `== "safe"` parks everything unless its own gate grants
+reads. That is the intended division: YOLT says what it objects to, and the
+consumer decides what runs unattended.
 
 The general rule, for anyone writing a consumer: **decide what an
 unrecognized verdict means before you add one.** Comparing against `safe` is
@@ -1069,13 +1080,15 @@ those are your overrides, still read on every hook invocation.
 
 ## CLI usage
 
-Classify a Bash command directly — same code path as the hook:
+Classify a Bash command directly — the hook's classifier, with `safe` reported as `unknown`:
 
 ```bash
 python3 hooks/grammar_classifier.py 'for svc in $(aws ecs list-services --cluster X); do aws ecs describe-services --cluster X --services "$svc"; done'
 ```
 
-Output: `{"decision": "safe|unsafe|unknown", "reason": "..."}`.
+Output: `{"decision": "unsafe|deny|unknown", "reason": "..."}`. The CLI
+never prints `safe` (since 2.9.0); the hook and in-process callers of
+`classify_command` still see the classifier's own `safe`.
 
 The Python analyzer is invoked through the grammar classifier in
 normal use. To analyze a `.py` file in isolation (debugging the rules,
@@ -1084,6 +1097,10 @@ not the hook flow):
 ```bash
 python3 hooks/yolt_analyzer.py script.py
 ```
+
+Since 2.9.0 this never reports `"safe": true` either. A script with no
+findings is reported as `"unresolved": true` with reason
+`no objection: no findings`, and the exit status is 1 for every result.
 
 ## Tests and demo
 
