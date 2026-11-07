@@ -1098,6 +1098,10 @@ not the hook flow):
 python3 hooks/yolt_analyzer.py script.py
 ```
 
+Since 2.9.0 this never reports `"safe": true` either. A script with no
+findings is reported as `"unresolved": true` with reason
+`no objection: no findings`, and the exit status is 1 for every result.
+
 ## Tests and demo
 
 Unit tests cover the rule classifier, the grammar classifier, and the
