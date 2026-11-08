@@ -13,6 +13,7 @@ idiom inside `$(...)` is the trigger that broke this open). A maintained
 grammar removes the whole class.
 """
 
+import codecs
 import json
 import os
 import sys
@@ -24,6 +25,8 @@ from tree_sitter import Language, Parser
 
 from rule_classifier import (
     _expand_home,
+    _path_matches_safe_write_targets,
+    _path_matches_target_list,
     DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
     SUBSTITUTION_PLACEHOLDER,
     RuleClassifier,
@@ -50,7 +53,8 @@ _PYTHON_INTERPRETERS = {
 
 _BASH_INTERPRETERS = {"bash", "sh"}
 
-_WRITE_REDIR_OPS = {">", ">>", "&>", "&>>", "1>", "1>>", "2>", "2>>"}
+_WRITE_REDIR_OPS = {">", ">>", "&>", "&>>", "1>", "1>>", "2>", "2>>",
+                    ">|", ">&"}
 
 
 class GrammarClassifier:
@@ -340,10 +344,30 @@ class GrammarClassifier:
         """
         if self.policy is None or result[0] != DECISION_UNSAFE:
             return result
-        reason = self.policy.evaluate(argv, self._cwd)
+        reason = self._policy_reason(argv, 0)
         if reason is None:
             return result
         return (DECISION_DENY, reason)
+
+    def _policy_reason(self, argv, _depth):
+        """The policy's deny reason for `argv` or for any command a wrapper
+        in it may run (`env`, `nice`, `timeout`, `command`, ...), read at
+        the same start positions the rule classifier classifies (#178)."""
+        reason = self.policy.evaluate(argv, self._cwd)
+        if reason is not None or _depth > self.MAX_RECURSION_DEPTH:
+            return reason
+        cmd_name = os.path.basename(argv[0])
+        spec = self._rules.commands.get(cmd_name)
+        if not spec or spec.get("default") != "delegate_to_argument":
+            return None
+        readings = self._rules.delegate_starts(cmd_name, argv[1:], spec)
+        if readings is None:
+            return None
+        for s in readings[0]:
+            reason = self._policy_reason(argv[1 + s:], _depth + 1)
+            if reason is not None:
+                return reason
+        return None
 
     def _collect_substitutions(self, node, src, decisions, _depth):
         if node.type in ("command_substitution", "process_substitution"):
@@ -480,10 +504,19 @@ class GrammarClassifier:
                 op = c.type
             elif target is not None:
                 continue
+            elif c.type == "number" and op == ">&":
+                # `>&2`, `2>&1`: duplicates a descriptor, writes no file.
+                return None
             elif c.type == "word":
                 target = self._slice(c, src)
+            elif c.type == "concatenation":
+                # `"$HOME"/.bashrc`, `~/".bashrc"`: the quotes are not part
+                # of the path, and left in they kept it off both lists.
+                target = self._unquote_concatenation(c, src)
             elif c.type == "string":
                 target = self._reconstruct_string(c, src)
+            elif c.type in ("ansi_c_string", "translated_string"):
+                target = self._dollar_quoted_text(c, src)
             elif c.type == "raw_string":
                 # `> '/path/with space'` parses as a `raw_string`. Single
                 # quotes suppress every expansion, so unlike a `string` the
@@ -510,31 +543,48 @@ class GrammarClassifier:
             return UNEXTRACTABLE_WRITE_TARGET
         return target
 
+    def _unquote_concatenation(self, node, src):
+        """The path a concatenation names, with each quoted part's quotes
+        removed. Expansions stay as written for `_expand_home`."""
+        parts = []
+        for c in node.children:
+            if c.type == "string":
+                parts.append(self._reconstruct_string(c, src))
+            elif c.type == "raw_string":
+                parts.append(self._slice(c, src)[1:-1])
+            elif c.type in ("ansi_c_string", "translated_string"):
+                parts.append(self._dollar_quoted_text(c, src))
+            elif c.type == "$":
+                # `~/$".bashrc"` splits into word, `$`, string: the `$` is
+                # the locale-translation marker, not part of the path.
+                continue
+            else:
+                parts.append(self._slice(c, src))
+        return "".join(parts)
+
+    def _dollar_quoted_text(self, node, src):
+        """The value of `$'...'` (escapes decoded) or `$"..."`."""
+        if node.type == "translated_string":
+            inner = [c for c in node.children if c.type == "string"]
+            return self._reconstruct_string(inner[0], src) if inner else self._slice(node, src)
+        body = self._node_text(node, src)
+        try:
+            return codecs.decode(body, "unicode_escape")
+        except (UnicodeDecodeError, ValueError):
+            return body
+
     def _target_is_safe_write(self, target):
-        """Match `target` against the configured safe-write globs from
-        rules/shell.json#safe_write_targets. Expands `~/` and `$HOME/`
-        before matching so users who write `~/.cache/foo` and the rule
-        `~/.cache/*` both line up. Uses fnmatch semantics."""
-        expanded = self._expand_home(target)
-        for pat in self.safe_write_targets:
-            pat_expanded = self._expand_home(pat)
-            if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
-                return True
-        return False
+        """Match `target` against rules/shell.json#safe_write_targets. The
+        rule layer's matcher, so redirects and command write-args agree."""
+        return _path_matches_safe_write_targets(target, self.safe_write_targets)
 
     def _target_is_unsafe_write(self, target):
         """Match `target` against rules/shell.json#unsafe_write_targets --
         dotfile / config / startup paths dangerous enough to classify
-        unsafe (ask with a specific reason) rather than unknown. Same
-        fnmatch + `~/`-expansion semantics as `_target_is_safe_write`.
-        Checked before the safe list so an entry here overrides a broader
-        safe glob (the ~/.claude/settings.json carve-out)."""
-        expanded = self._expand_home(target)
-        for pat in self.unsafe_write_targets:
-            pat_expanded = self._expand_home(pat)
-            if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
-                return True
-        return False
+        unsafe (ask with a specific reason) rather than unknown. Checked
+        before the safe list so an entry here overrides a broader safe
+        glob (the ~/.claude/settings.json carve-out)."""
+        return _path_matches_target_list(target, self.unsafe_write_targets)
 
     # The rule layer's function, not a copy of it. These two had identical
     # bodies and identical blind spots, so #128 was open in both places and
