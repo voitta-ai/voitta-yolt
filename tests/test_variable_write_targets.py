@@ -103,9 +103,10 @@ class UnreadableTargetCostsFriction(unittest.TestCase):
         classifier._redirect_write_target = (
             lambda node, src: UNEXTRACTABLE_WRITE_TARGET)
         try:
-            # `echo` alone is safe; the unreadable redirect must stop that.
+            # `echo` alone is safe; the unreadable redirect must stop that,
+            # and asks rather than going silent.
             self.assertEqual(
-                classifier.classify("echo hello > /tmp/ok")[0], "unknown")
+                classifier.classify("echo hello > /tmp/ok")[0], "unsafe")
         finally:
             classifier._redirect_write_target = original
 
@@ -134,8 +135,9 @@ class RedirectMustNotMaskTheCommand(unittest.TestCase):
         self.assertEqual(classify("rm -rf /tmp/x > $LOG"), "unsafe")
 
     def test_harmless_command_still_reports_the_redirect(self):
-        # The unknown verdict is still produced when nothing outranks it.
-        self.assertEqual(classify("echo hi > $LOG"), "unknown")
+        # A variable the line never assigns can name any file, so the
+        # redirect asks even when the command itself is harmless.
+        self.assertEqual(classify("echo hi > $LOG"), "unsafe")
 
     def test_protected_target_still_wins_over_a_safe_command(self):
         self.assertEqual(
@@ -184,8 +186,8 @@ class RedirectAndCommandBothReport(unittest.TestCase):
         self.assertNotIn(";", reason)
 
     def test_identical_reasons_are_not_repeated(self):
-        # `echo a > $X; echo b > $Y` produced the same sentence twice.
-        decision, reason = self._reason("echo a > $X; echo b > $Y")
+        # `echo a > ./x; echo b > ./y` produced the same sentence twice.
+        decision, reason = self._reason("echo a > ./x; echo b > ./y")
         self.assertEqual(decision, "unknown")
         self.assertEqual(reason.count("writes to a file via redirection"), 1)
 

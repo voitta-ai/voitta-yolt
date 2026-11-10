@@ -14,8 +14,10 @@ grammar removes the whole class.
 """
 
 import codecs
+import itertools
 import json
 import os
+import re
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
@@ -25,6 +27,7 @@ from tree_sitter import Language, Parser
 
 from rule_classifier import (
     _expand_home,
+    _is_unresolved_path,
     _path_matches_safe_write_targets,
     _path_matches_target_list,
     DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
@@ -52,6 +55,35 @@ _PYTHON_INTERPRETERS = {
 }
 
 _BASH_INTERPRETERS = {"bash", "sh"}
+
+_VAR_REF_RE = re.compile(
+    r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+# Expansions `_expand_home` resolves from the environment when the line
+# does not assign them itself.
+_ENV_PATH_VARS = {"HOME", "TMPDIR"}
+# Shell values that are always digits, so they cannot carry `/` or `..`
+# out of the directory a target names.
+_DIGIT_PARAMS_RE = re.compile(r"\$(?:[$!?#]|\{[$!?#]\})")
+_DIGIT_VARS = {"RANDOM", "PPID", "SECONDS", "LINENO", "UID", "EUID"}
+# Names the shell itself sets or reads (`read`, `cd`, `getopts`, word
+# splitting, ...): never resolved from an assignment on the line.
+_SHELL_MANAGED_VARS = {
+    "REPLY", "OPTARG", "OPTIND", "MAPFILE", "PWD", "OLDPWD", "IFS",
+    "CDPATH", "PATH", "COPROC", "PIPESTATUS", "FUNCNAME", "GROUPS", "_",
+}
+# Commands that can bind any variable out of sight of a static reading.
+_VAR_OPAQUE_COMMANDS = {"eval", "source", ".", "trap"}
+# Builtins that bind the variable named by an argument. Their arguments
+# must be plain words, or the name may be assembled where `_spelled`
+# cannot see it (`read F\OO`, `declare ${X}OO=...`).
+_VAR_BINDING_COMMANDS = {
+    "read", "mapfile", "readarray", "getopts", "unset", "printf", "let",
+    "select",
+}
+_PLAIN_WORD_RE = re.compile(r"^[A-Za-z0-9_%./:=+,@-]*$")
+_MAX_VAR_VALUES = 16
+_MAX_VAR_DEPTH = 8
+_MKTEMP_SAFE_FLAGS = {"-d", "-q", "-u", "--directory", "--quiet", "--dry-run"}
 
 _WRITE_REDIR_OPS = {">", ">>", "&>", "&>>", "1>", "1>>", "2>", "2>>",
                     ">|", ">&"}
@@ -81,6 +113,7 @@ class GrammarClassifier:
             bash_analyzer=self._bash_inline_analyzer,
         )
         self._parser = Parser(_BASH_LANG)
+        self._vars = None
 
     # --- Public API ---
 
@@ -100,8 +133,15 @@ class GrammarClassifier:
         if _depth == 0:
             self._cwd = self.cwd
 
-        decisions = []
-        self._walk(root, src, decisions, _depth)
+        # Each parse has its own variables: a `bash -c` body cannot see
+        # the outer line's assignments, and must not replace them.
+        outer_vars = self._vars
+        self._vars = self._scan_variables(root, src)
+        try:
+            decisions = []
+            self._walk(root, src, decisions, _depth)
+        finally:
+            self._vars = outer_vars
         if not decisions:
             return (DECISION_SAFE, "no commands")
         return aggregate_decisions(decisions)
@@ -164,13 +204,32 @@ class GrammarClassifier:
 
     def _walk_redirected(self, node, src, decisions, _depth):
         write_targets = []
-        unreadable_target = False
+        unresolved_target = None
         for c in self._file_redirects(node):
             t = self._redirect_write_target(c, src)
             if t is UNEXTRACTABLE_WRITE_TARGET:
-                unreadable_target = True
+                unresolved_target = self._slice(c.children[-1], src)
             elif t is not None:
-                write_targets.append(t)
+                resolved = self._resolve_vars(t, c.start_byte)
+                if resolved is None:
+                    unresolved_target = t
+                else:
+                    write_targets.extend(resolved)
+        # A target this cannot resolve to a path -- a variable the line
+        # does not assign, a substitution, a node shape nobody anticipated
+        # -- can name any file, protected ones included. Unknown would be
+        # silence in the hook, so it asks.
+        if unresolved_target is None:
+            unresolved_target = next(
+                (t for t in write_targets if _is_unresolved_path(t)), None)
+        if unresolved_target is not None:
+            decisions.append(
+                (DECISION_UNSAFE,
+                 "writes to a path that cannot be resolved statically "
+                 "'{}' via redirection".format(unresolved_target)),
+            )
+            write_targets = [
+                t for t in write_targets if not _is_unresolved_path(t)]
         # Evaluate EVERY write redirect with unsafe > unknown > safe
         # precedence. A safe first redirect must not mask a later unsafe or
         # unknown target -- e.g. `echo x > /tmp/ok > ~/.bashrc` and
@@ -202,7 +261,7 @@ class GrammarClassifier:
         # is why it was invisible, but "writes to a protected path" and
         # "could not be classified" are contradictory claims about the same
         # token.
-        if unreadable_target or any(
+        if any(
             not self._target_is_safe_write(t)
             and not self._target_is_unsafe_write(t)
             for t in write_targets
@@ -242,6 +301,7 @@ class GrammarClassifier:
         argv = self._argv_from_command(node, src)
         if not argv:
             return (DECISION_SAFE, "empty command")
+        argv = [self._resolve_arg(a, node.start_byte) for a in argv]
 
         cmd_name = os.path.basename(argv[0])
 
@@ -572,6 +632,268 @@ class GrammarClassifier:
             return codecs.decode(body, "unicode_escape")
         except (UnicodeDecodeError, ValueError):
             return body
+
+    # --- Variables ---
+    #
+    # A write target that holds `$NAME` is judged on the values the line
+    # itself gives NAME, and only in one shape: NAME is spelled exactly once
+    # on the line other than as `$NAME` / `${NAME}`, and that once is a
+    # literal assignment at the top level (or a `for NAME in` over literal
+    # words, for uses in its body). Any other way a name can be bound --
+    # `read`, `unset`, `printf -v`, `declare -n`, `${NAME:=...}`, a trap, a
+    # wrapped builtin -- spells it a second time and leaves it unresolved,
+    # which asks. Guessing which of several bindings is in force is what
+    # this deliberately does not do.
+
+    def _scan_variables(self, root, src):
+        """`{"text": source, "opaque": bool, "nodes": {name: node}}` for
+        `_resolve_vars`; `nodes` holds the single binding node per name."""
+        text = src.decode("utf-8", "replace")
+        scope = {"text": text, "opaque": False, "nodes": {}, "memo": {}}
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type == "command":
+                if self._may_bind_unseen(n, src):
+                    scope["opaque"] = True
+            elif n.type == "declaration_command":
+                for c in n.children[1:]:
+                    if c.type == "variable_assignment":
+                        first = c.children[0] if c.children else None
+                        if first is None or first.type != "variable_name":
+                            scope["opaque"] = True
+                    elif c.type not in ("variable_name", "word") or not \
+                            _PLAIN_WORD_RE.match(self._slice(c, src)):
+                        scope["opaque"] = True
+            elif n.type == "variable_assignment" and self._is_top_level_assignment(n):
+                first = n.children[0] if n.children else None
+                if first is not None and first.type == "variable_name" \
+                        and "=" in [c.type for c in n.children]:
+                    scope["nodes"].setdefault(self._slice(first, src), []).append(n)
+            elif n.type == "for_statement":
+                c = self._first_child(n, "variable_name")
+                if c is not None:
+                    scope["nodes"].setdefault(self._slice(c, src), []).append(n)
+        return scope
+
+    def _may_bind_unseen(self, node, src):
+        """Whether this command could bind a variable under a name the
+        line never spells as one token: `eval` / `source` / `trap` in any
+        spelling, a command whose name is not a plain word, or a binding
+        builtin with an argument that is not a plain word."""
+        words = [c for c in node.children if c.type != "variable_assignment"]
+        if not words:
+            return False
+        head = words[0]
+        head_text = self._slice(head, src)
+        if head.type != "command_name" or not _PLAIN_WORD_RE.match(head_text):
+            return True
+        names = [os.path.basename(head_text)]
+        args = words[1:]
+        if names[0] in ("builtin", "command") and args:
+            names.append(os.path.basename(self._slice(args[0], src)))
+            args = args[1:]
+        if any(n in _VAR_OPAQUE_COMMANDS for n in names):
+            return True
+        if names[-1] in _VAR_BINDING_COMMANDS:
+            if names[-1] == "printf" and not any(
+                    re.match(r"^-[A-Za-z]*v", self._slice(a, src)) for a in args):
+                return False
+            return any(a.type != "word" or not _PLAIN_WORD_RE.match(self._slice(a, src))
+                       for a in args)
+        return False
+
+    @staticmethod
+    def _is_top_level_assignment(node):
+        """A statement of its own at the top of the line, in the
+        foreground: `NAME=v;` or `export NAME=v;`. Not a prefix (`NAME=v
+        cmd`), not in a chain, branch, loop, pipeline, subshell, function,
+        and not followed by `&`."""
+        n = node
+        if n.parent is not None and n.parent.type == "declaration_command":
+            keyword = n.parent.children[0].type if n.parent.children else ""
+            if keyword != "export" or any(
+                    c.type == "word" for c in n.parent.children):
+                return False
+            n = n.parent
+        if n.parent is None or n.parent.type != "program":
+            return False
+        nxt = n.next_sibling
+        return nxt is None or nxt.type != "&"
+
+    def _for_words(self, node, src):
+        """The values a `for NAME in WORDS` loop binds: each literal word,
+        or None when the list is absent (positional parameters) or any word
+        expands, globs or substitutes."""
+        words = []
+        seen_in = False
+        for c in node.children:
+            if c.type == "in":
+                seen_in = True
+            elif c.type in (";", "do_group", "\n"):
+                break
+            elif seen_in:
+                if c.type == "word" and not any(ch in "*?[{$`\\" for ch in self._slice(c, src)):
+                    words.append(self._slice(c, src))
+                elif c.type == "raw_string":
+                    words.append(self._slice(c, src)[1:-1])
+                else:
+                    return None
+        return words if seen_in and words else None
+
+    def _assignment_value(self, node, src):
+        """The literal text an assignment stores, `$NAME` references kept
+        for `_resolve_vars`, or None when it is not literal."""
+        t = node.type
+        if t == "command_substitution":
+            return self._mktemp_value(node, src)
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if n.type in ("command_substitution", "process_substitution",
+                          "arithmetic_expansion", "brace_expression"):
+                return None
+            stack.extend(n.children)
+        if t in ("word", "simple_expansion", "expansion", "number"):
+            return self._slice(node, src)
+        if t == "string":
+            return self._reconstruct_string(node, src)
+        if t == "raw_string":
+            return self._slice(node, src)[1:-1]
+        if t == "concatenation":
+            return self._unquote_concatenation(node, src)
+        return None
+
+    def _mktemp_value(self, node, src):
+        """A stand-in for what `$(mktemp ...)` prints: a fresh name under
+        $TMPDIR (or /tmp). None for any form that can place it elsewhere --
+        a template argument, `-p DIR`, `--tmpdir`."""
+        cmds = [c for c in node.children if c.type == "command"]
+        if len(cmds) != 1 or len(node.named_children) != 1:
+            return None
+        argv = self._argv_from_command(cmds[0], src)
+        if not argv or os.path.basename(argv[0]) != "mktemp":
+            return None
+        args = argv[1:]
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in _MKTEMP_SAFE_FLAGS:
+                i += 1
+            elif a == "-t" and i + 1 < len(args) and "/" not in args[i + 1]:
+                i += 2
+            else:
+                return None
+        base = os.environ.get("TMPDIR") or "/tmp"
+        return base.rstrip("/") + "/mktemp.XXXXXXXX"
+
+    def _spelled(self, name):
+        """How often the line spells `name` other than as `$name` or
+        `${name}` -- every place it could be bound, and then some."""
+        memo = self._vars["memo"]
+        if ("#", name) not in memo:
+            text = self._vars["text"]
+            word = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name)
+                              + r"(?![A-Za-z0-9_])")
+            refs = re.compile(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])|\$\{"
+                              + re.escape(name) + r"\}")
+            # `printf -vNAME` glues the name to the option.
+            glued = re.compile(r"-[A-Za-z]*v[\"']?" + re.escape(name)
+                               + r"(?![A-Za-z0-9_])")
+            memo[("#", name)] = (len(word.findall(text))
+                                 - len(refs.findall(text))
+                                 + len(glued.findall(text)))
+        return memo[("#", name)]
+
+    def _name_values(self, name, pos, depth, src):
+        """The values `name` may hold at byte `pos`, or None."""
+        scope = self._vars
+        if name in _SHELL_MANAGED_VARS or scope["opaque"]:
+            return None
+        nodes = scope["nodes"].get(name, [])
+        if self._spelled(name) != 1 or len(nodes) != 1:
+            return None
+        node = nodes[0]
+        if node.type == "for_statement":
+            body = self._first_child(node, "do_group")
+            if body is None or not (body.start_byte <= pos < body.end_byte):
+                return None
+            return self._for_words(node, src)
+        if node.end_byte > pos:
+            return None
+        rest = node.children[2:]
+        value = self._assignment_value(rest[0], src) if rest else ""
+        if value is None:
+            return None
+        return self._resolve_vars(value, node.start_byte, depth + 1)
+
+    def _resolve_vars(self, text, pos, _depth=0):
+        """Every text `text` can expand to at byte `pos`, each `$NAME` the
+        line assigns (see above) replaced by its values. None when a name
+        cannot be resolved. $HOME and $TMPDIR the line never spells stay
+        for `_expand_home`; any other expansion stays as written, and the
+        matchers treat it as unresolvable."""
+        scope = self._vars
+        if scope is None or _depth > _MAX_VAR_DEPTH:
+            return None
+        src = scope["text"].encode("utf-8")
+        text = _DIGIT_PARAMS_RE.sub("0", text)
+        if (text == "~" or text.startswith("~/")) and self._spelled("HOME"):
+            text = "$HOME" + text[1:]
+        names = []
+        for m in _VAR_REF_RE.finditer(text):
+            name = m.group(1) or m.group(2)
+            if name not in names:
+                names.append(name)
+        if not names:
+            return [text]
+        choices = []
+        for name in names:
+            key = (name, pos, _depth)
+            if key not in scope["memo"]:
+                if name in _ENV_PATH_VARS and not self._spelled(name):
+                    values = [None]
+                elif name in _DIGIT_VARS and not self._spelled(name):
+                    values = ["0"]
+                else:
+                    values = self._name_values(name, pos, _depth, src)
+                scope["memo"][key] = values
+            values = scope["memo"][key]
+            if values is None:
+                return None
+            choices.append(values)
+        out = []
+        for combo in itertools.product(*choices):
+            if len(out) >= _MAX_VAR_VALUES:
+                return None
+            subst = dict(zip(names, combo))
+
+            def repl(m):
+                value = subst[m.group(1) or m.group(2)]
+                return m.group(0) if value is None else value
+            out.append(_VAR_REF_RE.sub(repl, text))
+        return out
+
+    def _resolve_arg(self, arg, pos):
+        """`arg` with the line's own variables substituted, when every
+        value is a plain word; several values come back as one brace list,
+        which the write-target matchers expand. Otherwise `arg` unchanged.
+        Never under a changed IFS, which would split the value."""
+        if "$" not in arg and not arg.startswith("~"):
+            return arg
+        if self._vars is None or "IFS" in self._vars["text"]:
+            return arg
+        resolved = self._resolve_vars(arg, pos)
+        if not resolved:
+            return arg
+        if any(ch.isspace() or ch in "*?[{},"
+               for value in resolved for ch in value):
+            return arg
+        values = list(dict.fromkeys(resolved))
+        if len(values) == 1:
+            return values[0]
+        return "{" + ",".join(values) + "}"
 
     def _target_is_safe_write(self, target):
         """Match `target` against rules/shell.json#safe_write_targets. The
