@@ -513,10 +513,18 @@ def _expand_home(path):
             if path.startswith(prefix):
                 path = home + "/" + path[len(prefix):]
                 break
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        for prefix in ("$TMPDIR/", "${TMPDIR}/"):
+            if path.startswith(prefix):
+                path = tmpdir.rstrip("/") + "/" + path[len(prefix):]
+                break
     # A trailing slash distinguishes a directory target from a file, and
     # `~/.claude/skills/` should still match `~/.claude/skills/*`.
     trailing = "/" if path.endswith("/") and len(path) > 1 else ""
-    retval = os.path.normpath(path) + trailing
+    # POSIX normpath keeps a leading `//`, but Linux and macOS both read it
+    # as `/`, and `HOME=/` makes `~/etc/hosts` spell it that way.
+    retval = re.sub(r"^/{2,}", "/", os.path.normpath(path)) + trailing
     return retval
 
 
@@ -570,6 +578,23 @@ def _globs_may_overlap(a, b):
             and (a_tail.endswith(b_tail) or b_tail.endswith(a_tail)))
 
 
+def _is_unresolved_path(target):
+    """Whether `target` still holds an expansion or substitution after the
+    environment paths `_expand_home` knows are resolved. Such a path can
+    name any file, so the deny check treats it as a match and the safe
+    check never passes it."""
+    expanded = _expand_home(target)
+    return ("$" in expanded or "`" in expanded
+            or SUBSTITUTION_PLACEHOLDER in expanded)
+
+
+def _write_target_note(target):
+    """Why a write argument matched the deny check."""
+    if _is_unresolved_path(target):
+        return "path cannot be resolved statically"
+    return "protected path"
+
+
 def _path_matches_target_list(target, patterns):
     """Return True if `target` may name a path matching any glob in
     `patterns`: the deny-list check, shared by redirect writes and command
@@ -580,7 +605,7 @@ def _path_matches_target_list(target, patterns):
     if not patterns:
         return False
     spellings, complete = _target_spellings(target)
-    if not complete:
+    if not complete or _is_unresolved_path(target):
         return True
     for spelling in spellings:
         expanded = _expand_home(spelling)
@@ -608,7 +633,7 @@ def _path_matches_safe_write_targets(target, safe_write_targets):
         return False
     for spelling in spellings:
         expanded = _expand_home(spelling)
-        if "$" in expanded or "`" in expanded:
+        if _is_unresolved_path(expanded):
             return False
         if not any(fnmatch(expanded, _expand_home(pat))
                    for pat in safe_write_targets):
@@ -696,14 +721,14 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
             if value is not None and _path_matches_target_list(
                 value, unsafe_write_targets
             ):
-                retval = "{} {} (protected path)".format(flag, value)
+                retval = "{} {} ({})".format(flag, value, _write_target_note(value))
                 return retval
 
         if flag in write_flag_value_targets:
             value = inline_value if inline_value is not None else next_arg
             if value is not None:
                 if _path_matches_target_list(value, unsafe_write_targets):
-                    retval = "{} {} (protected path)".format(flag, value)
+                    retval = "{} {} ({})".format(flag, value, _write_target_note(value))
                     return retval
                 if not _path_matches_safe_write_targets(value, safe_write_targets):
                     retval = "{} {}".format(flag, value)
@@ -765,7 +790,7 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
                     if value and _path_matches_target_list(
                         value, unsafe_write_targets
                     ):
-                        return "{}{} (protected path)".format(pref, value)
+                        return "{}{} ({})".format(pref, value, _write_target_note(value))
 
         positionals = [a for a in cmd_args if not a.startswith("-")]
         targets = []
@@ -775,7 +800,7 @@ def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
             targets = [positionals[-1]]
         for value in targets:
             if _path_matches_target_list(value, unsafe_write_targets):
-                return "{} (protected path)".format(value)
+                return "{} ({})".format(value, _write_target_note(value))
 
     return None
 
