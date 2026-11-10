@@ -520,27 +520,100 @@ def _expand_home(path):
     return retval
 
 
+_BRACE_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+# `{a..z}` / `{1..9}`: matched as a wildcard rather than enumerated.
+_BRACE_SEQ_RE = re.compile(r"\{[^{},]*\.\.[^{},]*\}")
+_GLOB_CHARS = frozenset("*?[")
+_MAX_SPELLINGS = 64
+
+
+def _target_spellings(target):
+    """The paths a write target may name, after the shell's quote removal
+    and brace expansion, as `(spellings, complete)`. Brace sequences become
+    `*`; glob characters stay for the caller. `complete` is False when the
+    expansion hit the cap, so the spellings are not all of them."""
+    if "\\" in target:
+        target = re.sub(r"\\(.)", r"\1", target)
+    target = _BRACE_SEQ_RE.sub("*", target)
+    out = [target]
+    while any(_BRACE_RE.search(t) for t in out):
+        expanded = []
+        for t in out:
+            m = _BRACE_RE.search(t)
+            if m is None:
+                expanded.append(t)
+                continue
+            for alt in m.group(1).split(","):
+                expanded.append(t[:m.start()] + alt + t[m.end():])
+        if len(expanded) > _MAX_SPELLINGS:
+            return (out, False)
+        out = expanded
+    return (out, True)
+
+
+def _glob_literal_ends(pattern):
+    """The literal text before the first and after the last glob character."""
+    idx = [i for i, ch in enumerate(pattern) if ch in _GLOB_CHARS]
+    if not idx:
+        return (pattern, pattern)
+    return (pattern[:idx[0]], pattern[idx[-1] + 1:])
+
+
+def _globs_may_overlap(a, b):
+    """Whether some path could match both globs. Two globs that share a
+    path must agree on their literal start and end, so this is a sound
+    over-approximation: it may say yes for a pair that cannot overlap,
+    never no for a pair that can."""
+    a_head, a_tail = _glob_literal_ends(a)
+    b_head, b_tail = _glob_literal_ends(b)
+    return ((a_head.startswith(b_head) or b_head.startswith(a_head))
+            and (a_tail.endswith(b_tail) or b_tail.endswith(a_tail)))
+
+
 def _path_matches_target_list(target, patterns):
-    """Return True if `target` matches any glob in `patterns` under fnmatch
-    semantics, comparing both the raw token and its `~/`-expanded form.
-    Shared by the safe-write and unsafe-write target checks so redirect
-    writes and command write-args match identically."""
+    """Return True if `target` may name a path matching any glob in
+    `patterns`: the deny-list check, shared by redirect writes and command
+    write-args. Every spelling the shell could resolve the target to is
+    tried, raw and `~/`-expanded; a target that is itself a glob
+    (`~/.bash?c`) matches when it could name a listed path. An expansion
+    too large to enumerate counts as a match."""
     if not patterns:
         return False
-    expanded = _expand_home(target)
-    for pat in patterns:
-        pat_expanded = _expand_home(pat)
-        if fnmatch(target, pat) or fnmatch(expanded, pat_expanded):
-            return True
+    spellings, complete = _target_spellings(target)
+    if not complete:
+        return True
+    for spelling in spellings:
+        expanded = _expand_home(spelling)
+        is_glob = any(ch in _GLOB_CHARS for ch in spelling)
+        for pat in patterns:
+            pat_expanded = _expand_home(pat)
+            if fnmatch(spelling, pat) or fnmatch(expanded, pat_expanded):
+                return True
+            if is_glob and _globs_may_overlap(expanded, pat_expanded):
+                return True
     return False
 
 
 def _path_matches_safe_write_targets(target, safe_write_targets):
-    """Return True if `target` matches any of `safe_write_targets`. Mirrors
-    `grammar_classifier._target_is_safe_write` so flag-value writes
-    (e.g. `find -fprint FILE`) and `> file` redirects use the same white
-    list."""
-    return _path_matches_target_list(target, safe_write_targets)
+    """Return True if every spelling of `target` matches `safe_write_targets`.
+    Shared by flag-value writes (e.g. `find -fprint FILE`) and `> file`
+    redirects. Only the normalized spelling is matched: the raw one let
+    `/tmp/../x` pass as a `/tmp/*` write. A spelling with an unexpanded
+    variable or substitution is never safe, since its value can carry
+    `../`."""
+    if not safe_write_targets:
+        return False
+    spellings, complete = _target_spellings(target)
+    if not complete:
+        return False
+    for spelling in spellings:
+        expanded = _expand_home(spelling)
+        if "$" in expanded or "`" in expanded:
+            return False
+        if not any(fnmatch(expanded, _expand_home(pat))
+                   for pat in safe_write_targets):
+            return False
+    return True
 
 
 def check_unsafe_flags(cmd_args, spec, safe_write_targets=None,
@@ -1325,6 +1398,32 @@ class RuleClassifier:
         return (DECISION_UNKNOWN, "{} {}: no rule".format(label, sub))
 
     def classify_delegate_to_argument(self, cmd_name, cmd_args, spec, _depth):
+        readings = self.delegate_starts(cmd_name, cmd_args, spec)
+        if readings is None:
+            return (DECISION_SAFE, "command -v: lookup")
+        starts, complete = readings
+        if not starts:
+            return (DECISION_UNKNOWN, "{}: no wrapped command".format(cmd_name))
+
+        decisions = [
+            self.classify_tokens(cmd_args[s:], _depth=_depth + 1)
+            for s in starts
+        ]
+        if not complete:
+            decisions.append(
+                (DECISION_UNKNOWN, "{}: no wrapped command".format(cmd_name)))
+        d, r = aggregate_decisions(decisions)
+        return (d, "{} wraps: {}".format(cmd_name, r))
+
+    @staticmethod
+    def delegate_starts(cmd_name, cmd_args, spec):
+        """Every index in `cmd_args` where the wrapped command may start.
+
+        Returns None for `command -v` / `-V`, which runs nothing, else
+        `(starts, complete)`; `complete` is False when the scan ran off the
+        end, so one reading is "no wrapped command". The policy layer uses
+        the same readings, so a wrapper hides a command from neither.
+        """
         skip_first_positional = spec.get("_skip_first_positional", False)
 
         # `command -v X` / `command -V X` print where X resolves and run
@@ -1336,7 +1435,7 @@ class RuleClassifier:
                 if not _COMMAND_OPTS_RE.match(tok):
                     break
                 if "v" in tok or "V" in tok:
-                    return (DECISION_SAFE, "command -v: lookup")
+                    return None
 
         # Where the wrapped command starts depends on which of the wrapper's
         # options take a value, and this table does not know that per
@@ -1385,18 +1484,7 @@ class RuleClassifier:
 
         if i < len(cmd_args):
             starts.append(i)
-        if not starts:
-            return (DECISION_UNKNOWN, "{}: no wrapped command".format(cmd_name))
-
-        decisions = [
-            self.classify_tokens(cmd_args[s:], _depth=_depth + 1)
-            for s in starts
-        ]
-        if i >= len(cmd_args):
-            decisions.append(
-                (DECISION_UNKNOWN, "{}: no wrapped command".format(cmd_name)))
-        d, r = aggregate_decisions(decisions)
-        return (d, "{} wraps: {}".format(cmd_name, r))
+        return (starts, i < len(cmd_args))
 
     def classify_aws(self, cmd_args, spec):
         service, operation, _ = parse_aws_positionals(cmd_args)
