@@ -59,7 +59,9 @@ _BASH_INTERPRETERS = {"bash", "sh"}
 _VAR_REF_RE = re.compile(
     r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 # Expansions `_expand_home` resolves from the environment when the line
-# does not assign them itself.
+# never spells them. A line that does spell one leaves it unresolved: which
+# binding is in force at the write (an assignment, `unset`, `read`, ...) is
+# not something this reads.
 _ENV_PATH_VARS = {"HOME", "TMPDIR"}
 # Shell values that are always digits, so they cannot carry `/` or `..`
 # out of the directory a target names.
@@ -78,8 +80,11 @@ _VAR_OPAQUE_COMMANDS = {"eval", "source", ".", "trap"}
 # cannot see it (`read F\OO`, `declare ${X}OO=...`).
 _VAR_BINDING_COMMANDS = {
     "read", "mapfile", "readarray", "getopts", "unset", "printf", "let",
-    "select",
+    "select", "export", "declare", "typeset", "local", "readonly",
 }
+# Prefixes that run the next word as the command (`builtin unset X`,
+# `time read X`); their own options are skipped.
+_VAR_PREFIX_COMMANDS = {"builtin", "command", "time"}
 _PLAIN_WORD_RE = re.compile(r"^[A-Za-z0-9_%./:=+,@-]*$")
 _MAX_VAR_VALUES = 16
 _MAX_VAR_DEPTH = 8
@@ -657,6 +662,10 @@ class GrammarClassifier:
             if n.type == "command":
                 if self._may_bind_unseen(n, src):
                     scope["opaque"] = True
+            elif n.type == "unset_command":
+                if any(c.type != "word" or not _PLAIN_WORD_RE.match(self._slice(c, src))
+                       for c in n.children[1:]):
+                    scope["opaque"] = True
             elif n.type == "declaration_command":
                 for c in n.children[1:]:
                     if c.type == "variable_assignment":
@@ -691,7 +700,13 @@ class GrammarClassifier:
             return True
         names = [os.path.basename(head_text)]
         args = words[1:]
-        if names[0] in ("builtin", "command") and args:
+        while names[-1] in _VAR_PREFIX_COMMANDS:
+            while args and self._slice(args[0], src).startswith("-"):
+                args = args[1:]
+            if not args:
+                break
+            if args[0].type != "word" or not _PLAIN_WORD_RE.match(self._slice(args[0], src)):
+                return True
             names.append(os.path.basename(self._slice(args[0], src)))
             args = args[1:]
         if any(n in _VAR_OPAQUE_COMMANDS for n in names):
@@ -785,6 +800,8 @@ class GrammarClassifier:
                 i += 2
             else:
                 return None
+        if not self._env_var_ok("TMPDIR"):
+            return None
         base = os.environ.get("TMPDIR") or "/tmp"
         return base.rstrip("/") + "/mktemp.XXXXXXXX"
 
@@ -805,6 +822,11 @@ class GrammarClassifier:
                                  - len(refs.findall(text))
                                  + len(glued.findall(text)))
         return memo[("#", name)]
+
+    def _env_var_ok(self, name):
+        """Whether `$name` (HOME, TMPDIR) can be left for `_expand_home`
+        to read from the environment: nothing on the line can rebind it."""
+        return not self._spelled(name) and not self._vars["opaque"]
 
     def _name_values(self, name, pos, depth, src):
         """The values `name` may hold at byte `pos`, or None."""
@@ -831,16 +853,19 @@ class GrammarClassifier:
     def _resolve_vars(self, text, pos, _depth=0):
         """Every text `text` can expand to at byte `pos`, each `$NAME` the
         line assigns (see above) replaced by its values. None when a name
-        cannot be resolved. $HOME and $TMPDIR the line never spells stay
-        for `_expand_home`; any other expansion stays as written, and the
-        matchers treat it as unresolvable."""
+        cannot be resolved. $HOME and $TMPDIR (and `~`) stay for
+        `_expand_home` when the line never spells them and nothing on it
+        can bind a name out of sight; otherwise they are unresolved. Any
+        other expansion stays as written, and the matchers treat it as
+        unresolvable."""
         scope = self._vars
         if scope is None or _depth > _MAX_VAR_DEPTH:
             return None
         src = scope["text"].encode("utf-8")
         text = _DIGIT_PARAMS_RE.sub("0", text)
-        if (text == "~" or text.startswith("~/")) and self._spelled("HOME"):
-            text = "$HOME" + text[1:]
+        if text == "~" or text.startswith("~/"):
+            if not self._env_var_ok("HOME"):
+                return None
         names = []
         for m in _VAR_REF_RE.finditer(text):
             name = m.group(1) or m.group(2)
@@ -852,8 +877,8 @@ class GrammarClassifier:
         for name in names:
             key = (name, pos, _depth)
             if key not in scope["memo"]:
-                if name in _ENV_PATH_VARS and not self._spelled(name):
-                    values = [None]
+                if name in _ENV_PATH_VARS:
+                    values = [None] if self._env_var_ok(name) else None
                 elif name in _DIGIT_VARS and not self._spelled(name):
                     values = ["0"]
                 else:
