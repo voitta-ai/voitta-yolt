@@ -329,3 +329,6 @@
 {"cmd": "bash --version", "min": "unknown", "max": "unknown", "note": "prints and exits"}
 {"cmd": "source ~/.bash_profile", "min": "unknown", "max": "unknown", "note": "protected shell profile; must not ask"}
 {"cmd": ". ~/.zshrc", "min": "unknown", "max": "unknown", "note": "protected shell profile; must not ask"}
+{"cmd": "echo x >> ~/.bashrc; source ~/.bashrc", "min": "unsafe", "note": "a write to the profile on the same line still asks"}
+{"cmd": "HOME=/tmp/h; source ~/.bashrc", "min": "unsafe", "note": "profile path through a rebound HOME"}
+{"cmd": "source ~/.bashrc; rm -rf ~/work", "min": "unsafe", "note": "the profile exemption covers only the source itself"}
