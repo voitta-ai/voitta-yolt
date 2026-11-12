@@ -103,3 +103,27 @@ grep -c "<a symbol from the new code>" \
 The directory under `.../yolt/` should be named for the new version. The
 clone under `~/.claude/plugins/marketplaces/voitta-yolt/` updating is *not*
 sufficient — that is the fetched source, not the extracted install.
+
+## Verdicts never get weaker by accident
+
+Four rules, adopted after 2.11.0 and 2.12.0 each loosened verdicts that a
+log replay reported as unchanged. Real logs contain no adversarial
+spellings, so a log replay cannot show that nothing got weaker.
+
+1. **Monotonic against the previous release.** The `probes` workflow
+   replays `tests/fixtures/probes.jsonl` through the PR's build and the
+   latest `v*` tag. It fails when a verdict is below the probe's `min` or
+   weaker than the tag's (deny > unsafe > unknown). A deliberate loosening
+   needs the `verdict-loosening` label, and each loosened command goes in
+   the PR description, which becomes the release note.
+2. **The corpus holds adversarial probes.** Each confirmed finding from a
+   review is added as a probe once its fix ships. Probes for open gaps
+   would publish the bypass, so they are kept in a private repo and move
+   here, with their fix, in the PR that closes the gap.
+3. **Resolution fails closed.** Anything that resolves a value, and so can
+   make a verdict more lenient (variables, `~`/HOME, TMPDIR, a tracked
+   cwd), resolves only when exactly one binding is provable. On any doubt
+   the value stays unresolved, which asks.
+4. **Release-note claims are tested.** Each behavior a PR title or
+   description claims ("git is denied through `env`") has a probe. Name
+   the specific forms; "through wrappers" is not a claim a probe can back.
