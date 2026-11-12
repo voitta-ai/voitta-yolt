@@ -22,6 +22,7 @@ Settings I/O (`load_shell_rules`, `load_allow_patterns`, `match_allow_patterns`)
 also lives here for symmetry.
 """
 
+import contextvars
 import json
 import os
 import re
@@ -38,6 +39,13 @@ DECISION_UNKNOWN = "unknown"
 DECISION_DENY = "deny"
 
 SUBSTITUTION_PLACEHOLDER = "__YOLT_SUB__"
+
+# The directories a relative write target may be relative to, set by the
+# grammar walker as it follows `cd`: a tuple of absolute paths, CWD_UNRESOLVED
+# once a `cd` it cannot resolve has run, or None when nothing is known (a
+# relative target is then matched as written).
+CWD_UNRESOLVED = "unresolved"
+WRITE_CWDS = contextvars.ContextVar("yolt_write_cwds", default=None)
 
 # Reason marker for an inline `python3 -c` script the static analyzer could
 # not parse. A parse bail is not evidence of a destructive call, so
@@ -588,9 +596,16 @@ def _is_unresolved_path(target):
             or SUBSTITUTION_PLACEHOLDER in expanded)
 
 
+def _is_relative_path(spelling):
+    return bool(spelling) and spelling[0] not in "/~$" \
+        and SUBSTITUTION_PLACEHOLDER not in spelling
+
+
 def _write_target_note(target):
     """Why a write argument matched the deny check."""
-    if _is_unresolved_path(target):
+    if _is_unresolved_path(target) or (
+            WRITE_CWDS.get() == CWD_UNRESOLVED
+            and _is_relative_path(target)):
         return "path cannot be resolved statically"
     return "protected path"
 
@@ -607,6 +622,15 @@ def _path_matches_target_list(target, patterns):
     spellings, complete = _target_spellings(target)
     if not complete or _is_unresolved_path(target):
         return True
+    cwds = WRITE_CWDS.get()
+    if cwds is not None:
+        # A relative target names a file under whichever directory the
+        # command runs in; every one the line may have moved to is tried.
+        relative = [sp for sp in spellings if _is_relative_path(sp)]
+        if relative and cwds == CWD_UNRESOLVED:
+            return True
+        spellings = [sp for sp in spellings if sp not in relative] + [
+            os.path.join(cwd, sp) for sp in relative for cwd in cwds]
     for spelling in spellings:
         expanded = _expand_home(spelling)
         is_glob = any(ch in _GLOB_CHARS for ch in spelling)
