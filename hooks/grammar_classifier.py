@@ -907,11 +907,13 @@ class GrammarClassifier:
         Never under a changed IFS, which would split the value."""
         if "$" not in arg and not arg.startswith("~"):
             return arg
-        if self._vars is None or "IFS" in self._vars["text"]:
+        if self._vars is None:
             return arg
-        resolved = self._resolve_vars(arg, pos)
+        resolved = None
+        if "IFS" not in self._vars["text"]:
+            resolved = self._resolve_vars(arg, pos)
         if not resolved:
-            return arg
+            return self._mask_rebound_env(arg)
         if any(ch.isspace() or ch in "*?[{},"
                for value in resolved for ch in value):
             return arg
@@ -919,6 +921,22 @@ class GrammarClassifier:
         if len(values) == 1:
             return values[0]
         return "{" + ",".join(values) + "}"
+
+    def _mask_rebound_env(self, arg):
+        """`arg` with each HOME / TMPDIR reference (and a leading `~`) the
+        line may rebind replaced by the substitution placeholder, so the
+        rule layer reads it as unresolved instead of expanding it from the
+        environment."""
+        if arg.startswith("~") and (arg == "~" or arg.startswith("~/")) \
+                and not self._env_var_ok("HOME"):
+            arg = SUBSTITUTION_PLACEHOLDER + arg[1:]
+
+        def repl(m):
+            name = m.group(1) or m.group(2)
+            if name in _ENV_PATH_VARS and not self._env_var_ok(name):
+                return SUBSTITUTION_PLACEHOLDER
+            return m.group(0)
+        return _VAR_REF_RE.sub(repl, arg)
 
     def _target_is_safe_write(self, target):
         """Match `target` against rules/shell.json#safe_write_targets. The
