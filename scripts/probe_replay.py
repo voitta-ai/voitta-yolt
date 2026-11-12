@@ -3,7 +3,9 @@
 verdict is below its floor, or weaker than the base build's verdict.
 
 Each line of the corpus is {"cmd", "min", "note"}. `min` is the weakest
-verdict the command may get, ordered deny > unsafe > unknown. The CLI never
+verdict the command may get, ordered deny > unsafe > unknown. An optional
+`max` is the strongest it may get: it keeps a rule that classifies a
+benign shape from silently turning into one that asks for everything. The CLI never
 prints `safe`, so a `safe` verdict is a failure too.
 
 The corpus holds only gaps that are already fixed. A probe for an open gap
@@ -90,22 +92,26 @@ def main():
         head = run(args.head, repo, cmds)
         base = run(args.base, repo, cmds) if args.base else {}
 
-    below, looser = [], []
+    below, above, looser = [], [], []
     for p in probes:
         got = head[p["cmd"]]
         if RANK.get(got, 0) < RANK[p["min"]]:
             below.append((p, got))
+        if "max" in p and RANK.get(got, 99) > RANK[p["max"]]:
+            above.append((p, got))
         prev = base.get(p["cmd"])
         if prev in RANK and RANK.get(got, 0) < RANK[prev]:
             looser.append((p, prev, got))
 
     for p, got in below:
         print("BELOW FLOOR  {} (min {}): {}".format(got, p["min"], short(p["cmd"])))
+    for p, got in above:
+        print("ABOVE CEILING  {} (max {}): {}".format(got, p["max"], short(p["cmd"])))
     for p, prev, got in looser:
         print("LOOSER  {} -> {}: {}".format(prev, got, short(p["cmd"])))
-    print("{} probes; {} below floor; {} looser than base".format(
-        len(probes), len(below), len(looser)))
-    if below or (looser and not args.allow_loosening):
+    print("{} probes; {} below floor; {} above ceiling; {} looser than base".format(
+        len(probes), len(below), len(above), len(looser)))
+    if below or above or (looser and not args.allow_loosening):
         sys.exit(1)
 
 

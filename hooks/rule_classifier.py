@@ -596,6 +596,21 @@ def _is_unresolved_path(target):
             or SUBSTITUTION_PLACEHOLDER in expanded)
 
 
+def shell_inline_index(args):
+    """Index in a shell's `args` of the option carrying `-c`, alone or in a
+    cluster (`-lc`), or None. Only leading options count: after the first
+    operand, the script file, `-c` is an argument to that script."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--" or len(a) < 2 or a[0] not in "-+":
+            return None
+        if a[0] == "-" and a[1] != "-" and "c" in a[1:]:
+            return i
+        i += 2 if a[1] != "-" and ("o" in a[1:] or "O" in a[1:]) else 1
+    return None
+
+
 def _is_relative_path(spelling):
     return bool(spelling) and spelling[0] not in "/~$" \
         and SUBSTITUTION_PLACEHOLDER not in spelling
@@ -1233,7 +1248,19 @@ class RuleClassifier:
         read_script_file = spec.get("read_script_file", False)
 
         inline_code = None
-        if inline_flag and inline_flag in cmd_args:
+        if delegate == "bash":
+            idx = shell_inline_index(cmd_args)
+            if idx is not None and idx + 1 < len(cmd_args):
+                inline_code = cmd_args[idx + 1]
+            elif cmd_args in (["--version"], ["--help"]):
+                return (DECISION_UNKNOWN, "{} {}".format(name, cmd_args[0]))
+            elif idx is None:
+                # Here a shell's stdin is out of sight (`env bash <<EOF`
+                # reaches this layer without its heredoc), and a script
+                # file is never read.
+                return (DECISION_UNSAFE,
+                        "{} runs a script yolt cannot see".format(name))
+        elif inline_flag and inline_flag in cmd_args:
             idx = cmd_args.index(inline_flag)
             if idx + 1 < len(cmd_args):
                 inline_code = cmd_args[idx + 1]

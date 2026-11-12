@@ -29,6 +29,7 @@ from rule_classifier import (
     _expand_home,
     _is_unresolved_path,
     _write_target_note,
+    shell_inline_index,
     _path_matches_safe_write_targets,
     _path_matches_target_list,
     DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
@@ -57,7 +58,7 @@ _PYTHON_INTERPRETERS = {
     "python3.10", "python3.11", "python3.12", "python3.13",
 }
 
-_BASH_INTERPRETERS = {"bash", "sh"}
+_BASH_INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh"}
 
 _VAR_REF_RE = re.compile(
     r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
@@ -122,6 +123,9 @@ class GrammarClassifier:
         )
         self._parser = Parser(_BASH_LANG)
         self._vars = None
+        # Scripts a shell command reads on stdin from a heredoc, keyed by
+        # the command node's start byte: `(text, literal)`.
+        self._stdin_scripts = {}
 
     # --- Public API ---
 
@@ -316,6 +320,10 @@ class GrammarClassifier:
         heredoc_node = self._first_child(node, "heredoc_redirect")
         if cmd_node is not None and heredoc_node is not None:
             argv = self._argv_from_command(cmd_node, src)
+            if argv and os.path.basename(argv[0]) in _BASH_INTERPRETERS:
+                script = self._heredoc_script(heredoc_node, src)
+                if script is not None:
+                    self._stdin_scripts[cmd_node.start_byte] = script
             if argv and os.path.basename(argv[0]) in _PYTHON_INTERPRETERS:
                 body = self._heredoc_body(heredoc_node, src)
                 if body is not None:
@@ -340,12 +348,15 @@ class GrammarClassifier:
         cmd_name = os.path.basename(argv[0])
 
         # bash -c '<script>' / sh -c '<script>': re-parse the body.
-        if cmd_name in _BASH_INTERPRETERS and "-c" in argv[1:]:
-            try:
-                idx = argv.index("-c", 1)
-            except ValueError:
-                idx = -1
-            if idx >= 0 and idx + 1 < len(argv):
+        # `-c` may sit in a cluster (`bash -lc '...'`); the script is the
+        # next argument either way.
+        c_flag = None
+        if cmd_name in _BASH_INTERPRETERS:
+            idx = shell_inline_index(argv[1:])
+            c_flag = idx + 1 if idx is not None else None
+        if c_flag is not None:
+            idx = c_flag
+            if idx + 1 < len(argv):
                 inline = argv[idx + 1]
                 d, r = self.classify(inline, _depth=_depth + 1)
                 return (d, "{} -c -> {}".format(cmd_name, r))
@@ -356,6 +367,21 @@ class GrammarClassifier:
         sub_decisions = []
         for c in node.children:
             self._collect_substitutions(c, src, sub_decisions, _depth + 1)
+
+        if cmd_name in _BASH_INTERPRETERS:
+            return aggregate_decisions(
+                sub_decisions + [self._classify_shell(node, argv, src, _depth)])
+
+        # Sourcing a shell profile yolt protects from writes runs nothing
+        # an agent could have put there, and the login shell runs it anyway.
+        # Only while nothing on the line can point HOME elsewhere.
+        if cmd_name in ("source", ".") and self._vars is not None \
+                and not self._spelled("HOME") and not self._vars["rebinds"] \
+                and self._sources_protected_profile(node, src):
+            return aggregate_decisions(sub_decisions + [
+                (DECISION_UNKNOWN,
+                 "{}: a shell profile yolt protects from writes".format(
+                     cmd_name))])
 
         # A literal `cd` moves the directory the policy layer will judge,
         # and it has to be tracked before the sibling commands are
@@ -512,6 +538,19 @@ class GrammarClassifier:
         start = self._first_child(node, "heredoc_start")
         quoted = start is not None and any(
             ch in self._slice(start, src) for ch in "'\"\\")
+        # `cat <<EOF | sh`: the grammar nests the pipe inside the heredoc
+        # redirect, and the first command after it reads the body on stdin.
+        feeder = self._first_child(node.parent, "command") \
+            if node.parent is not None else None
+        script = self._heredoc_script(node, src)
+        if feeder is not None and script is not None:
+            argv = self._argv_from_command(feeder, src)
+            if argv and os.path.basename(argv[0]) == "cat" \
+                    and all(a == "-" or a.startswith("-") for a in argv[1:]):
+                pipe = self._first_child(node, "pipeline")
+                reader = self._first_command(pipe) if pipe is not None else None
+                if reader is not None:
+                    self._stdin_scripts[reader.start_byte] = script
         for c in node.children:
             if c.type == "file_redirect":
                 self._collect_substitutions(c, src, decisions, _depth + 1)
@@ -532,6 +571,107 @@ class GrammarClassifier:
                          "could not be parsed"))
             elif c.type not in ("heredoc_start", "heredoc_end"):
                 self._walk(c, src, decisions, _depth)
+
+    def _heredoc_script(self, node, src):
+        """A heredoc's body as a shell would read it, `(text, literal)`:
+        literal when the delimiter is quoted or the body has nothing the
+        shell expands. None when there is no body."""
+        start = self._first_child(node, "heredoc_start")
+        body = self._first_child(node, "heredoc_body")
+        if body is None:
+            return None
+        text = self._slice(body, src)
+        if any(c.type == "<<-" for c in node.children):
+            text = "\n".join(line.lstrip("\t") for line in text.split("\n"))
+        quoted = start is not None and any(
+            ch in self._slice(start, src) for ch in "'\"\\")
+        literal = quoted or not any(ch in text for ch in "$`\\")
+        return (text, literal)
+
+    def _sources_protected_profile(self, node, src):
+        """Whether `node` is `source FILE` / `. FILE` with FILE a literal
+        path that is itself on the unsafe write-target list, not a glob."""
+        argv = self._argv_from_command(node, src)
+        if len(argv) < 2 or os.path.basename(argv[0]) not in ("source", "."):
+            return False
+        path = argv[1]
+        for prefix in ("$HOME/", "${HOME}/"):
+            if path.startswith(prefix):
+                path = "~/" + path[len(prefix):]
+        if any(ch in path for ch in "$`*?[{\\") or not path.startswith(("/", "~/")):
+            return False
+        path = _expand_home(path)
+        return any(_expand_home(t) == path for t in self.unsafe_write_targets
+                   if not any(ch in t for ch in "*?[{"))
+
+    def _first_command(self, node):
+        """The leftmost command under `node`: the one a pipe feeds."""
+        n = node
+        while n is not None and n.type != "command":
+            n = next((c for c in n.children if c.type not in ("|", "|&")), None)
+        return n
+
+    def _classify_shell(self, node, argv, src, _depth):
+        """A shell run without `-c`: its script is a file yolt does not
+        read, stdin yolt cannot see, or a literal heredoc / herestring,
+        which is classified line by line like any other command."""
+        name = os.path.basename(argv[0])
+        # The argv walk keeps a herestring as a word; it is stdin, not a
+        # script argument.
+        args = [a for a in argv[1:] if not a.startswith("<<<")]
+        reads_stdin = noexec = False
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--":
+                i += 1
+                break
+            if a in ("--version", "--help") and len(args) == 1:
+                return (DECISION_UNKNOWN, "{} {}".format(name, a))
+            if a.startswith("--"):
+                i += 1
+                continue
+            if len(a) > 1 and a[0] in "-+":
+                reads_stdin = reads_stdin or "s" in a[1:]
+                noexec = noexec or "n" in a[1:]
+                i += 2 if ("o" in a[1:] or "O" in a[1:]) else 1
+                continue
+            break
+        if noexec:
+            return (DECISION_UNKNOWN, "{} -n: syntax check only".format(name))
+        if i < len(args) and not reads_stdin:
+            return (DECISION_UNSAFE,
+                    "{} runs script '{}', which yolt does not read".format(
+                        name, args[i]))
+        script = self._stdin_scripts.pop(node.start_byte, None)
+        if script is None:
+            script = self._herestring_script(node, src)
+        if script is None:
+            return (DECISION_UNSAFE,
+                    "{} reads its script from stdin, which yolt cannot "
+                    "see".format(name))
+        text, literal = script
+        if not literal:
+            return (DECISION_UNSAFE,
+                    "{} reads a script with expansions yolt cannot "
+                    "resolve".format(name))
+        d, r = self.classify(text, _depth=_depth + 1)
+        return (d, "{} <<script -> {}".format(name, r))
+
+    def _herestring_script(self, node, src):
+        """The literal text of a `<<<` herestring, `(text, literal)`."""
+        h = self._first_child(node, "herestring_redirect")
+        if h is None or not h.named_children:
+            return None
+        v = h.named_children[0]
+        text = self._slice(v, src)
+        if v.type == "raw_string":
+            return (text[1:-1], True)
+        if v.type == "string":
+            text = text[1:-1]
+        elif v.type != "word":
+            return (text, False)
+        return (text, not any(ch in text for ch in "$`\\"))
 
     @staticmethod
     def _count_nodes(node, node_type):
@@ -762,7 +902,10 @@ class GrammarClassifier:
         """`{"text": source, "opaque": bool, "nodes": {name: node}}` for
         `_resolve_vars`; `nodes` holds the single binding node per name."""
         text = src.decode("utf-8", "replace")
-        scope = {"text": text, "opaque": False, "nodes": {}, "memo": {}}
+        # `rebinds`: something other than sourcing a protected shell profile
+        # may bind a name out of sight.
+        scope = {"text": text, "opaque": False, "rebinds": False,
+                 "nodes": {}, "memo": {}}
         stack = [root]
         while stack:
             n = stack.pop()
@@ -770,19 +913,21 @@ class GrammarClassifier:
             if n.type == "command":
                 if self._may_bind_unseen(n, src):
                     scope["opaque"] = True
+                    if not self._sources_protected_profile(n, src):
+                        scope["rebinds"] = True
             elif n.type == "unset_command":
                 if any(c.type != "word" or not _PLAIN_WORD_RE.match(self._slice(c, src))
                        for c in n.children[1:]):
-                    scope["opaque"] = True
+                    scope["opaque"] = scope["rebinds"] = True
             elif n.type == "declaration_command":
                 for c in n.children[1:]:
                     if c.type == "variable_assignment":
                         first = c.children[0] if c.children else None
                         if first is None or first.type != "variable_name":
-                            scope["opaque"] = True
+                            scope["opaque"] = scope["rebinds"] = True
                     elif c.type not in ("variable_name", "word") or not \
                             _PLAIN_WORD_RE.match(self._slice(c, src)):
-                        scope["opaque"] = True
+                        scope["opaque"] = scope["rebinds"] = True
             elif n.type == "variable_assignment" and self._is_top_level_assignment(n):
                 first = n.children[0] if n.children else None
                 if first is not None and first.type == "variable_name" \
