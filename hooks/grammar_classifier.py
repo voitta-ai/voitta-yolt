@@ -132,8 +132,11 @@ class GrammarClassifier:
         tree = self._parser.parse(src)
         root = tree.root_node
 
+        # Bash runs what the grammar cannot parse -- an unterminated
+        # heredoc only warns, and a line the grammar rejects may be one bash
+        # accepts. Unknown would be silence in the hook, so it asks.
         if root.has_error:
-            return (DECISION_UNKNOWN, "tree-sitter parse error")
+            return (DECISION_UNSAFE, "tree-sitter parse error")
 
         if _depth == 0:
             self._cwd = self.cwd
