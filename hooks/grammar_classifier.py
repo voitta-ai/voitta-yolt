@@ -208,6 +208,16 @@ class GrammarClassifier:
             self._walk(c, src, decisions, _depth)
 
     def _walk_redirected(self, node, src, decisions, _depth):
+        # What the redirects themselves run: a substitution in a target
+        # (`> $(cmd)`, `< $(cmd)`, `2> >(cmd)`), a substitution in an
+        # unquoted heredoc body, and a command chained after the heredoc
+        # start (`cat <<EOF | sh`), which the grammar nests inside the
+        # heredoc redirect.
+        for c in node.children:
+            if c.type == "file_redirect":
+                self._collect_substitutions(c, src, decisions, _depth + 1)
+            elif c.type == "heredoc_redirect":
+                self._walk_heredoc_redirect(c, src, decisions, _depth)
         write_targets = []
         unresolved_target = None
         for c in self._file_redirects(node):
@@ -433,6 +443,42 @@ class GrammarClassifier:
             if reason is not None:
                 return reason
         return None
+
+    def _walk_heredoc_redirect(self, node, src, decisions, _depth):
+        """Classify what a heredoc redirect runs besides its target, which
+        `_walk_redirected` judges with the other write targets."""
+        start = self._first_child(node, "heredoc_start")
+        quoted = start is not None and any(
+            ch in self._slice(start, src) for ch in "'\"\\")
+        for c in node.children:
+            if c.type == "file_redirect":
+                self._collect_substitutions(c, src, decisions, _depth + 1)
+            elif c.type == "heredoc_body":
+                if quoted:
+                    continue
+                subs = []
+                self._collect_substitutions(c, src, subs, _depth + 1)
+                decisions.extend(subs)
+                # The grammar does not parse every substitution in a body
+                # (backticks, `<<-` bodies), and the shell runs them all.
+                body = self._slice(c, src)
+                parsed = self._count_nodes(c, "command_substitution")
+                if "`" in body or body.count("$(") > parsed:
+                    decisions.append(
+                        (DECISION_UNSAFE,
+                         "heredoc body runs a command substitution that "
+                         "could not be parsed"))
+            elif c.type not in ("heredoc_start", "heredoc_end"):
+                self._walk(c, src, decisions, _depth)
+
+    @staticmethod
+    def _count_nodes(node, node_type):
+        count, stack = 0, [node]
+        while stack:
+            n = stack.pop()
+            count += n.type == node_type
+            stack.extend(n.children)
+        return count
 
     def _collect_substitutions(self, node, src, decisions, _depth):
         if node.type in ("command_substitution", "process_substitution"):
