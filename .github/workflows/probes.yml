@@ -1,0 +1,41 @@
+name: probes
+
+# Replays tests/fixtures/probes.jsonl through this build and through the
+# latest release tag. Fails when a verdict is below its floor or weaker
+# than the previous release's. A deliberate loosening needs the
+# `verdict-loosening` label, and the loosened commands belong in the PR
+# description (they become the release note).
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  probes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check out the previous release
+        run: |
+          tag=$(git describe --tags --abbrev=0 --match 'v*' origin/master)
+          echo "Previous release: $tag"
+          git worktree add -q "$RUNNER_TEMP/base" "$tag"
+
+      - name: Replay probes
+        env:
+          ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'verdict-loosening') && '--allow-loosening' || '' }}
+        run: python scripts/probe_replay.py --head . --base "$RUNNER_TEMP/base" $ALLOW
