@@ -296,3 +296,5 @@
 {"cmd": "cat <<EOF && git push origin master\nx\nEOF", "min": "deny", "note": "cwd=<repo> on default branch master; push chained after a heredoc start"}
 {"cmd": "cat <<'EOF'\n$(rm -rf /tmp/a)\nEOF", "min": "unknown", "note": "quoted heredoc body is literal; nothing runs"}
 {"cmd": "HOME=/etc; cp a $HOME/hosts", "min": "unsafe", "note": "argv through a rebound HOME (fixed in 2.13.0)"}
+{"cmd": "cat > ~/.bashrc <<EOT", "min": "unsafe", "note": "unterminated heredoc: bash warns and still writes"}
+{"cmd": "cat <<EOF; git push --force origin master\nx\nEOF", "min": "unsafe", "note": "valid bash the grammar cannot parse; the push is invisible to the walker"}
