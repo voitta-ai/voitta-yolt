@@ -28,10 +28,13 @@ from tree_sitter import Language, Parser
 from rule_classifier import (
     _expand_home,
     _is_unresolved_path,
+    _write_target_note,
     _path_matches_safe_write_targets,
     _path_matches_target_list,
     DECISION_SAFE, DECISION_UNSAFE, DECISION_UNKNOWN, DECISION_DENY,
+    CWD_UNRESOLVED,
     SUBSTITUTION_PLACEHOLDER,
+    WRITE_CWDS,
     RuleClassifier,
     aggregate_decisions,
     load_shell_rules,
@@ -138,8 +141,11 @@ class GrammarClassifier:
         if root.has_error:
             return (DECISION_UNSAFE, "tree-sitter parse error")
 
+        cwds_token = None
         if _depth == 0:
             self._cwd = self.cwd
+            cwds_token = WRITE_CWDS.set(
+                (os.path.abspath(self.cwd),) if self.cwd else None)
 
         # Each parse has its own variables: a `bash -c` body cannot see
         # the outer line's assignments, and must not replace them.
@@ -150,6 +156,8 @@ class GrammarClassifier:
             self._walk(root, src, decisions, _depth)
         finally:
             self._vars = outer_vars
+            if cwds_token is not None:
+                WRITE_CWDS.reset(cwds_token)
         if not decisions:
             return (DECISION_SAFE, "no commands")
         return aggregate_decisions(decisions)
@@ -221,6 +229,12 @@ class GrammarClassifier:
                 self._collect_substitutions(c, src, decisions, _depth + 1)
             elif c.type == "heredoc_redirect":
                 self._walk_heredoc_redirect(c, src, decisions, _depth)
+        # The grammar hangs a trailing redirect on a whole `&&` list
+        # (`cd /etc && echo hi > hosts`), so the target is judged before the
+        # walk reaches the `cd`s in front of it. Directories only accumulate,
+        # so taking them in now is safe for every shape.
+        for cd in self._cd_commands(node):
+            self._track_write_cwds(self._argv_from_command(cd, src))
         write_targets = []
         unresolved_target = None
         for c in self._file_redirects(node):
@@ -262,8 +276,10 @@ class GrammarClassifier:
         if unsafe_target is not None:
             decisions.append(
                 (DECISION_UNSAFE,
-                 "writes to protected path '{}' via redirection".format(
-                     unsafe_target)),
+                 ("writes to protected path '{}' via redirection"
+                  if _write_target_note(unsafe_target) == "protected path"
+                  else "writes to a path that cannot be resolved statically "
+                  "'{}' via redirection").format(unsafe_target)),
             )
             # Symmetric with the unknown branch below: record and continue.
             # Returning here masked the command's own reason --
@@ -354,6 +370,48 @@ class GrammarClassifier:
             return aggregate_decisions(sub_decisions + [result])
         return result
 
+    def _cd_commands(self, node):
+        """Every `cd` command in a redirected statement's body."""
+        out, stack = [], [c for c in node.children
+                          if c.type not in ("file_redirect", "heredoc_redirect")]
+        while stack:
+            n = stack.pop()
+            if n.type == "command":
+                name = self._first_child(n, "command_name")
+                if name is not None and name.text == b"cd":
+                    out.append(n)
+            stack.extend(n.children)
+        return out
+
+    def _track_write_cwds(self, argv):
+        """Add the directory a `cd` may move to to WRITE_CWDS, the set a
+        relative write target is judged against. Every directory the line
+        may be in is kept, not only the last: the walk is in source order,
+        but a `cd` in a subshell, a branch or a failed `cd` leaves the
+        shell where it was. One the walker cannot resolve makes every
+        later relative target unresolved."""
+        cwds = WRITE_CWDS.get()
+        if cwds is None or cwds == CWD_UNRESOLVED:
+            return
+        args = [a for a in argv[1:] if a != "--"]
+        args = [a for a in args if not (a.startswith("-") and a != "-")]
+        target = args[0] if args else "~"
+        if target == "~" or target.startswith("~/"):
+            home = os.environ.get("HOME")
+            if not home or self._vars is None or not self._env_var_ok("HOME"):
+                WRITE_CWDS.set(CWD_UNRESOLVED)
+                return
+            target = home + target[1:]
+        if target == "-" or target.startswith("~") or any(
+                ch in target for ch in "$`*{}?[") \
+                or SUBSTITUTION_PLACEHOLDER in target:
+            WRITE_CWDS.set(CWD_UNRESOLVED)
+            return
+        added = [os.path.normpath(os.path.join(c, target)) for c in cwds]
+        merged = tuple(dict.fromkeys(cwds + tuple(added)))
+        WRITE_CWDS.set(merged if len(merged) <= _MAX_VAR_VALUES
+                       else CWD_UNRESOLVED)
+
     def _track_cd(self, argv):
         """Follow a literal `cd` so the policy layer judges the directory
         the later commands actually run in.
@@ -368,6 +426,7 @@ class GrammarClassifier:
         # It has to be tested BEFORE flags are filtered out, or it is
         # discarded as a flag and `cd -` silently resolves to $HOME -- which
         # is both wrong and the opposite of unresolvable.
+        self._track_write_cwds(argv)
         raw = argv[1:]
         if "-" in raw:
             self._cwd = None

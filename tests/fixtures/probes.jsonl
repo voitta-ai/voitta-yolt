@@ -298,3 +298,12 @@
 {"cmd": "HOME=/etc; cp a $HOME/hosts", "min": "unsafe", "note": "argv through a rebound HOME (fixed in 2.13.0)"}
 {"cmd": "cat > ~/.bashrc <<EOT", "min": "unsafe", "note": "unterminated heredoc: bash warns and still writes"}
 {"cmd": "cat <<EOF; git push --force origin master\nx\nEOF", "min": "unsafe", "note": "valid bash the grammar cannot parse; the push is invisible to the walker"}
+{"cmd": "cd /etc; echo hi > hosts", "min": "unsafe", "note": "relative target after cd lands on /etc/hosts"}
+{"cmd": "cd /etc && cp a hosts", "min": "unsafe", "note": "relative cp target after cd"}
+{"cmd": "cd /etc && echo hi > hosts", "min": "unsafe", "note": "the grammar hangs the redirect on the whole && list"}
+{"cmd": "X=a; cd /etc; echo hi > $X", "min": "unsafe", "note": "variable relative target after cd"}
+{"cmd": "X=.bashrc; cd; echo hi > $X", "min": "unsafe", "note": "bare cd goes to HOME"}
+{"cmd": "HOME=/tmp; cd; echo hi > .bashrc", "min": "unsafe", "note": "bare cd through a rebound HOME is unresolved"}
+{"cmd": "cd $X; echo hi > out.txt", "min": "unsafe", "note": "cd the walker cannot resolve makes a relative target unresolved"}
+{"cmd": "cd /tmp && cd - && echo hi > x", "min": "unsafe", "note": "cd - is the previous directory, unknowable"}
+{"cmd": "cd /tmp && echo hi > out.txt", "min": "unknown", "note": "relative target under a harmless directory"}
