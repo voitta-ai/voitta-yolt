@@ -1286,6 +1286,15 @@ recursion depth on nested decomposition are `unsafe`, not `unknown`:
 bash still runs what the grammar cannot read (an unterminated heredoc only
 warns), so a line YOLT cannot parse asks.
 
+A shell run without `-c` (`bash`, `sh`, `zsh`, `dash`, `ksh`) is judged by
+the script it runs. A literal heredoc or herestring (`bash <<'EOF'`,
+`cat <<'EOF' | sh`, `bash <<<'...'`) is classified line by line like any
+other command. A script YOLT cannot see asks: a script file, stdin from
+anything else (`curl ... | sh`), or a heredoc with expansions. So does
+`source` / `.` of a file, except a shell profile that is itself on
+`unsafe_write_targets` (`~/.bash_profile`, `~/.zshrc`, ...) while nothing on
+the line can point HOME elsewhere.
+
 Schema validation runs at hook load time
 (`hooks/rule_classifier.py:validate_shell_rules`) on both the
 bundled rules and any user override, so a typo in a policy field
