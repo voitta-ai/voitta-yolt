@@ -1271,8 +1271,6 @@ Every analysis surface follows the same fallback: if YOLT cannot
 prove a command is safe, it does not say so. Categories that hit
 this path:
 
-- tree-sitter parse error (`tree-sitter parse error`);
-- max recursion depth on nested decomposition;
 - unknown command name;
 - partially-modeled CLI namespace with a verb outside the policy;
 - write redirect to a path on neither `unsafe_write_targets` (which
@@ -1282,6 +1280,11 @@ this path:
 - `rules/shell.json` failing schema validation — the hook logs
   `rules-validation-error` and exits silently so Claude Code's
   default prompt fires.
+
+A tree-sitter parse error (`tree-sitter parse error`) and the max
+recursion depth on nested decomposition are `unsafe`, not `unknown`:
+bash still runs what the grammar cannot read (an unterminated heredoc only
+warns), so a line YOLT cannot parse asks.
 
 Schema validation runs at hook load time
 (`hooks/rule_classifier.py:validate_shell_rules`) on both the
